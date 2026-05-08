@@ -1,0 +1,1 @@
+ALTER TABLE public.reply_templates ADD COLUMN IF NOT EXISTS auto_send boolean NOT NULL DEFAULT false;

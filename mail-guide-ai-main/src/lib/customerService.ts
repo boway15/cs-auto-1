@@ -1,0 +1,94 @@
+// 客服域：业务意图（7 类）、关联状态、SLA 桶 的展示与计算工具
+// 与后端 emails.business_intent / association_status / received_at 的口径保持一致
+
+export type BusinessIntent =
+  | "order_cancel"
+  | "address_change"
+  | "damaged"
+  | "defect"
+  | "description_mismatch"
+  | "logistics"
+  | "other";
+
+export const BUSINESS_INTENT_OPTIONS: ReadonlyArray<{ value: BusinessIntent; label: string }> = [
+  { value: "order_cancel", label: "订单取消" },
+  { value: "address_change", label: "订单改地址" },
+  { value: "damaged", label: "破损" },
+  { value: "defect", label: "产品缺陷" },
+  { value: "description_mismatch", label: "商品描述不符" },
+  { value: "logistics", label: "物流问题" },
+  { value: "other", label: "其他问题" },
+];
+
+const BUSINESS_INTENT_LABEL_MAP: Record<string, string> = Object.fromEntries(
+  BUSINESS_INTENT_OPTIONS.map((o) => [o.value, o.label]),
+);
+
+export function businessIntentLabel(value: string | null | undefined): string {
+  if (!value) return "—";
+  return BUSINESS_INTENT_LABEL_MAP[value] ?? value;
+}
+
+export type AssociationStatus =
+  | "unlinked"
+  | "not_provided"
+  | "not_found"
+  | "compensating"
+  | "recommended"
+  | "linked";
+
+export const ASSOCIATION_FILTER_OPTIONS: ReadonlyArray<{ value: AssociationStatus | "all"; label: string }> = [
+  { value: "all", label: "全部关联" },
+  { value: "linked", label: "已关联" },
+  { value: "not_found", label: "未找到" },
+  { value: "not_provided", label: "未提供" },
+  { value: "compensating", label: "补偿中" },
+];
+
+const ASSOCIATION_LABEL_MAP: Record<string, string> = {
+  linked: "已关联",
+  not_provided: "未提供",
+  not_found: "未找到",
+  compensating: "补偿中",
+  recommended: "推荐",
+  unlinked: "未关联",
+};
+
+export function associationStatusLabel(value: string | null | undefined): string {
+  if (!value) return "—";
+  return ASSOCIATION_LABEL_MAP[value] ?? value;
+}
+
+export type SlaBucket = "within_24h" | "within_48h" | "within_72h" | "over_72h";
+
+export const SLA_BUCKET_LABEL: Record<SlaBucket, string> = {
+  within_24h: "24小时内",
+  within_48h: "48小时内",
+  within_72h: "72小时内",
+  over_72h: "72小时+",
+};
+
+/** 客户端按 received_at 与当前时间动态计算 SLA 桶。仅对 pending/processing 有意义。 */
+export function computeSlaBucket(receivedAt: string | null | undefined): SlaBucket | null {
+  if (!receivedAt) return null;
+  const ms = Date.now() - new Date(receivedAt).getTime();
+  if (!Number.isFinite(ms)) return null;
+  const hour = ms / 3_600_000;
+  if (hour < 24) return "within_24h";
+  if (hour < 48) return "within_48h";
+  if (hour < 72) return "within_72h";
+  return "over_72h";
+}
+
+export function slaBucketBadgeClass(bucket: SlaBucket): string {
+  switch (bucket) {
+    case "within_24h":
+      return "bg-success/15 text-success border-success/30";
+    case "within_48h":
+      return "bg-primary/15 text-primary border-primary/30";
+    case "within_72h":
+      return "bg-warning/15 text-warning border-warning/30";
+    case "over_72h":
+      return "bg-destructive/15 text-destructive border-destructive/30";
+  }
+}

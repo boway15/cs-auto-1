@@ -1,0 +1,7 @@
+version: "3"
+agent:
+  authtoken: 3DO13AEhaXGjHPqeKmCQYzAilTf_4NcaW735YXPs1JJyUGxEi
+tunnels:
+  dify-api:
+    proto: http
+    addr: 8090

@@ -1,0 +1,1 @@
+ALTER TABLE public.mailboxes ADD COLUMN IF NOT EXISTS last_error text;

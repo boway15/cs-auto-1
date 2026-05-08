@@ -1,0 +1,457 @@
+app:
+  description: 跨境电商客服邮件智能分析工作流。提取意图、订单号、情绪、风险等级等关键信息。
+  icon: "\U0001F4EC"
+  icon_background: '#E0F2FE'
+  icon_type: emoji
+  mode: workflow
+  name: 独立站智能客服-邮件智能分析
+  use_icon_as_answer_icon: false
+dependencies:
+  - current_identifier: null
+    type: marketplace
+    value:
+      marketplace_plugin_unique_identifier: langgenius/deepseek:0.0.15@725407927b04e236212083d20e92830d60fa944e42cd357ef6902c160414f6f1
+      version: null
+kind: app
+version: 0.6.0
+workflow:
+  conversation_variables: []
+  environment_variables: []
+  features:
+    file_upload:
+      allowed_file_extensions:
+      - .JPG
+      - .JPEG
+      - .PNG
+      - .GIF
+      - .WEBP
+      - .SVG
+      allowed_file_types:
+      - image
+      allowed_file_upload_methods:
+      - local_file
+      - remote_url
+      enabled: false
+      fileUploadConfig:
+        attachment_image_file_size_limit: 2
+        audio_file_size_limit: 50
+        batch_count_limit: 5
+        file_size_limit: 15
+        file_upload_limit: 20
+        image_file_batch_limit: 10
+        image_file_size_limit: 10
+        single_chunk_attachment_limit: 10
+        video_file_size_limit: 100
+        workflow_file_upload_limit: 10
+      image:
+        enabled: false
+        number_limits: 3
+        transfer_methods:
+        - local_file
+        - remote_url
+      number_limits: 3
+    opening_statement: ''
+    retriever_resource:
+      enabled: true
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  graph:
+    edges:
+      - data:
+          isInIteration: false
+          isInLoop: false
+          sourceType: start
+          targetType: llm
+        id: edge_start_to_llm
+        source: start
+        sourceHandle: source
+        target: llm_analyze
+        targetHandle: target
+        type: custom
+        zIndex: 0
+      - data:
+          isInIteration: false
+          isInLoop: false
+          sourceType: llm
+          targetType: code
+        id: edge_llm_to_code
+        source: llm_analyze
+        sourceHandle: source
+        target: code_parse
+        targetHandle: target
+        type: custom
+        zIndex: 0
+      - data:
+          isInIteration: false
+          isInLoop: false
+          sourceType: code
+          targetType: end
+        id: edge_code_to_end
+        source: code_parse
+        sourceHandle: source
+        target: end
+        targetHandle: target
+        type: custom
+        zIndex: 0
+    nodes:
+      - data:
+          desc: ''
+          selected: false
+          title: 开始
+          type: start
+          variables:
+            - label: 邮件主题
+              max_length: 1000
+              options: []
+              required: true
+              type: text-input
+              variable: subject
+            - label: 邮件正文
+              max_length: 50000
+              options: []
+              required: true
+              type: paragraph
+              variable: body_text
+            - label: 发件人邮箱
+              max_length: 500
+              options: []
+              required: true
+              type: text-input
+              variable: from_email
+            - label: 附件信息
+              max_length: 5000
+              options: []
+              required: false
+              type: text-input
+              variable: attachments
+        height: 158
+        id: start
+        position:
+          x: 80
+          y: 260
+        positionAbsolute:
+          x: 80
+          y: 260
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+      - data:
+          desc: 使用 LLM 分析邮件意图、情绪、风险等级等信息
+          title: AI 邮件分析
+          type: llm
+          model:
+            completion_params:
+              temperature: 0.2
+            mode: chat
+            name: deepseek-v4-flash
+            provider: langgenius/deepseek/deepseek
+          prompt_template:
+            - role: system
+              text: |
+                You are an email analysis assistant for a cross-border e-commerce customer service system. Analyze the customer email and return a JSON object.
+
+                ## Output Format
+                Return ONLY a valid JSON object with NO markdown formatting, NO code blocks. Example:
+                {"intent":"after_sale","business_intent":"damaged","category":"售后","order_no":"SO20240315001","is_info_complete":false,"missing_elements":["order_no"],"summary":"客户反馈收到的商品有破损，要求退款","priority":"high","risk_level":"normal","sentiment":"frustrated","language":"zh","entities":{"order_no":null,"product_name":"Wireless Mouse"}}
+
+                ## Fields
+                - intent: legacy field. one of "after_sale" (售后), "refund" (退款), "cancel_order" (取消), "change_address" (改地址), "shipping_query" (物流), "general" (其他)
+                - business_intent: REQUIRED, exactly one of:
+                    "order_cancel"          (订单取消)
+                    "address_change"        (订单改地址)
+                    "damaged"               (破损 - 收到商品破损/毁坏)
+                    "defect"                (产品缺陷 - 功能性问题/不工作/瑕疵)
+                    "description_mismatch"  (商品描述不符 - 与详情页/图片不一致)
+                    "logistics"             (物流问题 - 发货/快递/丢件/未到)
+                    "other"                 (其他问题 - 含一般咨询、退款、模糊不清等)
+                - category: "售后" for after_sale/refund/cancel_order/change_address/damaged/defect/description_mismatch, "咨询" for shipping_query/logistics/general/other
+                - order_no: extract order number if present (patterns like SO20240315001, ORD-12345, 6+ digit numbers), null if not found
+                - is_info_complete: true if email has enough info to proceed, false if missing order_no/images/product details
+                - missing_elements: array of what's missing. Values: "order_no" (after-sale without order number), "image" (quality issue without images), "product" (unclear which product). Empty array if complete.
+                - summary: concise Chinese summary of the customer's issue, max 200 characters
+                - priority: "urgent" (angry / cancel / address change), "high" (after-sale / refund), "normal" (shipping query / general), "low" (just inquiry)
+                - risk_level: "high" if customer wants to cancel order or change address, otherwise "normal"
+                - sentiment: customer emotion - "angry", "frustrated", "neutral", "happy"
+                - language: "en" (English), "zh" (Chinese), "other" (other languages)
+                - entities: object with extracted entities. Include order_no (string or null), product_name (string or null), amount (string or null)
+
+                ## Rules
+                1. If customer asks to cancel an order → intent: "cancel_order", business_intent: "order_cancel", risk_level: "high"
+                2. If customer asks to change shipping address → intent: "change_address", business_intent: "address_change", risk_level: "high"
+                3. If customer reports damage/broken/crushed item → business_intent: "damaged"; add "image" to missing_elements (even if they didn't attach one, they should)
+                4. If customer reports product not working / defective / quality issue (non-physical damage) → business_intent: "defect"
+                5. If customer says product does not match description / wrong color / wrong size / "not as described" → business_intent: "description_mismatch"
+                6. Shipping/tracking/delivery/late package questions → intent: "shipping_query", business_intent: "logistics"
+                7. For after-sale issues without any order number → add "order_no" to missing_elements
+                8. If email is very brief, unclear, just says "hello", or none of above categories fit → business_intent: "other"
+                9. Chinese customers using Chinese → set language to "zh", write summary in Chinese; English customers → "en"
+                10. business_intent must be exactly one value from the list above (single-select).
+            - role: user
+              text: |
+                Subject: {{#start.subject#}}
+                From: {{#start.from_email#}}
+                Body:
+                {{#start.body_text#}}
+
+                Attachments: {{#start.attachments#}}
+          vision:
+            enabled: false
+            configs:
+              variable_selector: []
+          memory:
+            enabled: false
+            window:
+              enabled: false
+              size: 50
+          context:
+            enabled: false
+            variable_selector: []
+          structured_output:
+            enabled: false
+          retry_config:
+            enabled: false
+            max_retries: 1
+            retry_interval: 1000
+            exponential_backoff:
+              enabled: false
+              multiplier: 2
+              max_interval: 10000
+          variables: []
+        height: 90
+        id: llm_analyze
+        position:
+          x: 420
+          y: 260
+        positionAbsolute:
+          x: 420
+          y: 260
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+      - data:
+          code: |
+            def main(llm_output: str) -> dict:
+                import json
+                try:
+                    result = json.loads(llm_output)
+                except (json.JSONDecodeError, TypeError):
+                    # Try to extract JSON from markdown code block
+                    import re
+                    match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', llm_output)
+                    if match:
+                        try:
+                            result = json.loads(match.group(1))
+                        except:
+                            result = {}
+                    else:
+                        # Try to find {...} pattern
+                        match = re.search(r'\{[\s\S]*\}', llm_output)
+                        if match:
+                            try:
+                                result = json.loads(match.group(1))
+                            except:
+                                result = {}
+                        else:
+                            result = {}
+
+                # Default values for missing fields
+                defaults = {
+                    "intent": "general",
+                    "business_intent": "other",
+                    "category": "咨询",
+                    "order_no": None,
+                    "is_info_complete": False,
+                    "missing_elements": [],
+                    "summary": "AI 分析失败，请人工处理",
+                    "priority": "normal",
+                    "risk_level": "normal",
+                    "sentiment": "neutral",
+                    "language": "en",
+                    "entities": {}
+                }
+                for k, v in defaults.items():
+                    if k not in result or result[k] is None:
+                        result[k] = v
+
+                # Validate intent
+                valid_intents = ["after_sale", "refund", "cancel_order", "change_address", "shipping_query", "general"]
+                if result["intent"] not in valid_intents:
+                    result["intent"] = "general"
+
+                # Validate business_intent (7 categories, single-select)
+                valid_business_intents = [
+                    "order_cancel", "address_change", "damaged", "defect",
+                    "description_mismatch", "logistics", "other",
+                ]
+                if result["business_intent"] not in valid_business_intents:
+                    # Heuristic fallback from intent
+                    fallback = {
+                        "cancel_order": "order_cancel",
+                        "change_address": "address_change",
+                        "shipping_query": "logistics",
+                    }.get(result["intent"], "other")
+                    result["business_intent"] = fallback
+
+                # Validate priority
+                valid_priorities = ["low", "normal", "high", "urgent"]
+                if result["priority"] not in valid_priorities:
+                    result["priority"] = "normal"
+
+                return result
+          code_language: python3
+          desc: 解析 LLM 返回的 JSON，补充默认值，确保结构完整
+          outputs:
+            intent:
+              children: null
+              type: string
+            business_intent:
+              children: null
+              type: string
+            category:
+              children: null
+              type: string
+            order_no:
+              children: null
+              type: string
+            is_info_complete:
+              children: null
+              type: boolean
+            missing_elements:
+              children: null
+              type: array
+            summary:
+              children: null
+              type: string
+            priority:
+              children: null
+              type: string
+            risk_level:
+              children: null
+              type: string
+            sentiment:
+              children: null
+              type: string
+            language:
+              children: null
+              type: string
+            entities:
+              children: null
+              type: object
+          selected: false
+          title: 解析与校验
+          type: code
+          variables:
+            - value_selector:
+                - llm_analyze
+                - text
+              variable: llm_output
+        height: 90
+        id: code_parse
+        position:
+          x: 760
+          y: 260
+        positionAbsolute:
+          x: 760
+          y: 260
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+      - data:
+          desc: ''
+          outputs:
+            - value_selector:
+                - code_parse
+                - intent
+              value_type: string
+              variable: intent
+            - value_selector:
+                - code_parse
+                - business_intent
+              value_type: string
+              variable: business_intent
+            - value_selector:
+                - code_parse
+                - category
+              value_type: string
+              variable: category
+            - value_selector:
+                - code_parse
+                - order_no
+              value_type: string
+              variable: order_no
+            - value_selector:
+                - code_parse
+                - is_info_complete
+              value_type: boolean
+              variable: is_info_complete
+            - value_selector:
+                - code_parse
+                - missing_elements
+              value_type: array
+              variable: missing_elements
+            - value_selector:
+                - code_parse
+                - summary
+              value_type: string
+              variable: summary
+            - value_selector:
+                - code_parse
+                - priority
+              value_type: string
+              variable: priority
+            - value_selector:
+                - code_parse
+                - risk_level
+              value_type: string
+              variable: risk_level
+            - value_selector:
+                - code_parse
+                - sentiment
+              value_type: string
+              variable: sentiment
+            - value_selector:
+                - code_parse
+                - language
+              value_type: string
+              variable: language
+            - value_selector:
+                - code_parse
+                - entities
+              value_type: object
+              variable: entities
+          selected: false
+          title: 结束
+          type: end
+        height: 130
+        id: end
+        position:
+          x: 1100
+          y: 260
+        positionAbsolute:
+          x: 1100
+          y: 260
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+    viewport:
+      x: 0
+      y: 0
+      zoom: 1.0
+  rag_pipeline_variables: []

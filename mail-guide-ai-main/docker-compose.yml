@@ -1,0 +1,14 @@
+services:
+  mail-guide-ai:
+    build:
+      context: .
+      args:
+        # 从当前 .env 文件读取 Supabase 配置
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+        VITE_SUPABASE_PUBLISHABLE_KEY: ${VITE_SUPABASE_PUBLISHABLE_KEY}
+        VITE_SUPABASE_PROJECT_ID: ${VITE_SUPABASE_PROJECT_ID}
+    image: mail-guide-ai:latest
+    container_name: mail-guide-ai
+    ports:
+      - "8080:80"
+    restart: unless-stopped

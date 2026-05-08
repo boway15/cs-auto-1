@@ -1,0 +1,83 @@
+services:
+  # ============================================================
+  # PostgreSQL 数据库
+  # ============================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: mail-guide-db
+    environment:
+      POSTGRES_DB: mail_guide
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # Supabase Auth (gotrue) —— 用户认证服务
+  # ============================================================
+  auth:
+    image: supabase/gotrue:v2.170.0
+    container_name: mail-guide-auth
+    ports:
+      - "9999:9999"
+    environment:
+      GOTRUE_JWT_SECRET: local-dev-jwt-secret-change-in-production
+      GOTRUE_DB_DRIVER: postgres
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/mail_guide?search_path=auth
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      GOTRUE_SITE_URL: http://localhost:8080
+      API_EXTERNAL_URL: http://localhost:8080/auth/v1
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_LOG_LEVEL: debug
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ============================================================
+  # PostgREST —— 把 PostgreSQL 变成 REST API
+  # 兼容 Supabase JS SDK 的 .from().select() 调用
+  # ============================================================
+  postgrest:
+    image: postgrest/postgrest:latest
+    container_name: mail-guide-postgrest
+    ports:
+      - "3000:3000"
+    environment:
+      PGRST_DB_URI: postgres://postgres:postgres@postgres:5432/mail_guide
+      PGRST_DB_SCHEMA: public
+      PGRST_DB_ANON_ROLE: postgres
+      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:3000
+      PGRST_JWT_SECRET: local-dev-jwt-secret-change-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ============================================================
+  # 前端应用（改用本地 API）
+  # ============================================================
+  mail-guide-ai:
+    build:
+      context: .
+      args:
+        VITE_SUPABASE_URL: http://localhost:8080
+        VITE_SUPABASE_PUBLISHABLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoicG9zdGdyZXMiLCJpc3MiOiJzdXBhYmFzZSIsImlhdCI6MTc3ODAzODE3NywiZXhwIjoxODA5NTc0MTc3fQ.5MjjjXHVwbfdzMCvXxcAd55OylWdW6x6dJtl8DjZJIE
+        VITE_SUPABASE_PROJECT_ID: local
+    image: mail-guide-ai:local
+    container_name: mail-guide-ai
+    ports:
+      - "8080:80"
+    depends_on:
+      postgrest:
+        condition: service_started
+
+volumes:
+  pgdata:

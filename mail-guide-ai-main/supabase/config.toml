@@ -1,0 +1,22 @@
+project_id = "elchuqvftkhszbkwgfjp"
+
+[functions.sync-mailbox]
+verify_jwt = false
+
+[functions.test-mailbox]
+verify_jwt = false
+
+[functions.shopify-test-connection]
+verify_jwt = false
+
+[functions.shopify-sync-orders]
+verify_jwt = false
+
+[functions.shopify-hold-fulfillment]
+verify_jwt = true
+
+[functions.dify-gateway]
+verify_jwt = false
+
+[functions.schedule-draft-generation]
+verify_jwt = false

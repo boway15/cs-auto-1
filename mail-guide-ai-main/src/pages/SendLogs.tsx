@@ -1,0 +1,306 @@
+import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabase";
+import { Card } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from "@/components/ui/table";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { RefreshCw, Search, Eye, CheckCircle2, XCircle, Download } from "lucide-react";
+import { formatDistanceToNow } from "date-fns";
+import { zhCN } from "date-fns/locale";
+import { toast } from "sonner";
+
+type Log = {
+  id: string;
+  created_at: string;
+  send_type: string;
+  status: string;
+  from_email: string | null;
+  to_email: string;
+  subject: string | null;
+  content: string | null;
+  send_no: string | null;
+  smtp_response: string | null;
+  error_message: string | null;
+  message_id: string | null;
+  order_id: string | null;
+  order_no?: string | null;
+};
+
+const sendTypeMap: Record<string, { label: string; cls: string }> = {
+  manual: { label: "手工回复", cls: "bg-primary/15 text-primary border-primary/30" },
+  ai_draft: { label: "AI 草稿", cls: "bg-accent text-accent-foreground border-border" },
+  auto_template: { label: "自动模板", cls: "bg-warning/15 text-warning border-warning/30" },
+};
+
+export default function SendLogs() {
+  const [logs, setLogs] = useState<Log[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "sent" | "failed">("all");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [fromFilter, setFromFilter] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [detail, setDetail] = useState<Log | null>(null);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from("email_send_logs")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(200);
+
+      if (error) throw error;
+
+      const orderIds = Array.from(new Set((data ?? []).map((log) => log.order_id).filter(Boolean)));
+      let orderNoById = new Map<string, string>();
+
+      if (orderIds.length > 0) {
+        const { data: orders, error: ordersError } = await supabase
+          .from("orders")
+          .select("id, order_no")
+          .in("id", orderIds);
+
+        if (ordersError) {
+          console.warn("Failed to load send log orders", ordersError);
+        } else {
+          orderNoById = new Map((orders ?? []).map((order) => [order.id, order.order_no]));
+        }
+      }
+
+      setLogs((data ?? []).map((log) => ({
+        ...log,
+        order_no: log.order_id ? orderNoById.get(log.order_id) ?? null : null,
+      })));
+    } catch (error) {
+      const message = typeof error === "object" && error && "message" in error
+        ? String(error.message)
+        : "请稍后重试";
+      console.error("Failed to load send logs", error);
+      toast.error(`发送日志加载失败：${message}`);
+      setLogs([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  const filtered = logs.filter((l) => {
+    if (statusFilter !== "all" && l.status !== statusFilter) return false;
+    if (typeFilter !== "all" && l.send_type !== typeFilter) return false;
+    if (fromFilter && l.from_email !== fromFilter) return false;
+    if (dateFrom && l.created_at < new Date(dateFrom).toISOString()) return false;
+    if (dateTo && l.created_at > new Date(`${dateTo}T23:59:59`).toISOString()) return false;
+    if (search) {
+      const s = search.toLowerCase();
+      return (
+        l.to_email?.toLowerCase().includes(s) ||
+        l.from_email?.toLowerCase().includes(s) ||
+        l.subject?.toLowerCase().includes(s) ||
+        l.order_no?.toLowerCase().includes(s)
+      );
+    }
+    return true;
+  });
+
+  const total = logs.length;
+  const sentCount = logs.filter((l) => l.status === "sent").length;
+  const failedCount = logs.filter((l) => l.status === "failed").length;
+  const fromOptions = Array.from(new Set(logs.map((l) => l.from_email).filter(Boolean)));
+
+  function exportCsv() {
+    const header = ["时间", "发送编号", "类型", "状态", "发件人", "收件人", "订单号", "主题", "SMTP响应", "错误"];
+    const rows = filtered.map((l) => [
+      new Date(l.created_at).toLocaleString("zh-CN"),
+      l.send_no ?? l.id,
+      sendTypeMap[l.send_type]?.label ?? l.send_type,
+      l.status,
+      l.from_email ?? "",
+      l.to_email ?? "",
+      l.order_no ?? "",
+      l.subject ?? "",
+      l.smtp_response ?? "",
+      l.error_message ?? "",
+    ]);
+    const csv = [header, ...rows].map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `send-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <div className="h-screen flex flex-col p-6 overflow-hidden">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h1 className="text-xl font-semibold">发送日志</h1>
+          <p className="text-sm text-muted-foreground">本系统所有外发邮件记录</p>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={exportCsv}>
+            <Download className="w-4 h-4 mr-2" />导出 CSV
+          </Button>
+          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+            <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} />刷新
+          </Button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 mb-4">
+        <Card className="p-4">
+          <div className="text-xs text-muted-foreground">总发送</div>
+          <div className="text-2xl font-semibold mt-1">{total}</div>
+        </Card>
+        <Card className="p-4">
+          <div className="text-xs text-muted-foreground flex items-center gap-1">
+            <CheckCircle2 className="w-3 h-3 text-success" /> 成功
+          </div>
+          <div className="text-2xl font-semibold mt-1 text-success">{sentCount}</div>
+        </Card>
+        <Card className="p-4">
+          <div className="text-xs text-muted-foreground flex items-center gap-1">
+            <XCircle className="w-3 h-3 text-destructive" /> 失败
+          </div>
+          <div className="text-2xl font-semibold mt-1 text-destructive">{failedCount}</div>
+        </Card>
+      </div>
+
+      <div className="flex gap-2 mb-3">
+        <div className="relative flex-1 max-w-sm">
+          <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            placeholder="搜索发件人、收件人、主题、订单..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-7 h-8 text-sm"
+          />
+        </div>
+        {(["all", "sent", "failed"] as const).map((f) => (
+          <Button
+            key={f}
+            size="sm"
+            variant={statusFilter === f ? "default" : "outline"}
+            className="h-8 text-xs"
+            onClick={() => setStatusFilter(f)}
+          >
+            {f === "all" ? "全部" : f === "sent" ? "成功" : "失败"}
+          </Button>
+        ))}
+        <select className="h-8 rounded-md border bg-background px-2 text-xs" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+          <option value="all">全部类型</option>
+          {Object.entries(sendTypeMap).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+        </select>
+        <select className="h-8 rounded-md border bg-background px-2 text-xs" value={fromFilter} onChange={(e) => setFromFilter(e.target.value)}>
+          <option value="">全部发件邮箱</option>
+          {fromOptions.map((from) => <option key={from} value={from}>{from}</option>)}
+        </select>
+        <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="h-8 w-36 text-xs" />
+        <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="h-8 w-36 text-xs" />
+      </div>
+
+      <Card className="flex-1 overflow-hidden">
+        <ScrollArea className="h-full">
+          <Table>
+            <TableHeader className="sticky top-0 bg-background">
+              <TableRow>
+                <TableHead className="w-32">时间</TableHead>
+                <TableHead className="w-24">类型</TableHead>
+                <TableHead className="w-20">状态</TableHead>
+                <TableHead className="w-32">订单</TableHead>
+                <TableHead>发件人</TableHead>
+                <TableHead>收件人</TableHead>
+                <TableHead>主题</TableHead>
+                <TableHead className="w-20">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filtered.length === 0 ? (
+                <TableRow><TableCell colSpan={8} className="text-center text-muted-foreground py-8">暂无记录</TableCell></TableRow>
+              ) : filtered.map((l) => {
+                const t = sendTypeMap[l.send_type] ?? { label: l.send_type, cls: "" };
+                return (
+                  <TableRow key={l.id}>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {formatDistanceToNow(new Date(l.created_at), { addSuffix: true, locale: zhCN })}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="outline" className={`text-[10px] py-0 h-5 ${t.cls}`}>{t.label}</Badge>
+                    </TableCell>
+                    <TableCell>
+                      {l.status === "sent" ? (
+                        <Badge variant="outline" className="text-[10px] py-0 h-5 bg-success/15 text-success border-success/30">成功</Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-[10px] py-0 h-5 bg-destructive/15 text-destructive border-destructive/30">失败</Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-xs font-mono">{l.order_no ?? "—"}</TableCell>
+                    <TableCell className="text-sm truncate max-w-[200px]">{l.from_email || "—"}</TableCell>
+                    <TableCell className="text-sm truncate max-w-[200px]">{l.to_email}</TableCell>
+                    <TableCell className="text-sm truncate max-w-[300px]">{l.subject || "(无主题)"}</TableCell>
+                    <TableCell>
+                      <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setDetail(l)}>
+                        <Eye className="w-3.5 h-3.5" />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </ScrollArea>
+      </Card>
+
+      <Dialog open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>发送详情</DialogTitle>
+          </DialogHeader>
+          {detail && (
+            <div className="space-y-3 text-sm">
+              <div className="grid grid-cols-2 gap-3">
+                <div><span className="text-muted-foreground">发件人：</span>{detail.from_email || "—"}</div>
+                <div><span className="text-muted-foreground">收件人：</span>{detail.to_email}</div>
+                <div><span className="text-muted-foreground">类型：</span>{sendTypeMap[detail.send_type]?.label ?? detail.send_type}</div>
+                <div><span className="text-muted-foreground">状态：</span>{detail.status === "sent" ? "成功" : "失败"}</div>
+                <div className="col-span-2"><span className="text-muted-foreground">时间：</span>{new Date(detail.created_at).toLocaleString("zh-CN")}</div>
+                <div className="col-span-2"><span className="text-muted-foreground">Message-ID：</span><span className="font-mono text-xs">{detail.message_id || "—"}</span></div>
+                <div><span className="text-muted-foreground">发送编号：</span>{detail.send_no || "—"}</div>
+                <div><span className="text-muted-foreground">订单号：</span>{detail.order_no || "—"}</div>
+                <div className="col-span-2"><span className="text-muted-foreground">SMTP响应：</span>{detail.smtp_response || "—"}</div>
+              </div>
+              <div>
+                <div className="text-muted-foreground mb-1">主题</div>
+                <div className="p-2 bg-muted/50 rounded">{detail.subject || "(无主题)"}</div>
+              </div>
+              {detail.content && (
+                <div>
+                  <div className="text-muted-foreground mb-1">正文</div>
+                  <ScrollArea className="h-48">
+                    <div className="p-2 bg-muted/50 rounded whitespace-pre-wrap text-xs">{detail.content}</div>
+                  </ScrollArea>
+                </div>
+              )}
+              {detail.error_message && (
+                <div>
+                  <div className="text-destructive mb-1">错误信息</div>
+                  <div className="p-2 bg-destructive/10 border border-destructive/30 rounded text-xs text-destructive">{detail.error_message}</div>
+                </div>
+              )}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

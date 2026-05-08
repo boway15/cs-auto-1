@@ -1,0 +1,262 @@
+app:
+  description: 根据客户邮件和订单上下文，自动生成客服回复草稿。支持中英文，按客户语言回复。
+  icon: "\U0001F4DD"
+  icon_background: '#F0FDF4'
+  icon_type: emoji
+  mode: workflow
+  name: 独立站智能客服-邮件草稿生成
+  use_icon_as_answer_icon: false
+dependencies:
+  - current_identifier: null
+    type: marketplace
+    value:
+      marketplace_plugin_unique_identifier: langgenius/deepseek:0.0.15@725407927b04e236212083d20e92830d60fa944e42cd357ef6902c160414f6f1
+      version: null
+kind: app
+version: 0.6.0
+workflow:
+  conversation_variables: []
+  environment_variables: []
+  features:
+    file_upload:
+      allowed_file_extensions:
+      - .JPG
+      - .JPEG
+      - .PNG
+      - .GIF
+      - .WEBP
+      - .SVG
+      allowed_file_types:
+      - image
+      allowed_file_upload_methods:
+      - local_file
+      - remote_url
+      enabled: false
+      fileUploadConfig:
+        attachment_image_file_size_limit: 2
+        audio_file_size_limit: 50
+        batch_count_limit: 5
+        file_size_limit: 15
+        file_upload_limit: 20
+        image_file_batch_limit: 10
+        image_file_size_limit: 10
+        single_chunk_attachment_limit: 10
+        video_file_size_limit: 100
+        workflow_file_upload_limit: 10
+      image:
+        enabled: false
+        number_limits: 3
+        transfer_methods:
+        - local_file
+        - remote_url
+      number_limits: 3
+    opening_statement: ''
+    retriever_resource:
+      enabled: true
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  graph:
+    edges:
+      - data:
+          isInIteration: false
+          isInLoop: false
+          sourceType: start
+          targetType: llm
+        id: edge_start_to_llm
+        source: start
+        sourceHandle: source
+        target: llm_draft
+        targetHandle: target
+        type: custom
+        zIndex: 0
+      - data:
+          isInIteration: false
+          isInLoop: false
+          sourceType: llm
+          targetType: end
+        id: edge_llm_to_end
+        source: llm_draft
+        sourceHandle: source
+        target: end
+        targetHandle: target
+        type: custom
+        zIndex: 0
+    nodes:
+      - data:
+          desc: ''
+          selected: false
+          title: 开始
+          type: start
+          variables:
+            - label: 邮件主题
+              max_length: 1000
+              options: []
+              required: true
+              type: text-input
+              variable: subject
+            - label: 邮件正文
+              max_length: 50000
+              options: []
+              required: true
+              type: paragraph
+              variable: body_text
+            - label: 发件人姓名
+              max_length: 500
+              options: []
+              required: false
+              type: text-input
+              variable: from_name
+            - label: 发件人邮箱
+              max_length: 500
+              options: []
+              required: true
+              type: text-input
+              variable: from_email
+            - label: 订单信息
+              max_length: 50000
+              options: []
+              required: false
+              type: paragraph
+              variable: order_info
+            - label: 人工指导思想
+              max_length: 2000
+              options: []
+              required: false
+              type: paragraph
+              variable: guidance
+            - label: 上一版草稿
+              max_length: 50000
+              options: []
+              required: false
+              type: paragraph
+              variable: previous_draft
+        height: 220
+        id: start
+        position:
+          x: 80
+          y: 260
+        positionAbsolute:
+          x: 80
+          y: 260
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+      - data:
+          desc: 使用 LLM 生成客服回复草稿
+          title: AI 草稿生成
+          type: llm
+          model:
+            completion_params:
+              temperature: 0.5
+            mode: chat
+            name: deepseek-v4-flash
+            provider: langgenius/deepseek/deepseek
+          prompt_template:
+            - role: system
+              text: |
+                You are a professional cross-border e-commerce customer service agent. Write a reply email based on the customer's email, order information, and guidance.
+
+                ## Rules
+                1. Reply in the SAME LANGUAGE as the customer's email (detect from their message)
+                2. Address the customer by their name if available, otherwise use "there"
+                3. Provide clear solutions or next steps — be helpful and specific
+                4. Be polite, professional, and empathetic
+                5. If the customer is angry or frustrated, apologize first before explaining
+                6. Sign with "Best regards, Customer Service Team"
+                7. Output ONLY the email body text — no Subject line, no metadata
+                8. Keep paragraphs concise (2-4 sentences each)
+                9. If guidance is provided, follow it carefully
+            - role: user
+              text: |
+                ## Customer Email
+                From: {{#start.from_name#}} <{{#start.from_email#}}>
+                Subject: {{#start.subject#}}
+                Body:
+                {{#start.body_text#}}
+
+                ## Order Information
+                {{#start.order_info#}}
+
+                ## Previous Draft (for revision reference)
+                {{#start.previous_draft#}}
+
+                ## Guidance from Agent
+                {{#start.guidance#}}
+
+                Please write a professional reply email.
+          vision:
+            enabled: false
+            configs:
+              variable_selector: []
+          memory:
+            enabled: false
+            window:
+              enabled: false
+              size: 50
+          context:
+            enabled: false
+            variable_selector: []
+          structured_output:
+            enabled: false
+          retry_config:
+            enabled: false
+            max_retries: 1
+            retry_interval: 1000
+            exponential_backoff:
+              enabled: false
+              multiplier: 2
+              max_interval: 10000
+          variables: []
+        height: 90
+        id: llm_draft
+        position:
+          x: 420
+          y: 260
+        positionAbsolute:
+          x: 420
+          y: 260
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+      - data:
+          desc: ''
+          outputs:
+            - value_selector:
+                - llm_draft
+                - text
+              value_type: string
+              variable: draft_content
+          selected: false
+          title: 结束
+          type: end
+        height: 90
+        id: end
+        position:
+          x: 760
+          y: 260
+        positionAbsolute:
+          x: 760
+          y: 260
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+    viewport:
+      x: 0
+      y: 0
+      zoom: 1.0
+  rag_pipeline_variables: []

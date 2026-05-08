@@ -1,0 +1,15 @@
+node_modules
+.git
+.gitignore
+*.md
+.env.local
+.env.*.local
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+bun.lock
+bun.lockb
+.cursor
+scripts
+vitest.config.ts
+eslint.config.js

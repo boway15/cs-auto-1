@@ -1,0 +1,553 @@
+app:
+  description: 新邮件到达时自动生成客服回复草稿，支持关联线程邮件查找订单号（最多回溯10封）
+  icon: "\U0001F4AC"
+  icon_background: '#E0F2FE'
+  icon_type: emoji
+  mode: workflow
+  name: 独立站智能客服-上下文增强草稿生成
+  use_icon_as_answer_icon: false
+dependencies:
+- current_identifier: null
+  type: marketplace
+  value:
+    marketplace_plugin_unique_identifier: langgenius/deepseek:0.0.15@725407927b04e236212083d20e92830d60fa944e42cd357ef6902c160414f6f1
+    version: null
+kind: app
+version: 0.6.0
+workflow:
+  conversation_variables: []
+  environment_variables:
+  - description: ''
+    id: gateway_url
+    name: DIFY_GATEWAY_URL
+    selector:
+    - env
+    - DIFY_GATEWAY_URL
+    value: ''
+    value_type: string
+  - description: ''
+    id: gateway_api_key
+    name: DIFY_GATEWAY_API_KEY
+    selector:
+    - env
+    - DIFY_GATEWAY_API_KEY
+    value: ''
+    value_type: string
+  - description: ''
+    id: max_search_depth
+    name: max_search_depth
+    selector:
+    - env
+    - max_search_depth
+    value: 10
+    value_type: number
+  features:
+    file_upload:
+      allowed_file_extensions:
+      - .JPG
+      - .JPEG
+      - .PNG
+      - .GIF
+      - .WEBP
+      - .SVG
+      allowed_file_types:
+      - image
+      allowed_file_upload_methods:
+      - local_file
+      - remote_url
+      enabled: false
+      fileUploadConfig:
+        attachment_image_file_size_limit: 2
+        audio_file_size_limit: 50
+        batch_count_limit: 5
+        file_size_limit: 15
+        file_upload_limit: 20
+        image_file_batch_limit: 10
+        image_file_size_limit: 10
+        single_chunk_attachment_limit: 10
+        video_file_size_limit: 100
+        workflow_file_upload_limit: 10
+      image:
+        enabled: false
+        number_limits: 3
+        transfer_methods:
+        - local_file
+        - remote_url
+      number_limits: 3
+    opening_statement: ''
+    retriever_resource:
+      enabled: true
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  graph:
+    edges:
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: start
+        targetType: http-request
+      id: edge-start-fetch-context
+      selected: false
+      source: start
+      sourceHandle: source
+      target: fetch_email_context
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: http-request
+        targetType: if-else
+      id: edge-fetch-judge
+      selected: false
+      source: fetch_email_context
+      sourceHandle: source
+      target: judge_has_order_no
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: if-else
+        targetType: http-request
+      id: edge-judge-yes
+      selected: false
+      source: judge_has_order_no
+      sourceHandle: 'true'
+      target: fetch_order_info
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: http-request
+        targetType: llm
+      id: edge-order-draft
+      selected: false
+      source: fetch_order_info
+      sourceHandle: source
+      target: generate_reply_draft
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: llm
+        targetType: code
+      id: edge-draft-parse
+      selected: false
+      source: generate_reply_draft
+      sourceHandle: source
+      target: parse_reply_output
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: code
+        targetType: end
+      id: edge-parse-end
+      selected: false
+      source: parse_reply_output
+      sourceHandle: source
+      target: end
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: if-else
+        targetType: llm
+      id: edge-judge-no
+      selected: false
+      source: judge_has_order_no
+      sourceHandle: 'false'
+      target: generate_completion_draft
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: llm
+        targetType: code
+      id: edge-completion-parse
+      selected: false
+      source: generate_completion_draft
+      sourceHandle: source
+      target: parse_completion_output
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: code
+        targetType: end
+      id: edge-parsecomp-end
+      selected: false
+      source: parse_completion_output
+      sourceHandle: source
+      target: end
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    nodes:
+    - data:
+        desc: ''
+        selected: false
+        title: 开始
+        type: start
+        variables:
+        - label: email_id
+          max_length: 48
+          options: []
+          required: true
+          type: text-input
+          variable: email_id
+      height: 138
+      id: start
+      position:
+        x: 80
+        y: 300
+      positionAbsolute:
+        x: 80
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        authorization:
+          type: no-auth
+        body:
+          data: []
+          type: none
+        desc: 一次获取当前邮件、线程历史邮件并提取订单号
+        error_strategy: fail-branch
+        headers: "x-api-key:{{#env.DIFY_GATEWAY_API_KEY#}}"
+        method: get
+        params: "action:get_email_context\nemail_id:{{#start.email_id#}}\ndepth:{{#env.max_search_depth#}}"
+        retry_config:
+          max_retries: 3
+          retry_enabled: true
+          retry_interval: 1000
+        selected: false
+        ssl_verify: true
+        timeout:
+          max_connect_timeout: 10
+          max_read_timeout: 30
+          max_write_timeout: 30
+        title: 获取邮件上下文
+        type: http-request
+        url: '{{#env.DIFY_GATEWAY_URL#}}'
+        variables: []
+      height: 190
+      id: fetch_email_context
+      position:
+        x: 340
+        y: 300
+      positionAbsolute:
+        x: 340
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        cases:
+        - case_id: 'true'
+          conditions:
+          - comparison_operator: not empty
+            id: de30907f-d5cb-4230-ad1c-12ec4a16bcef
+            varType: string
+            variable_selector:
+            - fetch_email_context
+            - body
+            - data
+            - extracted_order_no
+          id: 'true'
+          logical_operator: and
+        desc: 判断 Edge Function 是否提取到有效订单号
+        selected: false
+        title: 是否找到订单号
+        type: if-else
+      height: 196
+      id: judge_has_order_no
+      position:
+        x: 600
+        y: 300
+      positionAbsolute:
+        x: 600
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        authorization:
+          type: no-auth
+        body:
+          data: []
+          type: none
+        desc: 通过订单号和邮箱查询 ERP 订单
+        error_strategy: fail-branch
+        headers: "x-api-key:{{#env.DIFY_GATEWAY_API_KEY#}}"
+        method: get
+        params: "action:get_order_by_email\norder_no:{{#fetch_email_context.body.data.extracted_order_no#}}\nemail:{{#fetch_email_context.body.data.email.from_address#}}"
+        retry_config:
+          max_retries: 3
+          retry_enabled: true
+          retry_interval: 1000
+        selected: false
+        ssl_verify: true
+        timeout:
+          max_connect_timeout: 10
+          max_read_timeout: 30
+          max_write_timeout: 30
+        title: 查询订单信息
+        type: http-request
+        url: '{{#env.DIFY_GATEWAY_URL#}}'
+        variables: []
+      height: 190
+      id: fetch_order_info
+      position:
+        x: 800
+        y: 200
+      positionAbsolute:
+        x: 800
+        y: 200
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: 结合订单信息和客户邮件生成回复
+        model:
+          completion_params:
+            max_tokens: 800
+            temperature: 0.7
+          mode: chat
+          name: deepseek-v4-flash
+          provider: langgenius/deepseek/deepseek
+        prompt_template:
+        - id: 229eb9b8-2d37-49a6-9975-6daddca8cee9
+          role: system
+          text: "你是一个专业的跨境电商客服专家。根据客户对话和订单信息，生成一封回复草稿。\n\n【订单信息】\n订单号: {{#fetch_order_info.body.data.order.order_no#}}\n客户姓名: {{#fetch_order_info.body.data.order.customer_name#}}\n商品: {{#fetch_order_info.body.data.order.product_name#}}\n订单状态: {{#fetch_order_info.body.data.order.status#}}\n金额: {{#fetch_order_info.body.data.order.currency#}} {{#fetch_order_info.body.data.order.amount#}}\n下单时间: {{#fetch_order_info.body.data.order.placed_at#}}\n物流追踪: {{#fetch_order_info.body.data.order.tracking_url#}}\n\n【客户最新邮件】\n主题: {{#fetch_email_context.body.data.email.subject#}}\n正文: {{#fetch_email_context.body.data.email.body#}}\n附件: {{#fetch_email_context.body.data.email.attachments#}}\n发件人: {{#fetch_email_context.body.data.email.from_address#}}\n\n【订单号来源说明】\n该订单号发现自: {% if fetch_email_context.body.data.order_source == \"thread_email\" %}历史邮件{% else %}客户最新邮件{% endif %}\n\n【任务要求】\n1. 先分析客户邮件中的核心意图（退货/退款/破损/物流查询/咨询/投诉等）\n2. 评估紧急程度（高/中/低）\n3. 识别当前缺少哪些关键信息（如缺少清晰破损图片等）\n4. 根据意图类型生成回复策略：\n   - 破损: 致歉 + 提出解决方案（补发/退款/补偿）\n   - 物流查询: 提供追踪链接和当前状态\n   - 退货退款: 说明政策和操作步骤\n   - 咨询: 准确回答\n5. 语气温暖专业，使用客户邮件的语言回复\n6. 不要编造任何信息，有不确定的明确标注\n7. 输出格式如下：\n\n[意图分析]\n意图: xxx\n紧急程度: xxx\n缺失信息: xxx\n\n[回复草稿]\n（直接可供发送的完整邮件正文）"
+        - id: 9754f4f2-648a-46e5-8fdb-446349c30928
+          role: user
+          text: '{{#sys.query#}}'
+        selected: false
+        title: 生成订单关联回复
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 116
+      id: generate_reply_draft
+      position:
+        x: 1060
+        y: 200
+      positionAbsolute:
+        x: 1060
+        y: 200
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "import re\n\ndef main(text: str) -> dict:\n    intent_match = re.search(\n\
+          \        r'\\[意图分析\\](.*?)(?=\\[回复草稿\\]|$)',\n        text,\n        re.DOTALL\n\
+          \    )\n    draft_match = re.search(\n        r'\\[回复草稿\\](.*?)$',\n        text,\n\
+          \        re.DOTALL\n    )\n\n    return {\n        \"intent_analysis\": intent_match.group(1).strip()\
+          \ if intent_match else \"\",\n        \"draft_reply\": draft_match.group(1).strip()\
+          \ if draft_match else text.strip(),\n    }"
+        code_language: python3
+        desc: 将 LLM 输出拆分为结构化意图和草稿字段
+        error_strategy: fail-branch
+        outputs:
+          intent_analysis:
+            children: null
+            type: string
+          draft_reply:
+            children: null
+            type: string
+        selected: false
+        title: 解析回复草稿
+        type: code
+        variables:
+        - value_selector:
+          - generate_reply_draft
+          - text
+          variable: text
+      height: 116
+      id: parse_reply_output
+      position:
+        x: 1320
+        y: 200
+      positionAbsolute:
+        x: 1320
+        y: 200
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: 未找到订单号时引导客户补充信息
+        model:
+          completion_params:
+            max_tokens: 500
+            temperature: 0.7
+          mode: chat
+          name: deepseek-v4-flash
+          provider: langgenius/deepseek/deepseek
+        prompt_template:
+        - id: dfa30afa-a778-4fa4-a7b6-57e0509307d8
+          role: system
+          text: "你是跨境电商客服助手。客户发来邮件但系统无法找到任何关联订单号。\n\n【重要前提】\n- 已检查该客户会话线程中最近 {{#env.max_search_depth#}} 封邮件，均未发现有效订单号\n- 客户最新邮件也没有包含附件中的订单信息\n\n【客户最新邮件】\n主题: {{#fetch_email_context.body.data.email.subject#}}\n正文: {{#fetch_email_context.body.data.email.body#}}\n发件人: {{#fetch_email_context.body.data.email.from_address#}}\n\n【任务】\n1. 推测客户的可能意图（物流/退货/破损/咨询等）\n2. 生成一封引导客户补充信息的回复邮件：\n   - 先表达理解和共情\n   - 礼貌地说明需要订单号才能快速定位问题\n   - 如果涉及商品质量问题，引导提供清晰图片\n   - 提供备选方案：如果找不到订单号，可以提供下单邮箱和收件人姓名\n3. 语气温暖专业，不要让客户感到被拒绝\n\n输出格式：\n[意图分析]\n可能意图: xxx\n缺失关键信息: 订单号\n\n[回复草稿]\n（引导补全信息的邮件正文）"
+        - id: 07059f70-9cdb-4750-90f3-7ceebdf5fb8c
+          role: user
+          text: '{{#sys.query#}}'
+        selected: false
+        title: 生成信息补全回复
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 116
+      id: generate_completion_draft
+      position:
+        x: 800
+        y: 500
+      positionAbsolute:
+        x: 800
+        y: 500
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "import re\n\ndef main(text: str) -> dict:\n    intent_match = re.search(\n\
+          \        r'\\[意图分析\\](.*?)(?=\\[回复草稿\\]|$)',\n        text,\n        re.DOTALL\n\
+          \    )\n    draft_match = re.search(\n        r'\\[回复草稿\\](.*?)$',\n        text,\n\
+          \        re.DOTALL\n    )\n\n    return {\n        \"intent_analysis\": intent_match.group(1).strip()\
+          \ if intent_match else \"\",\n        \"draft_reply\": draft_match.group(1).strip()\
+          \ if draft_match else text.strip(),\n    }"
+        code_language: python3
+        desc: 将 LLM 输出拆分为结构化意图和草稿字段
+        error_strategy: fail-branch
+        outputs:
+          intent_analysis:
+            children: null
+            type: string
+          draft_reply:
+            children: null
+            type: string
+        selected: false
+        title: 解析补全草稿
+        type: code
+        variables:
+        - value_selector:
+          - generate_completion_draft
+          - text
+          variable: text
+      height: 116
+      id: parse_completion_output
+      position:
+        x: 1060
+        y: 500
+      positionAbsolute:
+        x: 1060
+        y: 500
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        outputs:
+        - variable: email_id
+          value_selector:
+          - fetch_email_context
+          - body
+          - data
+          - email
+          - email_id
+        - variable: order_no
+          value_selector:
+          - fetch_email_context
+          - body
+          - data
+          - extracted_order_no
+        - variable: order_found
+          value_selector:
+          - fetch_order_info
+          - body
+          - data
+          - found
+        - variable: search_depth
+          value_selector:
+          - fetch_email_context
+          - body
+          - data
+          - search_depth
+        - variable: order_source
+          value_selector:
+          - fetch_email_context
+          - body
+          - data
+          - order_source
+        - variable: intent_analysis
+          value_selector:
+          - parse_reply_output
+          - intent_analysis
+        - variable: draft_reply
+          value_selector:
+          - parse_reply_output
+          - draft_reply
+        selected: false
+        title: 结束
+        type: end
+      height: 116
+      id: end
+      position:
+        x: 1580
+        y: 350
+      positionAbsolute:
+        x: 1580
+        y: 350
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+  rag_pipeline_variables: []
