@@ -11,6 +11,7 @@ const corsHeaders = {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const CRON_SERVICE_ROLE_KEY = Deno.env.get("CRON_SERVICE_ROLE_KEY");
 declare const EdgeRuntime: { waitUntil: (promise: Promise<unknown>) => void };
 
 interface SyncResult {
@@ -682,7 +683,10 @@ Deno.serve(async (req) => {
     // 鉴权：允许 (a) 服务角色（pg_cron 调用） 或 (b) 已登录的 admin/leader/agent 员工
     const authHeader = req.headers.get("Authorization") ?? "";
     const token = authHeader.replace(/^Bearer\s+/i, "").trim();
-    const isServiceRole = token && token === SUPABASE_SERVICE_ROLE_KEY;
+    const isServiceRole = token && (
+      token === SUPABASE_SERVICE_ROLE_KEY ||
+      (CRON_SERVICE_ROLE_KEY ? token === CRON_SERVICE_ROLE_KEY : false)
+    );
 
     if (!isServiceRole) {
       if (!token) {

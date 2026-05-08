@@ -1,0 +1,251 @@
+app:
+  description: 测试环境 ERP 订单拦截联调工作流。执行步骤：获取 token -> 调用拦截接口 -> 输出联调结果。
+  icon: "\U0001F9EA"
+  icon_background: '#FEF3C7'
+  icon_type: emoji
+  mode: workflow
+  name: ERP订单拦截联调-测试环境
+  use_icon_as_answer_icon: false
+dependencies: []
+kind: app
+version: 0.6.0
+workflow:
+  conversation_variables: []
+  environment_variables: []
+  features:
+    file_upload:
+      allowed_file_extensions:
+      - .JPG
+      - .JPEG
+      - .PNG
+      - .GIF
+      - .WEBP
+      - .SVG
+      allowed_file_types:
+      - image
+      allowed_file_upload_methods:
+      - local_file
+      - remote_url
+      enabled: false
+      fileUploadConfig:
+        attachment_image_file_size_limit: 2
+        audio_file_size_limit: 50
+        batch_count_limit: 5
+        file_size_limit: 15
+        file_upload_limit: 20
+        image_file_batch_limit: 10
+        image_file_size_limit: 10
+        single_chunk_attachment_limit: 10
+        video_file_size_limit: 100
+        workflow_file_upload_limit: 10
+      image:
+        enabled: false
+        number_limits: 3
+        transfer_methods:
+        - local_file
+        - remote_url
+      number_limits: 3
+    opening_statement: ''
+    retriever_resource:
+      enabled: true
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  graph:
+    edges:
+      - data:
+          isInIteration: false
+          isInLoop: false
+          sourceType: start
+          targetType: http-request
+        id: edge_start_to_get_token
+        source: start
+        sourceHandle: source
+        target: get_token
+        targetHandle: target
+        type: custom
+        zIndex: 0
+      - data:
+          isInIteration: false
+          isInLoop: false
+          sourceType: http-request
+          targetType: http-request
+        id: edge_get_token_to_block_order
+        source: get_token
+        sourceHandle: source
+        target: block_order
+        targetHandle: target
+        type: custom
+        zIndex: 0
+      - data:
+          isInIteration: false
+          isInLoop: false
+          sourceType: http-request
+          targetType: end
+        id: edge_block_order_to_end
+        source: block_order
+        sourceHandle: source
+        target: end
+        targetHandle: target
+        type: custom
+        zIndex: 0
+    nodes:
+      - data:
+          desc: 测试环境参数输入
+          selected: false
+          title: 开始
+          type: start
+          variables:
+            - label: order_id
+              max_length: 200
+              options: []
+              required: true
+              type: text-input
+              variable: order_id
+        height: 90
+        id: start
+        position:
+          x: 80
+          y: 240
+        positionAbsolute:
+          x: 80
+          y: 240
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+      - data:
+          authorization:
+            type: no-auth
+          body:
+            data: username=Java&pw=23782394&client_id=Java&grant_type=password
+            type: raw-text
+          desc: 固定测试环境参数获取 token
+          error_strategy: fail-branch
+          headers: "Content-Type:application/x-www-form-urlencoded\nAccept:application/json"
+          method: post
+          params: ''
+          retry_config:
+            max_retries: 1
+            retry_enabled: false
+            retry_interval: 1000
+          selected: false
+          ssl_verify: true
+          timeout:
+            max_connect_timeout: 10
+            max_read_timeout: 30
+            max_write_timeout: 30
+          title: 获取Token
+          type: http-request
+          url: https://loginserver.chinabestwo.net:4430/connect/token
+          variables: []
+        height: 190
+        id: get_token
+        position:
+          x: 420
+          y: 240
+        positionAbsolute:
+          x: 420
+          y: 240
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+      - data:
+          authorization:
+            type: no-auth
+          body:
+            data: []
+            type: none
+          desc: 携带 Bearer Token 调用订单拦截接口
+          error_strategy: fail-branch
+          headers: "Authorization:Bearer {{#get_token.body.access_token#}}"
+          method: get
+          params: "orderId:{{#start.order_id#}}"
+          retry_config:
+            max_retries: 1
+            retry_enabled: false
+            retry_interval: 1000
+          selected: false
+          ssl_verify: true
+          timeout:
+            max_connect_timeout: 10
+            max_read_timeout: 30
+            max_write_timeout: 30
+          title: 调用订单拦截接口
+          type: http-request
+          url: http://10.100.1.205:9000/report/website/orders/order-blocking-by-order-ids
+          variables: []
+        height: 190
+        id: block_order
+        position:
+          x: 760
+          y: 240
+        positionAbsolute:
+          x: 760
+          y: 240
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+      - data:
+          desc: 输出联调结果
+          outputs:
+            - value_selector:
+                - get_token
+                - status_code
+              value_type: number
+              variable: token_status_code
+            - value_selector:
+                - block_order
+                - status_code
+              value_type: number
+              variable: blocking_status_code
+            - value_selector:
+                - get_token
+                - body
+                - access_token
+              value_type: string
+              variable: access_token
+            - value_selector:
+                - block_order
+                - body
+              value_type: string
+              variable: blocking_response_text
+            - value_selector:
+                - get_token
+                - body
+              value_type: string
+              variable: token_response_body
+          selected: false
+          title: 结束
+          type: end
+        height: 186
+        id: end
+        position:
+          x: 1100
+          y: 240
+        positionAbsolute:
+          x: 1100
+          y: 240
+        selected: false
+        sourcePosition: right
+        targetPosition: left
+        type: custom
+        width: 244
+    viewport:
+      x: 0
+      y: 0
+      zoom: 1
+  rag_pipeline_variables: []
