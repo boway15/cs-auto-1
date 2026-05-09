@@ -14,6 +14,8 @@ const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 const BATCH_LIMIT = Number(Deno.env.get("COMPENSATING_ALERT_BATCH") ?? "40");
 const MIN_AGE_MS = 2 * 60 * 60 * 1000;
+/** 收信超过 72 小时的 compensating 邮件不再发内部预警（产品决策） */
+const MAX_ALERT_AGE_MS = 72 * 60 * 60 * 1000;
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -28,13 +30,17 @@ Deno.serve(async (req) => {
     }
 
     const admin = createClient(SUPABASE_URL, SERVICE_KEY);
-    const cutoffIso = new Date(Date.now() - MIN_AGE_MS).toISOString();
+    const now = Date.now();
+    // 满 2h 才预警，且收信须在 72h 内（超过 72h 不再轰炸运营）
+    const minReceivedAtIso = new Date(now - MAX_ALERT_AGE_MS).toISOString();
+    const maxReceivedAtIso = new Date(now - MIN_AGE_MS).toISOString();
 
     const { data: emails, error } = await admin
       .from("emails")
       .select("id, subject, from_email, received_at, business_intent, association_status, ai_summary, ai_entities")
       .eq("association_status", "compensating")
-      .lte("received_at", cutoffIso)
+      .gte("received_at", minReceivedAtIso)
+      .lte("received_at", maxReceivedAtIso)
       .order("received_at", { ascending: true })
       .limit(BATCH_LIMIT);
 

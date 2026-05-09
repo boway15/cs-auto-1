@@ -62,7 +62,7 @@ export default function RiskLogs() {
           <h1 className="text-xl font-semibold flex items-center gap-2">
             <AlertTriangle className="w-5 h-5 text-warning" /> 风控拦截记录
           </h1>
-          <p className="text-sm text-muted-foreground">自动/人工暂停发货动作、Shopify响应和失败告警审计</p>
+          <p className="text-sm text-muted-foreground">自动/人工暂停发货动作、第三方同步结果与失败告警审计</p>
         </div>
         <Button variant="outline" size="sm" onClick={load} disabled={loading}>
           <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} />刷新

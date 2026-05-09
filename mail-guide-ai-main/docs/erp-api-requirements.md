@@ -11,7 +11,7 @@
 
 - 前端 `Erp.tsx` 已支持配置 `base_url`、鉴权方式、`order_endpoint`、字段映射；
 - 但当前 `supabase/functions/get-order-by-email` 实现是查询 Supabase 本地 `orders` 缓存表，不是直接请求 ERP HTTP；
-- `risk-intercept` 当前核心落点是本地订单状态与 Shopify 标签流程，ERP 拦截接口尚未在 Edge Function 中形成统一直连调用链。
+- `risk-intercept` 当前核心落点是**本地** `orders` 表的 hold 状态（**已不再调用 Shopify**）；ERP 拦截 HTTP 直连尚未在 Edge Function 中形成统一链路，本文档为目标契约。
 
 因此本文档是**目标 ERP 接口契约**，用于后续把“ERP 直连链路”补齐。
 

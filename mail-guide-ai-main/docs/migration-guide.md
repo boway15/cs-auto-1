@@ -1,28 +1,38 @@
 # mail-guide-ai 新电脑迁移教程（当前仓库基线）
 
-> 本文档只描述当前已落地方案：`React 前端 + Supabase Cloud + Edge Functions + 本机 Dify`。  
-> 若需看未来 Node 自托管方案，请查看 `docs/architecture-design.md` 的“未来方案”部分。
+> **生产发布默认自建 Supabase（Docker）**，见 `docs/self-hosted-supabase.md`。  
+> 下文同时保留「仅迁移开发机 + 连现有云端项目」的简化路径；若团队已全面自建，请以自建文档为准。  
+> Node 后端替代方案见 `docs/risk-and-plan.md`（规划稿，非当前主路径）。
 
 ---
 
 ## 1. 架构与迁移范围
 
-当前链路：
+**推荐（生产）链路：**
+
+```text
+前端(8080) -> 自建 Supabase(Kong: Auth/DB + Edge Functions 运行时)
+                         -> ngrok/内网 -> Dify(8090)
+```
+（自建与 Cloud **同为** Edge Functions；仅网关 URL 与函数发布流程不同。）
+
+**开发机仅重装工具、数据仍在云端时：**
 
 ```text
 前端(8080) -> Supabase Cloud(Auth/DB/Functions)
                          -> ngrok -> 本机 Dify(8090)
 ```
 
-需要迁移：
+需要迁移（新机器上的代码与容器）：
 
 - `d:\Docker\project\cs-main\mail-guide-ai-main`
 - `d:\Docker\project\cs-main\dify\docker`
+- 自建时另需：`d:\Docker\project\cs-main\supabase-selfhost`（按 `docs/self-hosted-supabase.md`）
 
-不需要迁移：
+不需要迁移（除非你做全量换机）：
 
-- Supabase 云端数据库数据
-- Supabase Auth 用户
+- 云端已有数据与 Auth 用户（仍用 Cloud 时）
+- 自建库内数据（仍用自建时，随 Postgres 卷备份迁移）
 
 ---
 

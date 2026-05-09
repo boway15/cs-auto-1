@@ -222,6 +222,7 @@ export default function MailboxesPage() {
           port,
           user,
           pass: form.auth_password,
+          use_ssl: form.use_ssl,
         },
       });
       if (error) {

@@ -382,8 +382,7 @@ export default function Workbench() {
       toast.error("操作失败：" + (error?.message ?? data?.error));
       return;
     }
-    if (data?.result?.shopify_response?.ok) toast.success("已暂停发货，并同步标记到 Shopify");
-    else toast.warning("已本地暂停发货，详情可在风控记录查看");
+    toast.success("已暂停发货（本地订单已标记；ERP 拦截对接见文档）");
     setHoldDialog({ open: false });
     if (selected) loadDetail(selected);
   }
@@ -397,7 +396,7 @@ export default function Workbench() {
       toast.error("操作失败：" + (error?.message ?? data?.error));
       return;
     }
-    toast.success(data?.result?.shopify_response?.ok ? "已恢复发货并同步 Shopify" : "已本地恢复发货");
+    toast.success("已恢复发货（本地订单已更新）");
     if (selected) loadDetail(selected);
   }
 
@@ -1124,7 +1123,7 @@ export default function Workbench() {
               />
             </div>
             <p className="text-xs text-muted-foreground">
-              将在订单上添加 <code className="px-1 rounded bg-muted">hold-shipping</code> 标签同步到 Shopify，并写入操作日志。
+              将在本地订单上标记暂停发货并写入风控日志；与 ERP 的拦截同步以 <code className="px-1 rounded bg-muted">docs/erp-api-requirements.md</code> 为准。
             </p>
           </div>
           <DialogFooter>

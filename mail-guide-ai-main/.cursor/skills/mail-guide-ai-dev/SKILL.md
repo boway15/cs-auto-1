@@ -25,8 +25,8 @@ description: "mail-guide-ai 跨境电商智能客服邮件系统 — 本地开�
 | **表单** | react-hook-form + zod |
 | **图表** | recharts |
 | **日期处理** | date-fns（zhCN locale） |
-| **后端服务** | Supabase（全托管） |
-| **数据库** | PostgreSQL（Supabase 托管） |
+| **后端服务** | Supabase（**生产默认自建 Docker**；可选用 Cloud） |
+| **数据库** | PostgreSQL（随 Supabase 实例） |
 | **认证** | Supabase Auth（邮箱/密码） |
 | **无服务器** | Supabase Edge Functions（Deno 运行时） |
 | **定时任务** | pg_cron + pg_net 扩展 |

@@ -1,13 +1,16 @@
 # 技术实现方案 v1（结合当前项目进展）
 
+> **冲突说明**：与历史 v1 不一致处以 `docs/customer-service-automation-spec.md` §0 为准。
+
 ## 1. 当前基线
 
 - 前端：React + Vite（`src/pages/Workbench.tsx`）
-- 后端：Supabase Edge Functions（Deno）
-- AI：Dify（本机，通过 ngrok 暴露）
+- 后端：**Supabase Edge Functions（Deno）** — **自建库与云端库一致**，均为同一套 Edge Runtime；区别仅在部署方式（云端常用 `supabase functions deploy`，自建为 `functions` 容器 + 同步 `supabase/functions/` 源码），**不是**换成 Node 或其它后端框架。
+- AI：Dify（本机或内网，经网关暴露）
 - 定时：`pg_cron + pg_net`
+- **生产发布**：**自建 Supabase Docker**（`supabase-selfhost`）；cron URL 须指向自建 Kong，**非** `*.supabase.co`
 
-本方案在现有基线上增量实施，不切换到 Node 自托管。
+本方案在现有基线上增量实施，不切换到 Node 自托管（参见 `docs/risk-and-plan.md` 仅为历史规划稿）。
 
 ## 2. 数据层变更
 
@@ -15,18 +18,19 @@
 
 迁移文件：`supabase/migrations/20260508090000_emails_business_intent_and_close.sql`
 
-- 新增：`business_intent`, `intent_legacy`, `closed_at`, `closed_by`, `sla_bucket`
+- 新增：`business_intent`, `intent_legacy`, `closed_at`, `closed_by`, `sla_bucket`（**产品主流程不强调 `closed`**，库内字段可保留兼容）
 - CHECK：
   - `business_intent` 7 类
-  - `status` 含 `closed`
+  - `status` 含 `closed`（历史/兼容）
   - `association_status` 含 `not_provided/not_found`
   - `sla_bucket` 四档
 
 ### 2.2 补偿任务
 
-迁移文件：`20260508090100_compensation_default_six.sql`
+- 历史：`20260508090100_compensation_default_six.sql`（曾默认 6）
+- **当前**：`20260510120000_compensation_ten_retries_thirty_min.sql` — `max_retries` 默认 **10**；pending 任务抬升上限
 
-- `order_compensation_tasks.max_retries` 默认改为 6
+**调度间隔**：Edge `run-compensation-tasks` / `process-email` 创建任务时 `next_run_at` 为 **+30 分钟**；建议 pg_cron 同周期调用。
 
 ### 2.3 告警幂等
 
@@ -39,85 +43,62 @@
 
 迁移文件：`20260508090300_emails_full_backfill.sql`
 
-- 复制 `intent -> intent_legacy`
-- 映射 `business_intent`
-- 修正 `recommended -> not_provided`（并清理 recommendation）
-- 一次性计算 `sla_bucket`
-
 ### 2.5 Date 头口径
 
-已通过：
-
 - `supabase/functions/sync-mailbox/index.ts`
-- `20260507120000_emails_received_at_is_message_date.sql`
-- `20260507120100_emails_received_at_comment_invalid_date.sql`
+- `20260507120000_emails_received_at_is_message_date.sql` 等
 
-固定为：Date 头无效即回退入库时间。
+### 2.6 语言 / 情绪
+
+- `20260509120000_emails_ai_language_sentiment.sql`
 
 ## 3. Functions 变更
 
 ### 3.1 共享模块
 
-- `supabase/functions/_shared/ops-notify.ts`
-  - `createAlertAndNotify()`
-  - `ops_alerts` 写库 + 幂等去重 + SMTP 发邮件
-- `supabase/functions/_shared/draft.ts`
-  - 本地草稿 / Dify 草稿 / 草稿写入
+- `supabase/functions/_shared/ops-notify.ts`：`createAlertAndNotify()`；**固定发件邮箱**在 `mailboxes` 配置；密钥 **secrets**
+- `supabase/functions/_shared/draft.ts`：本地草稿（消费 `ai_language` / `ai_sentiment`）+ Dify 草稿
 
 ### 3.2 process-email
 
-`supabase/functions/process-email/index.ts`
-
-- 输出并写入 `business_intent + intent_legacy`
-- 无单号设置 `association_status = not_provided`，不再推荐订单
-- `order_cancel/address_change` 且已关联订单时强制尝试拦截
-- 自动回复失败与拦截调用失败接入统一告警
-- 草稿由调度任务统一产出（避免双写）
+- `business_intent`、关联、`sendTemplateReply`（24h + secrets）
+- 补偿任务 `next_run_at`：**+30 分钟**
+- **不**在 process-email 内对 `not_provided` 发内部预警
 
 ### 3.3 risk-intercept / run-compensation-tasks
 
-- 失败分支统一改为调用 `createAlertAndNotify()`
-- 与 `ops_alerts.idempotency_key` 配合，确保同事件不重复发告警邮件
+- `risk-intercept`：**不调用 Shopify**；仅本地 `orders` hold；ERP 后续按 `erp-api-requirements.md`
+- `run-compensation-tasks`：失败重试 **10** 次（`max_retries`），`next_run_at` **+30 分钟**
+- 失败 → `createAlertAndNotify`
 
-### 3.4 close-email（新增）
+### 3.4 close-email（遗留）
 
-`supabase/functions/close-email/index.ts`
+`supabase/functions/close-email/index.ts` 仍可部署；**产品主流程不强调 `closed`**，工作台以「已回复」为主，**可不调用** close-email。
 
-- 人工结案：`status='closed'`
-- 写 `email_processing_events` 与 `audit_logs`
+### 3.5 schedule-draft-generation
 
-### 3.5 schedule-draft-generation（新增）
+- 每 30 分钟 cron
+- **1～6h**：Dify；**6～24h**：本地；收信满 **1h** 才参与；24h 内
 
-`supabase/functions/schedule-draft-generation/index.ts`
+### 3.6 schedule-compensating-alerts
 
-- 每 30 分钟由 cron 调用
-- 0~4h：Dify；4~24h：本地；>=24h 跳过
-- 仅处理 `pending/processing` 且无非空草稿
+- compensating + 收信 **≥2h 且 ≤72h** 内部预警；去重
 
-### 3.6 generate-draft（人工）
+### 3.7 generate-draft（人工）
 
-`supabase/functions/generate-draft/index.ts`
-
-- 人工调用固定 `mode='local'`
-- 自动草稿职责迁到 schedule function
+- 固定 `mode='local'`
 
 ## 4. 定时任务与配置
 
-### 4.1 新增 Cron
+### 4.1 Cron
 
-`supabase/migrations/20260508091000_cron_schedule_draft_generation.sql`
-
-- 任务名：`auto-draft-every-30min`
-- 触发：`schedule-draft-generation`
+- `20260508091000_cron_schedule_draft_generation.sql`：`auto-draft-every-30min` → `schedule-draft-generation`
+- `20260509120100_cron_schedule_compensating_alerts.sql`：`compensating-alerts-every-30min`
+- **自建**：须将 SQL 内 URL 替换为自建 `Kong` 的 functions 地址，并配置 `vault.decrypted_secrets.service_role_key`
 
 ### 4.2 Functions 配置
 
-`supabase/config.toml` 已新增：
-
-```toml
-[functions.schedule-draft-generation]
-verify_jwt = false
-```
+`supabase/config.toml`：`schedule-draft-generation`、`schedule-compensating-alerts` 等 `verify_jwt = false`（cron 使用 service role）
 
 ## 5. 前端实现
 
@@ -125,54 +106,42 @@ verify_jwt = false
 
 `src/pages/Workbench.tsx`
 
-- 状态筛选增加 `closed`
-- 意图筛选改为 7 类 `business_intent`
-- 关联筛选支持 `not_provided/not_found/linked`
+- 意图筛选 7 类 `business_intent`；关联筛选含 `not_provided/not_found/linked` 等
 - SLA 标签（仅 pending/processing）
-- “标记已处理”按钮调用 `close-email`
-- “生成草稿”强制 `mode: local`
-- `not_provided` 隐藏推荐区并显示业务说明
+- 「生成草稿」强制 `mode: local`
+- 风控文案：**不承诺 Shopify**；指向 ERP 文档
+- **不强制**「标记已处理 / close-email」为主路径（产品仅保留已回复）
 
 ### 5.2 告警页
 
-新增 `src/pages/Alerts.tsx`，并接入：
-
-- `src/App.tsx` 路由 `/alerts`
-- `src/components/AppLayout.tsx` 导航“运营告警”
+`src/pages/Alerts.tsx`：`resolved` 展示 **已处理**；按钮「标记已处理」
 
 ### 5.3 展示组件
 
-- `src/components/StatusBadge.tsx`：`closed` 文案改为“已处理”
-- `src/lib/customerService.ts`：意图/关联/SLA 映射与工具函数
+- `src/components/StatusBadge.tsx`：`closed` 可与 `replied` 同文案「已回复」（兼容历史）
+- `src/lib/customerService.ts`：意图/关联/SLA
 
 ## 6. Dify 工作流
 
-文件：`dify-workflows/email-analysis.yml`
-
-- prompt 中新增 `business_intent` 定义（7 类单选）
-- code 节点新增 `business_intent` 默认值和校验
-- end 节点输出新增 `business_intent`
-
-文档：`dify-workflows/README.md` 已同步更新部署/验证说明。
+`dify-workflows/email-analysis.yml`：`business_intent` 等与后端对齐
 
 ## 7. 文档与技能
 
-- 新增：`docs/product-prd-v1.md`
-- 新增：`docs/tech-implementation-plan-v1.md`（本文件）
-- 需同步：`docs/startup-commands.md`、`.cursor/skills/mail-guide-ai-dev/SKILL.md`
+- `docs/customer-service-automation-spec.md`（主口径）
+- `docs/self-hosted-supabase.md`（自建发布）
+- `.cursor/skills/mail-guide-ai-dev/SKILL.md`
 
-## 8. 部署顺序
+## 8. 部署顺序（自建）
 
-1. 执行数据库迁移（含 full backfill）
-2. 部署共享模块依赖的 functions（process/risk/comp/close/schedule/generate）
-3. 部署前端
-4. 导入并发布 Dify workflow
-5. 校验 cron 与告警邮件
+1. 启动 `supabase-selfhost`，配置 `.env` / `.env.functions`
+2. `db push` 或执行 migrations
+3. 修正 vault + cron URL（不打 Cloud）
+4. 同步 Edge Functions 源码并重建 `functions` 容器
+5. 部署前端，配置 `VITE_SUPABASE_URL`
+6. 导入 Dify workflow，配置 secrets
 
 ## 9. 回滚策略
 
-- 停用 `auto-draft-every-30min` cron
-- 前端隐藏 `/alerts` 与新入口（必要时）
-- `process-email` 回退到旧版本
-- 数据库新增列保持兼容，不做 destructive 回滚
-
+- 停用相关 cron
+- `process-email` / 调度函数回退版本
+- 数据库新增列保持兼容

@@ -1,8 +1,8 @@
 # 自托管迁移：风险评估 & 可执行计划（规划稿）
 
 > 文档状态：**未来规划，未落地**  
-> 当前线上/开发基线仍为 Supabase Cloud + Edge Functions + 本机 Dify。  
-> 本文用于评估“迁移到 Node.js 自托管”路线，不代表当前系统已切换。
+> 当前主路径：**自建 Supabase Docker** + Edge Functions + 本机/内网 Dify（见 `docs/self-hosted-supabase.md`、`docs/customer-service-automation-spec.md` §0）。  
+> 本文用于评估“迁移到 Node.js 自托管”路线；文中 **Shopify / 补偿次数** 等若与 `customer-service-automation-spec.md` 冲突，**以 spec §0 为准**。
 
 ## 一、可行性结论
 

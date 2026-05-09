@@ -18,6 +18,32 @@ interface SendOpts {
   references?: string;
 }
 
+const MAIL_LOCAL_TEST_MODE = Deno.env.get("MAIL_LOCAL_TEST_MODE") === "true";
+let cachedMailTlsCaCerts: string[] | undefined | null;
+
+async function getMailTlsCaCerts(): Promise<string[] | undefined> {
+  if (cachedMailTlsCaCerts !== null && cachedMailTlsCaCerts !== undefined) {
+    return cachedMailTlsCaCerts;
+  }
+
+  const certs: string[] = [];
+  const inlinePem = Deno.env.get("MAIL_TLS_CA_CERT_PEM")?.trim();
+  if (inlinePem) certs.push(inlinePem.replace(/\\n/g, "\n"));
+
+  const rawPaths = Deno.env.get("MAIL_TLS_CA_CERT_PATH") || Deno.env.get("DENO_CERT") || "";
+  const paths = rawPaths.split(/[;,]/).map((p) => p.trim()).filter(Boolean);
+  for (const path of paths) {
+    try {
+      certs.push(await Deno.readTextFile(path));
+    } catch (e) {
+      console.error(`[smtp] failed to read CA cert path=${path}:`, e);
+    }
+  }
+
+  cachedMailTlsCaCerts = certs.length > 0 ? certs : null;
+  return cachedMailTlsCaCerts ?? undefined;
+}
+
 function b64(s: string) {
   return btoa(unescape(encodeURIComponent(s)));
 }
@@ -30,10 +56,14 @@ function encodeSubject(s: string) {
 
 export async function sendMail(mb: Mailbox, opts: SendOpts): Promise<string> {
   const port = Number(mb.smtp_port);
-  const useSSL = port === 465;
+  const useSSL = MAIL_LOCAL_TEST_MODE ? false : port === 465;
+  if (MAIL_LOCAL_TEST_MODE && port === 465) {
+    throw new Error("本地测试模式已开启：SMTP 465 需要 TLS，请改用 25/587 或关闭 MAIL_LOCAL_TEST_MODE。");
+  }
+  const caCerts = await getMailTlsCaCerts();
 
   let conn: Deno.Conn = useSSL
-    ? await Deno.connectTls({ hostname: mb.smtp_host, port })
+    ? await Deno.connectTls({ hostname: mb.smtp_host, port, ...(caCerts ? { caCerts } : {}) })
     : await Deno.connect({ hostname: mb.smtp_host, port });
 
   const dec = new TextDecoder();
@@ -73,10 +103,13 @@ export async function sendMail(mb: Mailbox, opts: SendOpts): Promise<string> {
     let ehlo = await expect("250", "EHLO");
 
     // STARTTLS（非 SSL 情形）
-    if (!useSSL && /STARTTLS/i.test(ehlo)) {
+    if (!useSSL && /STARTTLS/i.test(ehlo) && !MAIL_LOCAL_TEST_MODE) {
       await write(`STARTTLS\r\n`);
       await expect("220", "STARTTLS");
-      const tls = await Deno.startTls(conn as Deno.TcpConn, { hostname: mb.smtp_host });
+      const tls = await Deno.startTls(conn as Deno.TcpConn, {
+        hostname: mb.smtp_host,
+        ...(caCerts ? { caCerts } : {}),
+      });
       conn = tls;
       await write(`EHLO lovable\r\n`);
       ehlo = await expect("250", "EHLO2");

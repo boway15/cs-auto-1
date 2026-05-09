@@ -1,0 +1,28 @@
+# ============================================================
+# 复制本文件为 supabase-selfhost/.env.functions（与 docker-compose 中 functions.env_file 一致）
+# 勿提交真实密钥。官方说明：https://supabase.com/docs/guides/self-hosting/self-hosted-functions
+# ============================================================
+
+# --- Dify（与云端 npx supabase functions secrets set 对应）---
+DIFY_GATEWAY_API_KEY=
+DIFY_ANALYZE_URL=
+DIFY_ANALYZE_KEY=
+DIFY_DRAFT_URL=
+DIFY_DRAFT_KEY=
+
+# generate-draft 等若仍引用 Lovable 网关
+LOVABLE_API_KEY=
+
+# sync-mailbox：若 cron 使用独立 key（可选，见 functions 源码）
+# CRON_SERVICE_ROLE_KEY=
+
+# get-email-context 等
+# API_KEY=
+
+# 调度批大小（可选）
+# DRAFT_SCHEDULE_BATCH=50
+# COMPENSATING_ALERT_BATCH=40
+
+# 运维告警邮件（可选，有代码内默认值）
+# ALERT_SENDER_ADDRESS=
+# ALERT_EMAIL_TO=

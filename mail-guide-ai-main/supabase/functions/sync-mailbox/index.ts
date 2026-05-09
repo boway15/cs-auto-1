@@ -12,7 +12,45 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const CRON_SERVICE_ROLE_KEY = Deno.env.get("CRON_SERVICE_ROLE_KEY");
+const MAIL_LOCAL_TEST_MODE = Deno.env.get("MAIL_LOCAL_TEST_MODE") === "true";
 declare const EdgeRuntime: { waitUntil: (promise: Promise<unknown>) => void };
+
+let cachedMailTlsCaCerts: string[] | undefined | null;
+
+async function getMailTlsCaCerts(): Promise<string[] | undefined> {
+  if (cachedMailTlsCaCerts !== null && cachedMailTlsCaCerts !== undefined) {
+    return cachedMailTlsCaCerts;
+  }
+
+  const certs: string[] = [];
+  const inlinePem = Deno.env.get("MAIL_TLS_CA_CERT_PEM")?.trim();
+  if (inlinePem) {
+    certs.push(inlinePem.replace(/\\n/g, "\n"));
+  }
+
+  const rawPaths = Deno.env.get("MAIL_TLS_CA_CERT_PATH") || Deno.env.get("DENO_CERT") || "";
+  const paths = rawPaths.split(/[;,]/).map((p) => p.trim()).filter(Boolean);
+  for (const path of paths) {
+    try {
+      certs.push(await Deno.readTextFile(path));
+    } catch (e) {
+      console.error(`[sync-mailbox] failed to read CA cert path=${path}:`, e);
+    }
+  }
+
+  cachedMailTlsCaCerts = certs.length > 0 ? certs : null;
+  return cachedMailTlsCaCerts ?? undefined;
+}
+
+async function connectImapTls(host: string, port: number, signal: AbortSignal): Promise<Deno.TlsConn> {
+  const caCerts = await getMailTlsCaCerts();
+  return await Deno.connectTls({
+    hostname: host,
+    port,
+    signal,
+    ...(caCerts ? { caCerts } : {}),
+  });
+}
 
 interface SyncResult {
   mailbox: string;
@@ -34,20 +72,22 @@ function receivedAtFromDateHeader(dateHeader: string | null | undefined, ingeste
 
 // ============ 极简 IMAP 客户端 ============
 class ImapClient {
-  private conn!: Deno.TlsConn;
+  private conn!: Deno.Conn | Deno.TlsConn;
   private reader!: ReadableStreamDefaultReader<Uint8Array>;
   private encoder = new TextEncoder();
   private decoder = new TextDecoder();
   private buffer = "";
   private tagCounter = 0;
 
-  constructor(private host: string, private port: number) {}
+  constructor(private host: string, private port: number, private useSsl = true) {}
 
   async connect(timeoutMs = 15000) {
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(new Error(`IMAP connect timeout ${timeoutMs}ms`)), timeoutMs);
     try {
-      this.conn = await Deno.connectTls({ hostname: this.host, port: this.port, signal: abort.signal });
+      this.conn = this.useSsl
+        ? await connectImapTls(this.host, this.port, abort.signal)
+        : await Deno.connect({ hostname: this.host, port: this.port, transport: "tcp" });
     } finally {
       clearTimeout(timer);
     }
@@ -445,7 +485,8 @@ function detectAttachments(metaRaw: string): { hasAttachment: boolean; count: nu
 // ============ 同步逻辑 ============
 async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResult> {
   const result: SyncResult = { mailbox: mb.email_address, fetched: 0, inserted: 0, total: 0, remaining: 0 };
-  const client = new ImapClient(mb.incoming_host, Number(mb.incoming_port));
+  const effectiveUseSsl = MAIL_LOCAL_TEST_MODE ? false : (mb.use_ssl !== false);
+  const client = new ImapClient(mb.incoming_host, Number(mb.incoming_port), effectiveUseSsl);
 
   try {
     console.log("[sync]", mb.email_address, mb.incoming_host, mb.incoming_port, "id:", mb.id, "type:", typeof mb.id);

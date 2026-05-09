@@ -343,7 +343,7 @@ async function associateOrders(admin: any, email: any, analysis: Analysis) {
         email_id: email.id,
         order_no: analysis.order_no,
         status: "pending",
-        next_run_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        next_run_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
       }, { onConflict: "email_id,order_no" });
       await recordEvent(admin, email.id, "compensation_created", `订单 ${analysis.order_no} 暂未查到，已创建补偿任务`);
     }

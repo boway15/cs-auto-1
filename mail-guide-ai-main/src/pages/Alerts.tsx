@@ -75,7 +75,7 @@ export default function Alerts() {
       } as any)
       .eq("id", row.id);
     if (error) { toast.error("更新失败：" + error.message); return; }
-    toast.success(targetStatus === "resolved" ? "已标记为已回复" : "已改回处理中");
+    toast.success(targetStatus === "resolved" ? "已标记为已处理" : "已改回处理中");
     load();
   }
 
@@ -131,7 +131,7 @@ export default function Alerts() {
             <SelectItem value="all">全部状态</SelectItem>
             <SelectItem value="open">待处理</SelectItem>
             <SelectItem value="acknowledged">处理中</SelectItem>
-            <SelectItem value="resolved">已回复</SelectItem>
+            <SelectItem value="resolved">已处理</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -183,7 +183,7 @@ export default function Alerts() {
                   </TableCell>
                   <TableCell>
                     <Badge variant="outline" className={STATUS_CLS[row.status] ?? ""}>
-                      {row.status === "open" ? "待处理" : row.status === "acknowledged" ? "处理中" : row.status === "resolved" ? "已回复" : row.status}
+                      {row.status === "open" ? "待处理" : row.status === "acknowledged" ? "处理中" : row.status === "resolved" ? "已处理" : row.status}
                     </Badge>
                   </TableCell>
                   <TableCell className="text-xs">
@@ -207,7 +207,7 @@ export default function Alerts() {
                       </Button>
                     ) : (
                       <Button size="sm" variant="ghost" onClick={() => updateStatus(row, "resolved")}>
-                        标记已回复
+                        标记已处理
                       </Button>
                     )}
                   </TableCell>

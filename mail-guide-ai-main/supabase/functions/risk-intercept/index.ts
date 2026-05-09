@@ -9,7 +9,6 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
-const HOLD_TAG = "hold-shipping";
 
 async function getActor(req: Request, admin: any) {
   const authHeader = req.headers.get("Authorization") ?? "";
@@ -24,39 +23,9 @@ async function getActor(req: Request, admin: any) {
   return { userId: data.user.id, isService: false };
 }
 
-async function applyShopifyTag(admin: any, order: any, action: "hold" | "release", reason?: string, category?: string) {
-  if (!order.shop_id || !order.shopify_order_id) {
-    return { skipped: true, reason: "订单未关联 Shopify" };
-  }
-  const { data: shop } = await admin
-    .from("shopify_shops")
-    .select("shop_domain, access_token, api_version")
-    .eq("id", order.shop_id)
-    .single();
-  if (!shop) return { skipped: true, reason: "Shopify 店铺不存在" };
-
-  const currentTags = (order.shopify_tags ?? "").split(",").map((tag: string) => tag.trim()).filter(Boolean);
-  const tags = action === "hold"
-    ? (currentTags.includes(HOLD_TAG) ? currentTags : [...currentTags, HOLD_TAG])
-    : currentTags.filter((tag: string) => tag !== HOLD_TAG);
-  const response = await fetch(`https://${shop.shop_domain}/admin/api/${shop.api_version}/orders/${order.shopify_order_id}.json`, {
-    method: "PUT",
-    headers: {
-      "X-Shopify-Access-Token": shop.access_token,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      order: {
-        id: Number(order.shopify_order_id),
-        tags: tags.join(", "),
-        ...(action === "hold" && reason ? { note: `[风控拦截] ${category ?? ""} ${reason}`.trim() } : {}),
-      },
-    }),
-  });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`Shopify ${response.status}: ${text.slice(0, 300)}`);
-  await admin.from("orders").update({ shopify_tags: tags.join(", ") }).eq("id", order.id);
-  return { ok: true, status: response.status, body: text.slice(0, 500) };
+/** 第三方打标：Shopify 已停用；仅本地 `orders` 状态由 runIntercept 更新，ERP 见 docs/erp-api-requirements.md */
+async function applyShopifyTag(_admin: any, _order: any, _action: "hold" | "release", _reason?: string, _category?: string) {
+  return { skipped: true, reason: "Shopify 已停用，仅本地订单状态" };
 }
 
 async function runIntercept(payload: any, actor: { userId: string | null }, admin: any) {

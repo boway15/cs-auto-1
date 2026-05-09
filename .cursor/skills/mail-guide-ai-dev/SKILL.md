@@ -1,297 +1,98 @@
 ---
 name: "mail-guide-ai-dev"
-description: "mail-guide-ai 跨境电商智能客服邮件系统 — 本地开发、Docker 构建部署、Supabase 配置、技术栈概览和常见问题排查。当你需要开发、调试、构建或部署该项目时使用。"
+description: "梳理并执行 cs-main 中 mail-guide-ai 相关开发任务：技术栈识别、目录结构定位、前后端实现路径、Dify 与 Supabase（云端/自建）联调、启动部署与故障排查。用户提到 mail-guide-ai、Supabase、Dify、自建部署、Edge Functions、cron、工作流时使用。"
 ---
 
-# mail-guide-ai 开发与部署
+# mail-guide-ai（cs-main）开发基线
 
-## 项目概述
+## 1) 当前项目边界（先判断再动手）
 
-**mail-guide-ai**（智能客服工作台）是一套跨境电商智能客服邮件管理系统。客服人员通过 Web 工作台处理入站邮件、查看 AI 草拟回复、将邮件关联到 ERP 订单、通过 SMTP 发送回复、管理回复模板，并对订单执行风控/拦截操作。
+`cs-main` 是多项目工作区，mail-guide-ai 相关实现跨 3 个子目录：
 
-界面语言：简体中文。业务领域：跨境电商客服。
+- `mail-guide-ai-main/`：业务前端 + Supabase migrations + Supabase Edge Functions（源码在仓库内）
+- `dify/`：Dify 平台本体（独立 Docker 栈，含 Python API + Next.js Web）
+- `supabase-selfhost/`：Supabase 官方 Docker 自建模板（已按本仓库做少量适配）
 
----
+默认运行形态（当前常用）：
+- 前端：`mail-guide-ai-main`（本地或 Docker）
+- AI 工作流：`dify/docker/docker-compose.cs.yml`
+- 数据与函数：**生产默认** `supabase-selfhost`（自建）；开发可选用 Supabase Cloud
 
-## 技术栈
+## 2) 技术栈速览（以“已落地文件”为准）
 
-| 层 | 技术 |
-|---|---|
-| **前端框架** | React 18 + TypeScript |
-| **构建工具** | Vite 5（SWC 编译） |
-| **路由** | react-router-dom v6 |
-| **数据请求** | @tanstack/react-query v5 |
-| **UI 组件库** | shadcn/ui（Radix UI 基元 + Tailwind CSS） |
-| **表单** | react-hook-form + zod |
-| **图表** | recharts |
-| **日期处理** | date-fns（zhCN locale） |
-| **后端服务** | Supabase（全托管） |
-| **数据库** | PostgreSQL（Supabase 托管） |
-| **认证** | Supabase Auth（邮箱/密码） |
-| **无服务器** | Supabase Edge Functions（Deno 运行时） |
-| **定时任务** | pg_cron + pg_net 扩展 |
-| **测试** | Vitest + @testing-library/react |
-| **代码检查** | ESLint v9（flat config） |
+### mail-guide-ai-main（业务主仓）
 
-### 核心依赖
+- 前端：React 18 + TypeScript + Vite 5 + react-router-dom 6
+- UI：Tailwind CSS + Radix + shadcn/ui
+- 状态与请求：@tanstack/react-query v5 + Supabase JS v2
+- 表单校验：react-hook-form + zod
+- 测试：Vitest + Testing Library + jsdom
+- 部署：Nginx（SPA 回退）+ Docker 多阶段构建
+- 后端能力：Supabase（Postgres/Auth/Edge Functions/cron）
 
-```
-@supabase/supabase-js  — Supabase 客户端
-@tanstack/react-query  — 服务端状态缓存
-react-hook-form + zod  — 表单与验证
-lucide-react           — 图标库
-date-fns               — 日期处理
-```
+### dify（平台侧）
 
----
+- Monorepo：pnpm workspace（根 `packageManager: pnpm@11`）
+- Web：Next.js（`dify/web`）
+- API：Python 3.12 + Flask + Celery（`dify/api/pyproject.toml`）
+- 部署：`dify/docker/docker-compose.cs.yml`（本仓库定制）
 
-## 本地开发
+### supabase-selfhost（自建可选）
 
-### 前置条件
+- 关键组件：Kong、Auth、PostgREST、Realtime、Storage、Edge Runtime、Supavisor、Studio、Postgres
+- 当前已支持：`functions` 服务通过 `env_file: .env.functions` 注入业务环境变量
+- 端口策略：允许通过 `POOLER_PORT_PUBLISHED` 规避宿主机 5432 冲突
 
-- **Node.js 20+**（推荐使用 nvm / fnm）
-- **npm**（项目主包管理器，package-lock.json 已提交）
-- （可选）**Supabase CLI** — 仅在需要本地运行 Supabase 时安装
+## 3) 实现方式（框架层）
 
-### 1. 安装依赖
+### 前端架构（mail-guide-ai-main）
 
-```bash
-cd mail-guide-ai-main
-cp .env.example .env   # 填入真实 Supabase 凭据
-npm ci                 # 使用 ci 确保与 lockfile 严格一致
-```
+- 入口：`src/main.tsx`
+- 组装：`src/App.tsx`（`QueryClientProvider` + `BrowserRouter` + `ProtectedRoute`）
+- 权限：`useAuth` 读取 Supabase session + `user_roles`，`ProtectedRoute` 控制 admin 页面
+- 页面层：`src/pages/*`（Workbench、Mailboxes、ERP、Templates、Users、Alerts、Logs）
+- 基础设施：`src/lib/supabase.ts`、`src/integrations/supabase/*`
 
-### 2. 环境变量
+### 后端实现（Supabase-first）
 
-创建 `.env` 文件（复制自 `.env.example`）：
+- 数据结构：`mail-guide-ai-main/supabase/migrations/*.sql`
+- 业务函数：`mail-guide-ai-main/supabase/functions/*/index.ts`（**Supabase Edge Functions / Deno**；自建 Docker 与 Cloud **同一套**源码，仅部署方式不同）
+- 典型函数：`sync-mailbox`、`process-email`、`generate-draft`、`send-reply`、`risk-intercept`、`dify-gateway`
+- 定时链路：`pg_cron + pg_net` 调度函数（包含自动收信、草稿与补偿类任务）
 
-```env
-VITE_SUPABASE_URL="https://<project-id>.supabase.co"
-VITE_SUPABASE_PUBLISHABLE_KEY="<anon-key>"
-VITE_SUPABASE_PROJECT_ID="<project-id>"
-```
+### Dify 对接方式
 
-> **⚠️ 安全提示**：`.env` 已加入 `.gitignore`，切勿提交真实凭据到仓库。
+- 工作流 DSL 位于 `mail-guide-ai-main/dify-workflows/`
+- Supabase Functions 通过 Dify API（常见为 ngrok 暴露地址）触发分析/草稿工作流
+- URL/Key 变更时，需同步更新 Cloud secrets 或 `supabase-selfhost/.env.functions`
 
-### 3. 启动开发服务器
+## 4) 本项目推荐操作顺序（Windows）
 
-```bash
-npm run dev
-# 默认在 http://localhost:8080 启动
-# IPv6 地址 :: 可能在其他机器上不可访问，可修改 vite.config.ts
-```
-
-### 4. 常用命令
-
-```bash
-npm run dev           # 启动 Vite 开发服务器
-npm run build         # 生产构建
-npm run build:dev     # 开发模式构建（不压缩，方便调试）
-npm run preview       # 预览生产构建
-npm run lint          # ESLint 代码检查
-npm run test          # 运行 Vitest 测试（单次）
-npm run test:watch    # 监听模式运行测试
-npm run release:patch # 版本号 patch 升级 + changelog 生成
-```
-
----
-
-## Docker 构建与部署
-
-项目已配置完整的多阶段 Docker 构建。
-
-### 构建
-
-```bash
-# 方式一：docker compose（推荐）
-docker compose build
-
-# 方式二：docker build（需手动传入构建参数）
-docker build \
-  --build-arg VITE_SUPABASE_URL="https://xxx.supabase.co" \
-  --build-arg VITE_SUPABASE_PUBLISHABLE_KEY="eyJ..." \
-  --build-arg VITE_SUPABASE_PROJECT_ID="xxx" \
-  -t mail-guide-ai:latest .
-```
-
-### 运行
-
-```bash
-# docker compose（端口 8080）
-docker compose up -d
-
-# 纯 docker
-docker run -d -p 8080:80 --name mail-guide-ai mail-guide-ai:latest
-```
-
-访问：**http://localhost:8080**
-
-### 构建流程说明
-
-Dockerfile 分为两个阶段：
-
-1. **Stage 1（builder）**：基于 `node:20-alpine`，执行 `npm ci` → `npm run build`（Vite 构建时会将 `VITE_*` 环境变量内联到 JS bundle 中）
-2. **Stage 2（production）**：基于 `nginx:alpine`，复制构建产物到 `/usr/share/nginx/html`，使用自定义 `nginx.conf` 处理 SPA 路由
-
-### Nginx 配置要点
-
-- Gzip 压缩：JS/CSS/JSON/SVG
-- 静态资源（含 hash）：1 年缓存 `Cache-Control: public, immutable`
-- SPA 回退：所有非文件请求返回 `index.html`
-- 安全头：`X-Frame-Options`, `X-Content-Type-Options`, `X-XSS-Protection`
-
-### 健康检查
-
-```bash
-# 容器内健康检查
-docker exec mail-guide-ai wget -qO- http://localhost:80/
-
-# 外部
-curl -I http://localhost:8080/
-```
-
----
-
-## 项目结构
-
-```
-mail-guide-ai-main/
-├── .env                      # 环境变量（有真实凭据，勿提交）
-├── .env.example              # 环境变量模板
-├── Dockerfile                # 多阶段构建
-├── docker-compose.yml        # docker compose 编排
-├── nginx.conf                # Nginx SPA 配置
-├── package.json              # 依赖与脚本
-├── vitest.config.ts          # 测试配置
-├── vite.config.ts            # Vite 构建配置
-├── tailwind.config.ts        # Tailwind + 自定义主题
-├── tsconfig.json             # TypeScript 配置
-├── dify-workflows/           # Dify 工作流 DSL（导入用）
-│   ├── README.md             # Dify 与 Supabase 对接说明
-│   ├── email-analysis.yml    # 独立站智能客服-邮件智能分析
-│   ├── draft-generation.yml  # 独立站智能客服-邮件草稿生成
-│   └── NewEmailDraft.yaml    # 独立站智能客服-上下文增强草稿生成
-├── supabase/
-│   └── migrations/           # 17 个 SQL 迁移文件
-├── src/
-│   ├── main.tsx              # 入口
-│   ├── App.tsx               # 根组件（路由 + QueryClient）
-│   ├── lib/
-│   │   ├── supabase.ts       # Supabase 客户端单例
-│   │   └── utils.ts          # cn() 工具函数
-│   ├── hooks/
-│   │   └── useAuth.ts        # 鉴权 hook
-│   ├── components/
-│   │   ├── AppLayout.tsx     # 侧边栏布局
-│   │   ├── ProtectedRoute.tsx# 鉴权守卫
-│   │   └── ui/               # ~50 个 shadcn/ui 组件
-│   └── pages/
-│       ├── Auth.tsx          # 登录/注册
-│       ├── Workbench.tsx     # 主工作台（邮件队列+ AI 草稿）
-│       ├── Mailboxes.tsx     # 邮箱配置
-│       ├── Erp.tsx           # ERP 配置
-│       ├── Templates.tsx     # 回复模板
-│       ├── Users.tsx         # 用户管理
-│       ├── SendLogs.tsx      # 发送日志
-│       └── RiskLogs.tsx      # 风控日志
-```
+1. 启 Dify：`dify/docker/docker-compose.cs.yml`
+2. 启前端：`mail-guide-ai-main`（`npm run dev` 或 `docker compose up -d`）
+3. Supabase 路径：
+   - **自建（优先）**：启动 `supabase-selfhost`，迁移、`vault`/cron URL 指向本栈 Kong，同步 functions
+   - 云端（可选）：`npx supabase link` + functions deploy/secrets
 
----
+参考命令清单：`mail-guide-ai-main/docs/startup-commands.md`
 
-## Dify 工作流 DSL（独立站智能客服）
+## 5) 常见风险与硬规则
 
-- **目录**：仓库内 `mail-guide-ai-main/dify-workflows/`（详细步骤见同目录 `README.md`）。
-- **应用命名**：`app.name` 使用前缀 **`独立站智能客服-`**，后缀为作用说明（与当前仓库 YAML 一致）。
-- **默认模型**：`deepseek-v4-flash`；LLM 节点 **`model.provider` 必须为** `langgenius/deepseek/deepseek`（DeepSeek **市场插件**），不要用裸 `deepseek`。
-- **依赖声明**：DSL 顶层 **`dependencies`** 须包含与实例一致的 **marketplace** 项（`langgenius/deepseek:...@哈希`）。插件升级或换实例后，从 Dify **重新导出** 任意工作流，用其中的 `marketplace_plugin_unique_identifier` **整段替换**仓库 YAML，否则导入后画布或模型节点可能报错。
-- **与导出对齐**：`app.icon_type`、`workflow.features`（含完整 `file_upload` / `text_to_speech` 等）、`graph.edges[].data.isInLoop`、`workflow.rag_pipeline_variables`、LLM 节点的 **`title`** 与 **`context`** 块，均建议与当前 Dify Web **导出格式**一致（已在本仓库三份 DSL 中对齐）。
-- **维护 DSL 的详细规则**：见工作区技能 `.cursor/skills/dify-dsl-workflow-creator/SKILL.md`。
+- 严禁提交密钥：`mail-guide-ai-main/.env`、`supabase-selfhost/.env`、`.env.functions`、ngrok token
+- 自建迁移后必须执行 vault/cron 修正，避免任务仍打到 `*.supabase.co`
+- `supabase/config.toml` 中多个函数 `verify_jwt=false`，生产需配合网关/网络边界
+- Windows 若出现 CRLF 脚本启动故障，执行 `mail-guide-ai-main/scripts/fix-supabase-selfhost-crlf.ps1`
 
----
+## 6) 触发与执行策略（给代理）
 
-## 路由与权限
+当用户提到以下任意主题时，优先应用本技能：
+- “技术栈 / 架构 / 目录梳理”
+- “mail-guide-ai + Dify + Supabase 联调”
+- “自建 Supabase 迁移、函数同步、cron 不生效”
+- “本地/生产部署、重启恢复、环境变量排障”
 
-| 路径 | 页面 | 权限 |
-|---|---|---|
-| `/auth` | 登录/注册 | 未认证用户 |
-| `/` | 工作台 | 所有已认证用户 |
-| `/send-logs` | 发送日志 | 所有已认证用户 |
-| `/risk-logs` | 风控日志 | 所有已认证用户 |
-| `/mailboxes` | 邮箱配置 | 仅 admin |
-| `/erp` | ERP 配置 | 仅 admin |
-| `/templates` | 回复模板 | 仅 admin |
-| `/users` | 用户管理 | 仅 admin |
-
-角色：`admin`（管理员）、`leader`（组长）、`agent`（客服）。
-首次注册的用户自动成为 admin，后续注册自动为 agent。
-
----
-
-## Supabase Edge Functions
-
-项目前端调用以下 Supabase Edge Functions（源码不在本仓库中，通过 Supabase CLI / Dashboard 单独部署）：
-
-| Function | 用途 |
-|---|---|
-| `generate-draft` | 根据邮件内容生成 AI 回复草稿 |
-| `sync-mailbox` | 通过 IMAP/POP3 同步收件箱 |
-| `send-reply` | 通过 SMTP 发送回复邮件 |
-| `test-mailbox` | 测试 IMAP 连接 |
-| `risk-intercept` | 订单风控拦截/放行 |
-
-前端调用方式：`supabase.functions.invoke('function-name', { body })`
-
----
-
-## 定时任务
-
-通过 PostgreSQL `pg_cron` + `pg_net` 扩展实现：
-- **`auto-sync-mailbox-every-5min`**：每 5 分钟调用 `sync-mailbox` Edge Function 自动收信
-
----
-
-## 常见问题排查
-
-### Docker 构建失败
-
-1. **构建参数未传入** → 确保 `.env` 文件存在且 `docker compose` 能读取到变量
-2. **npm ci 失败** → 检查 Node.js 版本是否为 20+，网络是否可达 npm registry
-3. **Vite 构建 OOM** → 增加 Docker 内存限制：`docker compose build --memory=4g`
-
-### 本地开发时 Supabase 连接失败
-
-- 确认 `.env` 中三个变量与 Supabase Dashboard 中的值一致
-- 检查浏览器控制台是否有 CORS 错误（应在 Supabase Dashboard → API Settings 中配置允许的域名）
-- `Publishable Key` 是 **anon key**（公开可暴露的），不是 `service_role key`
-
-### SPA 路由刷新 404
-
-- 确认 `nginx.conf` 中 `try_files $uri $uri/ /index.html;` 已正确配置
-- 清除浏览器缓存后重试
-
-### TypeScript 类型问题
-
-项目 `tsconfig.json` 中 `strict: false`，部分组件使用 `type Email = any`。如需增强类型安全：
-1. 在 `src/types/` 下创建类型定义文件
-2. 逐步启用 strict 模式
-
----
-
-## 版本发布
-
-```bash
-npm run release:patch   # 0.0.x → 0.0.x+1
-npm run release:minor   # 0.x.0 → 0.x+1.0
-npm run release:major   # x.0.0 → x+1.0.0
-```
-
-自动生成 CHANGELOG（基于 conventional commits），创建 git tag 并提交。
-
----
-
-## 补充说明
-
-- 项目由 Lovable（AI 网页应用构建器）生成，已有完整的 Supabase 迁移（17 个 SQL 文件）
-- Edge Functions 源码不在本仓库，需通过 Supabase CLI 单独管理
-- bun lockfile（`bun.lock`/`bun.lockb`）存在于仓库但非主要包管理器，建议统一使用 npm
+执行时遵循：
+1. 先确认目标栈（Cloud 还是 self-hosted）
+2. 再确认运行入口（本地 dev 还是 Docker）
+3. 最后给最小可执行命令链 + 验证点
 

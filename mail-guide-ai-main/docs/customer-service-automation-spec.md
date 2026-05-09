@@ -5,6 +5,25 @@
 
 ---
 
+## 0. 产品决策摘要（2026-05-10）
+
+以下条款为**已确认**口径，与历史 PRD/实现冲突时以本节为准：
+
+| 主题 | 决策 |
+|------|------|
+| 工单完成态 | **仅保留「已回复」**（`replied`）。产品流程不区分 `closed`；数据库若仍保留 `closed` 列/约束仅为兼容历史数据，**不作为主流程状态**。 |
+| 自动草稿时间窗 | **收信满 1h 后**参与调度：**1h～6h** Dify 长稿，**6h～24h** 本地短稿；≥24h 不自动。 |
+| `not_provided`（未提供单号） | **不**发内部运营预警邮件。 |
+| `compensating` 内部预警 | 收信 **≥2h** 且 **≤72h** 内才允许首次内部预警；**超过 72h** 的邮件**不再**因 compensating 发预警。 |
+| 自动回复开关 | **长期放在 Supabase Functions secrets**（如 `AUTO_REPLY_*`），不设管理员 UI 配置表（本期）。 |
+| 告警邮件 | **固定发件人**：在 `mailboxes` 中配置与 `ALERT_SENDER_ADDRESS`（或 `ops-notify` 默认值）一致的 SMTP；收件以 env 为准（如 `ALERT_EMAIL_TO`）。 |
+| Shopify | **不继续**：`risk-intercept` **不调用** Shopify API，仅更新本地 `orders` hold；与 ERP 的拦截以 `docs/erp-api-requirements.md` 为准。 |
+| 订单补偿任务 | **最多重试 10 次**；**每 30 分钟**调度一次重试（`next_run_at` 步长 30 分钟）。 |
+| 运营告警页文案 | 告警 `resolved` 状态对用户展示为 **「已处理」**（与邮件 `replied` 语义区分）。 |
+| **发布环境** | **生产为自建 Supabase（Docker）**；**业务逻辑仍在 Supabase Edge Functions（Deno）** 中运行，与 Cloud 项目共用同一套 `mail-guide-ai-main/supabase/functions/` 源码，仅部署与网关 URL 不同。cron URL 须指向自建 Kong 的 `/functions/v1/...`，**不得**固定写 `*.supabase.co`（详见 `docs/self-hosted-supabase.md`）。 |
+
+---
+
 ## 1. 总体链路
 
 ```
@@ -41,8 +60,13 @@
 ## 3. 订单关联与状态语义
 
 - **已关联**：`email_order_links` 存在且对应 `orders` 有记录 → `association_status = linked`。
-- **有单号未匹配**：客户提供了订单号，本地库暂无对应订单 → 写入 **补偿任务**（如 `order_compensation_tasks`），`association_status = compensating`。
+- **有单号未匹配**：客户提供了订单号，本地库暂无对应订单 → 写入 **补偿任务**（`order_compensation_tasks`），`association_status = compensating`。
 - **未提供单号**：无可用订单号 → `not_provided`（或等价语义）。
+
+**补偿任务参数（已确认）**：
+
+- 默认 **`max_retries = 10`**。
+- 每次未查到订单时，**`next_run_at` 推迟 30 分钟**（与 pg_cron 调用周期建议一致，例如每 30 分钟执行一次 `run-compensation-tasks`）。
 
 关联成功后，后续拦截、草稿等逻辑依赖 **linkedOrders.length > 0**。
 
@@ -55,23 +79,24 @@
 | 类型 | 时间条件 | 用途 |
 |------|----------|------|
 | **客户自动回复** | `now - received_at ≤ 24h` | 仅在此窗口内给客户发自动模板；**超过 24h 一律不发**。 |
-| **内部预警** | `now - received_at ≥ 2h` | 如 **有单号但未关联成功**（compensating）等场景，**首次**内部预警邮件不早于收信后 2 小时；需 **去重**（同类预警同一邮件不重复轰炸）。 |
+| **内部预警（compensating）** | `2h ≤ now - received_at ≤ 72h` | 有单号未关联成功时，**首次**内部预警不早于收信后 **2h**，且**不晚于**收信后 **72h 仍持续预警**（超过 72h 不再发此类预警）。需 **去重**。 |
 
 **说明**：
 
-- 客户 24h 与内部 2h **互不替代**。例如收信 3h、仍 compensating：可发内部预警；若业务上已超过 24h，则仍 **不对客户** 自动回复。
-- **取消/改地址** 且邮件 **已超过 24h**：**禁止**对客户自动回复；内部是否继续对「长期 compensating」告警，可另设年龄上限（可选，未强制）。
+- 客户 24h 与内部 2h～72h **互不替代**。例如收信 3h、仍 compensating：可发内部预警；若已超过 24h，仍 **不对客户** 自动回复。
+- **`not_provided`**：**不**走内部 compensating 预警（无单号场景不发运营预警邮件）。
+- **取消/改地址** 且邮件 **已超过 24h**：**禁止**对客户自动回复（即使开关打开）。
 
 ---
 
 ## 5. 开关与通用自动回复逻辑
 
-### 5.1 开关（建议配置名）
+### 5.1 开关（配置方式已确认）
 
-| 配置 | 作用 |
-|------|------|
-| **总开关**（如 `AUTO_REPLY_CUSTOMER_ENABLED`） | 关闭时，**所有**给客户自动模板 **一律不发**。 |
-| **取消/改地址缺单号**（如 `AUTO_REPLY_RISK_MISSING_ORDER_NO`） | 在总开关打开前提下，单独控制「取消/改地址 + 缺单号」是否对客户发索要单号类模板。 |
+| 配置 | 作用 | 存放 |
+|------|------|------|
+| **总开关**（`AUTO_REPLY_CUSTOMER_ENABLED`） | 关闭时，**所有**给客户自动模板 **一律不发**。 | Supabase Functions **secrets** |
+| **取消/改地址缺单号**（`AUTO_REPLY_RISK_MISSING_ORDER_NO`） | 在总开关打开前提下，控制「取消/改地址 + 缺单号」是否对客户发索要单号类模板。 | Supabase Functions **secrets** |
 
 ### 5.2 客户自动回复通用前置条件
 
@@ -92,9 +117,9 @@
 
 | 条件 | 客户自动回复 | 订单/风控 | 内部预警 |
 |------|----------------|-----------|----------|
-| **未提供订单号**（无法关联） | 总开关 + 分场景开关开 **且** ≤24h：发索要单号等模板；否则不发 | **不**调用拦截 | 按产品需要可选（默认可不重复发客户信场景下的内部信） |
-| **有单号且关联成功** | 一般不先发「缺单号」模板 | **调用** `risk-intercept`（hold 等） | 拦截失败时现有告警机制 |
-| **有单号但未关联成功**（compensating） | **不对客户**发「缺单号」模板（客户已提供单号） | **不**拦截（直至关联成功） | **≥2h** 后发 **内部预警邮件**（ERP/人工处理），去重 |
+| **未提供订单号**（无法关联） | 总开关 + 分场景开关开 **且** ≤24h：发索要单号等模板；否则不发 | **不**调用拦截 | **不**发内部预警（已确认） |
+| **有单号且关联成功** | 一般不先发「缺单号」模板 | **调用** `risk-intercept`（本地 hold；**不**调 Shopify） | 拦截失败时现有告警机制 |
+| **有单号但未关联成功**（compensating） | **不对客户**发「缺单号」模板 | **不**拦截（直至关联成功） | **2h～72h** 窗口内发 **内部预警**（去重）；**超过 72h** 不再预警 |
 
 **特别强调**：**超过 24h** 的取消/改地址邮件 **不**对客户自动回复（即使开关打开）。
 
@@ -115,10 +140,10 @@
 
 ## 7. 内部预警（有单号未关联）
 
-- **触发**：`association_status` 为 compensating（或等价：有单号、已写补偿任务、仍未 `linked`）。  
-- **时间**：**收信后满 2 小时** 才允许发 **首次** 内部预警邮件。  
-- **实现建议**：`process-email` 当下若不足 2h，只落库/事件，**不发**预警；由 **定时任务**（可与现有 30min cron 同栈或独立）扫描满足条件的邮件再发送。  
-- **去重**：同一 `email_id` + 同类预警类型只发一次（或按冷却策略）。
+- **触发**：`association_status = compensating`，且存在有效 `order_no`（任务或实体字段）。  
+- **时间**：**收信满 2 小时** 且 **未满 72 小时**（`received_at` 距今在 \((2h, 72h]\) 区间内）才允许 **首次**内部预警邮件。  
+- **实现**：`process-email` 当下若不足 2h，只落库/事件，**不发**预警；由 **`schedule-compensating-alerts`**（建议每 30min cron）扫描满足条件的邮件再发送。  
+- **去重**：同一 `email_id` + 同类预警类型只发一次（`ops_alerts.idempotency_key`）。
 
 预警内容至少建议包含：`email_id`、客户邮箱、主题/摘要、`order_no`、`business_intent`、关联状态。
 
@@ -128,7 +153,7 @@
 
 | 项 | 口径 |
 |----|------|
-| **调度** | 每 **30 分钟**（如 pg_cron 调 `schedule-draft-generation`） |
+| **调度** | 每 **30 分钟**（pg_cron 调 `schedule-draft-generation`） |
 | **邮件状态** | `pending` 或 `processing` |
 | **草稿** | 当前无非空草稿（`ai_drafts` 无有效 `draft_content`） |
 | **收信时间** | `received_at` 在 **24 小时内** |
@@ -142,21 +167,21 @@
 
 - **随时**可触发（需登录）。  
 - **仅本地短稿**（`buildLocalDraft`），**不**走 Dify；`mode` 非 `local` 应拒绝。  
-- 生成时应可读 `emails.ai_summary`、`ai_language`、`ai_sentiment`（实现后）以统一语气/语种。
+- 生成时应可读 `emails.ai_summary`、`ai_language`、`ai_sentiment` 以统一语气/语种。
 
 ---
 
 ## 10. 与现状代码的差异清单（实施 backlog）
 
-以下为对照当前仓库常见实现时的 **待办**，便于排期：
-
-1. **`emails` 表**：新增 `ai_language`、`ai_sentiment`；`process-email` 写入；异常时语言默认 `en`。  
-2. **取消/改地址**：无单号 + 开关 + ≤24h → 客户自动模板；有单号未关联 → ≥2h 内部预警，**不对客户**发缺单号模板。  
-3. **总开关 + 分场景开关**：环境变量或配置表；所有 `sendTemplateReply` 路径前统一校验 **24h**。  
-4. **内部预警**：封装发送逻辑 + 定时扫描 compensating + 2h + 去重。  
-5. **自动草稿**：核对拦截/关联后 `status` 是否仍满足「不排除」的候选条件；必要时调整。  
+1. **`emails` 表**：`ai_language`、`ai_sentiment`；`process-email` 写入；异常时语言默认 `en`。  
+2. **取消/改地址**：无单号 + 开关 + ≤24h → 客户自动模板；compensating → **2h～72h** 内部预警；**不对客户**发缺单号模板。  
+3. **总开关 + 分场景开关**：**Supabase secrets**；所有 `sendTemplateReply` 路径前统一校验 **24h**。  
+4. **内部预警**：`schedule-compensating-alerts` + **72h 上限** + 去重。  
+5. **自动草稿**：拦截/关联后 `status` 仍满足「不排除」候选条件。  
 6. **草稿管线**：消费 `ai_language` / `ai_sentiment`。  
-7. **Dify DSL**：保持 `email-analysis.yml` 输出与后端字段对齐。
+7. **Dify DSL**：`email-analysis.yml` 输出与后端字段对齐。  
+8. **补偿任务**：`max_retries` 默认 **10**，重试间隔 **30 分钟**（迁移 `20260510120000_compensation_ten_retries_thirty_min.sql` + Edge）。  
+9. **风控**：**不调用 Shopify**；ERP 直连按 `erp-api-requirements.md` 迭代。
 
 ---
 
@@ -166,30 +191,35 @@
 - [ ] 总开关开、分场景关关 → 取消/改地址缺单号不发客户信。  
 - [ ] 任意客户自动回复：`received_at` 超过 24h → 不发。  
 - [ ] 取消/改地址 + 超 24h → 不发客户信。  
-- [ ] 有单号、compensating：收信 &lt;2h → 无内部预警；≥2h → 有内部预警（去重）。  
-- [ ] 有单号且关联成功 + 取消/改地址 → 触发拦截。  
+- [ ] `not_provided` → 无内部 compensating 类预警。  
+- [ ] compensating：收信 &lt;2h → 无内部预警；2h～72h → 有内部预警（去重）；**&gt;72h** → 无内部预警。  
+- [ ] 有单号且关联成功 + 取消/改地址 → 触发拦截（本地 hold，不调 Shopify）。  
 - [ ] 破损/缺陷/描述不符 + 首封 + 信息不完整 + ≤24h + 开关 → 可发模板。  
 - [ ] `ai_language` / `ai_sentiment` 落库；异常时语言为 `en`。  
-- [ ] 自动草稿：1～24h、pending/processing、无草稿、龄≥1h；1～6h Dify、6～24h 本地；候选不排除（满足 SQL 条件即尝试）。  
-- [ ] 人工草稿仅本地。
+- [ ] 自动草稿：1～24h、pending/processing、无草稿、龄≥1h；1～6h Dify、6～24h 本地。  
+- [ ] 人工草稿仅本地。  
+- [ ] 补偿任务最多 **10** 次失败告警，**30 分钟** 间隔。  
+- [ ] 告警页 **resolved** 展示为 **已处理**。  
+- [ ] **自建**环境 cron URL 指向自建网关，无错误 `*.supabase.co`。
 
 ---
 
 ## 12. 文档维护
 
-- **关联文档**：`docs/architecture-design.md`（总架构）、`docs/erp-order-api.md`（订单/ERP）、`dify-workflows/README.md`（Dify 部署与密钥）。  
-- 规则变更时请同步更新 **§4～§9** 与验收表。
+- **关联文档**：`docs/erp-order-api.md`（订单/ERP）、`docs/self-hosted-supabase.md`（自建发布）、`dify-workflows/README.md`（Dify 部署与密钥）。  
+- 规则变更时请同步更新 **§0～§9** 与验收表。
 
 ---
 
-*版本：2026-05-09 根据产品确认整理。*
+*版本：2026-05-10 合并产品确认与文档冲突修订。*
 
 ---
 
 ## 13. 实现说明（仓库）
 
-- **迁移**：`20260509120000_emails_ai_language_sentiment.sql`、`20260509120100_cron_schedule_compensating_alerts.sql`、`20260509120200_idx_emails_compensating_received.sql`
-- **Edge**：`process-email`（开关、24h、取消/改地址模板、`ai_language`/`ai_sentiment`）、`schedule-compensating-alerts`（compensating + 满 2h 内部告警）、`_shared/draft.ts`（本地草稿按语言/情绪）、`generate-draft` / `schedule-draft-generation`（查询新列）
-- **模板**：可在 `reply_templates` 中增加 `trigger_type = risk_missing_order_no`（可选；否则仍可用 `missing_order_no` / `missing_any`）
-- **Secrets**：见 `.env.dify.example` 中 `AUTO_REPLY_*` 说明（可用 `npx supabase secrets set …` 配置）
-- **上线核对 SQL**：[`scripts/verify-customer-automation.sql`](../scripts/verify-customer-automation.sql) 在 Dashboard SQL Editor 中执行
+- **迁移**：`20260509120000_emails_ai_language_sentiment.sql`、`20260509120100_cron_schedule_compensating_alerts.sql`、`20260509120200_idx_emails_compensating_received.sql`、**`20260510120000_compensation_ten_retries_thirty_min.sql`**
+- **Edge**：`process-email`、`schedule-compensating-alerts`（2h～72h 窗口）、`run-compensation-tasks`（30min 步长、10 次）、`risk-intercept`（不调 Shopify）、`_shared/draft.ts`、`generate-draft` / `schedule-draft-generation`
+- **模板**：可在 `reply_templates` 中增加 `trigger_type = risk_missing_order_no`（可选）
+- **Secrets**：`AUTO_REPLY_*`、`DIFY_*`、`ALERT_*` 使用 **Supabase Functions secrets**（自建对应 `supabase-selfhost/.env.functions`）
+- **上线核对**：[`scripts/verify-customer-automation.sql`](../scripts/verify-customer-automation.sql)（若存在）在 SQL Editor 中执行
+- **自建 cron（权威）**：执行 [`scripts/selfhosted/Apply-VaultAndCron.ps1`](../scripts/selfhosted/Apply-VaultAndCron.ps1) 写入 **4 条** `pg_cron`（含 **`run-compensation-tasks-every-30min`**）。`supabase/migrations` 内若仍有 `*.supabase.co` 的 cron 片段，**以该脚本覆盖结果为准**；详见 `docs/self-hosted-supabase.md`「四步续」。

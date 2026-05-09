@@ -67,11 +67,11 @@ Deno.serve(async (req) => {
       }
 
       const retryCount = Number(task.retry_count ?? 0) + 1;
-      const failed = retryCount >= Number(task.max_retries ?? 3);
+      const failed = retryCount >= Number(task.max_retries ?? 10);
       await admin.from("order_compensation_tasks").update({
         retry_count: retryCount,
         status: failed ? "failed" : "pending",
-        next_run_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        next_run_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
         last_error: failed ? "达到最大重试次数，仍未查到订单" : "本次未查到订单",
       }).eq("id", task.id);
       if (failed) {

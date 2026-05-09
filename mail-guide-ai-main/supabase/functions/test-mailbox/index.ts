@@ -4,17 +4,58 @@ const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
+const MAIL_LOCAL_TEST_MODE = Deno.env.get("MAIL_LOCAL_TEST_MODE") === "true";
+
+let cachedMailTlsCaCerts: string[] | undefined | null;
+
+async function getMailTlsCaCerts(): Promise<string[] | undefined> {
+  if (cachedMailTlsCaCerts !== null && cachedMailTlsCaCerts !== undefined) {
+    return cachedMailTlsCaCerts;
+  }
+
+  const certs: string[] = [];
+  const inlinePem = Deno.env.get("MAIL_TLS_CA_CERT_PEM")?.trim();
+  if (inlinePem) {
+    certs.push(inlinePem.replace(/\\n/g, "\n"));
+  }
+
+  const rawPaths = Deno.env.get("MAIL_TLS_CA_CERT_PATH") || Deno.env.get("DENO_CERT") || "";
+  const paths = rawPaths.split(/[;,]/).map((p) => p.trim()).filter(Boolean);
+  for (const path of paths) {
+    try {
+      certs.push(await Deno.readTextFile(path));
+    } catch (e) {
+      console.error(`[test-mailbox] failed to read CA cert path=${path}:`, e);
+    }
+  }
+
+  cachedMailTlsCaCerts = certs.length > 0 ? certs : null;
+  return cachedMailTlsCaCerts ?? undefined;
+}
+
+async function connectImapTls(host: string, port: number): Promise<Deno.TlsConn> {
+  const caCerts = await getMailTlsCaCerts();
+  return await Deno.connectTls({
+    hostname: host,
+    port,
+    ...(caCerts ? { caCerts } : {}),
+  });
+}
 
 async function testImap(opts: {
   host: string;
   port: number;
   user: string;
   pass: string;
+  useSsl: boolean;
 }): Promise<{ ok: boolean; step: string; message?: string }> {
-  let conn: Deno.TlsConn | null = null;
+  let conn: Deno.Conn | Deno.TlsConn | null = null;
   let step = "connect";
   try {
-    conn = await Deno.connectTls({ hostname: opts.host, port: opts.port });
+    const effectiveUseSsl = MAIL_LOCAL_TEST_MODE ? false : opts.useSsl;
+    conn = effectiveUseSsl
+      ? await connectImapTls(opts.host, opts.port)
+      : await Deno.connect({ hostname: opts.host, port: opts.port });
     const reader = conn.readable.getReader();
     const enc = new TextEncoder();
     const dec = new TextDecoder();
@@ -89,6 +130,13 @@ async function testImap(opts: {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`[test-mailbox] step=${step} error=${msg}`);
+    if (step === "connect" && msg.includes("UnknownIssuer")) {
+      return {
+        ok: false,
+        step,
+        message: "[connect] 邮箱服务器证书不被当前 Edge Functions 信任。请将该邮箱服务器的根证书/中间证书 PEM 配置到 MAIL_TLS_CA_CERT_PATH 或 MAIL_TLS_CA_CERT_PEM 后重启 functions。",
+      };
+    }
     return { ok: false, step, message: `[${step}] ${msg}` };
   } finally {
     try { conn?.close(); } catch { /* ignore */ }
@@ -99,14 +147,28 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   try {
     const body = await req.json();
-    const { host, port, user, pass } = body ?? {};
+    const { host, port, user, pass, use_ssl } = body ?? {};
     if (!host || !port || !user || !pass) {
       return new Response(JSON.stringify({ ok: false, message: "host/port/user/pass 必填" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-    const r = await testImap({ host, port: Number(port), user, pass });
+    const r = await testImap({
+      host,
+      port: Number(port),
+      user,
+      pass,
+      useSsl: use_ssl !== false,
+    });
+    if (MAIL_LOCAL_TEST_MODE && r.ok) {
+      return new Response(JSON.stringify({
+        ...r,
+        message: "本地测试模式已开启：当前使用明文连接（未校验证书），仅限本地调试。",
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
     return new Response(JSON.stringify(r), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

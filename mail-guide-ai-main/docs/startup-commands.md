@@ -28,11 +28,21 @@ docker --version      # 需安装 Docker Desktop
 
 ## 二、启动顺序
 
+**生产 / 团队默认（自建 Supabase）：**
+
+```text
+1. supabase-selfhost（d:\Docker\project\cs-main\supabase-selfhost）— 见 docs/self-hosted-supabase.md
+2. Dify（d:\Docker\project\cs-main\dify\docker）
+3. mail-guide-ai 前端（d:\Docker\project\cs-main\mail-guide-ai-main）
+```
+
+**仅本地开发且数据库仍用 Supabase Cloud 时：**
+
 ```text
 1. Dify（d:\Docker\project\cs-main\dify\docker）
 2. ngrok（已并入 Dify compose，一起启动）
-3. mail-guide-ai 前端（d:\Docker\project\cs-main\mail-guide-ai-main）
-4. Supabase 云端（无需本地启动，仅需 CLI 部署/配置）
+3. mail-guide-ai 前端
+4. Supabase Cloud（无需本地起库，仅需 CLI 部署/配置）
 ```
 
 ---
@@ -128,7 +138,10 @@ npx supabase functions deploy sync-mailbox --no-verify-jwt
 npx supabase functions deploy process-email --no-verify-jwt
 npx supabase functions deploy generate-draft
 npx supabase functions deploy schedule-draft-generation --no-verify-jwt
-npx supabase functions deploy close-email
+npx supabase functions deploy schedule-compensating-alerts --no-verify-jwt
+npx supabase functions deploy run-compensation-tasks --no-verify-jwt
+# close-email 为遗留函数，产品主流程以「已回复」为主，可选部署
+# npx supabase functions deploy close-email
 npx supabase functions deploy send-reply
 npx supabase functions deploy risk-intercept
 npx supabase functions deploy dify-gateway --no-verify-jwt
@@ -144,16 +157,86 @@ npx supabase functions secrets set DIFY_DRAFT_URL="https://xxxx.ngrok-free.app/v
 npx supabase functions secrets set DIFY_DRAFT_KEY="app-xxxxx2"
 ```
 
+### 4.5 Supabase 自建 Docker（`supabase-selfhost`）
+
+完整说明见 **`mail-guide-ai-main/docs/self-hosted-supabase.md`**。**从零搭栈、逐项勾选与排错**请优先阅读该文档中的 **「本地从零到可用：总清单」**；下面为最小命令链速查。
+
+```powershell
+# 1) 临时给 db 暴露 54323:5432（写在 supabase-selfhost/docker-compose.yml 的 db 服务下），然后：
+cd d:\Docker\project\cs-main\mail-guide-ai-main
+$env:PGSSLMODE = "disable"
+npx supabase db push --db-url "postgresql://postgres:<POSTGRES_PASSWORD>@127.0.0.1:54323/postgres"
+# 推完后删除临时 ports 并 docker compose up -d
+
+# 2) Vault + pg_cron 指向栈内 Kong
+cd d:\Docker\project\cs-main\mail-guide-ai-main\scripts\selfhosted
+.\Apply-VaultAndCron.ps1
+
+# 3) 同步 Edge Functions + env_file
+cd d:\Docker\project\cs-main\mail-guide-ai-main\scripts
+.\sync-functions-to-selfhost.ps1
+cd d:\Docker\project\cs-main\mail-guide-ai-main\scripts\selfhosted
+.\Ensure-FunctionsEnvFileInCompose.ps1
+# 复制 docs/self-hosted-env-functions.example -> supabase-selfhost/.env.functions 并填写
+cd d:\Docker\project\cs-main\supabase-selfhost
+docker compose up -d --force-recreate --no-deps functions
+
+# 4) 前端：复制 mail-guide-ai-main/.env.selfhosted.example -> .env，填 ANON_KEY
+```
+
+#### 4.5.1 邮箱 `UnknownIssuer` 快速处理
+
+```powershell
+# 生产推荐：配置邮箱 CA 证书链（PEM）后重建 functions
+# 1) 将证书放到：d:\Docker\project\cs-main\supabase-selfhost\volumes\functions\certs\mail-ca.pem
+# 2) 在 supabase-selfhost\.env.functions 添加：
+#    MAIL_TLS_CA_CERT_PATH=/home/deno/functions/certs/mail-ca.pem
+cd d:\Docker\project\cs-main\supabase-selfhost
+docker compose up -d --force-recreate --no-deps functions
+```
+
+```powershell
+# 仅本地调试（不安全）：开启本地测试模式并重建 functions
+# 在 supabase-selfhost\.env.functions 添加：
+# MAIL_LOCAL_TEST_MODE=true
+cd d:\Docker\project\cs-main\supabase-selfhost
+docker compose up -d --force-recreate --no-deps functions
+# 提示：本地测试模式建议使用 IMAP 143（明文）
+```
+
 ---
 
 ## 五、验证清单
 
+### 通用
+
 - Dify：打开 `http://localhost:8090` 能登录
 - 前端：打开 `http://localhost:8080` 能看到登录页
-- ngrok：`http://localhost:4040` 可看到 tunnel
-- Supabase：Dashboard 中 Edge Functions 状态正常
-- 定时任务：Supabase Database Cron 中 `auto-sync-mailbox-every-5min` 启用
-- 定时任务：Supabase Database Cron 中 `auto-draft-every-30min` 启用
+- ngrok（若使用）：`http://localhost:4040` 可看到 tunnel
+
+### Supabase Cloud（CLI 部署时）
+
+- Dashboard 中 Edge Functions 列表正常
+- Database → Cron：`auto-sync-mailbox-every-5min`、`auto-draft-every-30min`、`compensating-alerts-every-30min` 等与迁移一致（Cloud 项目是否含 `run-compensation-tasks` 以实际迁移为准；自建见下）
+
+### 自建 Supabase（Docker）
+
+- `docker compose ps`（在 `supabase-selfhost`）主要服务 healthy
+- 已在 **`scripts/selfhosted/Apply-VaultAndCron.ps1`** 执行后，Postgres 中 **4 条** cron 齐全（与 [`docs/self-hosted-supabase.md`](./self-hosted-supabase.md)「四步续」表格一致），含 **`run-compensation-tasks-every-30min`**（每 30 分钟订单补偿，与 `order_compensation_tasks.next_run_at` 步长一致）
+- 校验 SQL（勿把输出中的密钥贴到公共环境）：
+
+```sql
+SELECT jobname, schedule FROM cron.job
+WHERE jobname IN (
+  'auto-sync-mailbox-every-5min',
+  'auto-draft-every-30min',
+  'compensating-alerts-every-30min',
+  'run-compensation-tasks-every-30min'
+)
+ORDER BY jobname;
+-- 预期 4 行；command 中不应含 *.supabase.co
+SELECT name FROM vault.secrets WHERE name = 'service_role_key';
+```
 
 ---
 
