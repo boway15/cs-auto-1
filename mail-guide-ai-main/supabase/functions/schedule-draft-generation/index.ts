@@ -88,7 +88,7 @@ async function pickCandidates(admin: any): Promise<Candidate[]> {
 async function generateForCandidate(admin: any, candidate: Candidate) {
   const { data: emailRow } = await admin
     .from("emails")
-    .select("id, subject, body_text, from_email, from_name, ai_summary")
+    .select("id, subject, body_text, from_email, from_name, ai_summary, ai_language, ai_sentiment")
     .eq("id", candidate.id)
     .single();
   if (!emailRow) return { id: candidate.id, status: "skipped", reason: "邮件不存在" };

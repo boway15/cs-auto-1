@@ -20,6 +20,8 @@ export interface EmailRow {
   body_text?: string | null;
   from_email?: string | null;
   from_name?: string | null;
+  ai_language?: string | null;
+  ai_sentiment?: string | null;
 }
 
 export function formatOrderInfo(orders: OrderRow[]): string {
@@ -29,19 +31,46 @@ export function formatOrderInfo(orders: OrderRow[]): string {
     .join("\n");
 }
 
-/** 本地短草稿：英文模板，可不依赖外部模型 */
-export function buildLocalDraft(email: EmailRow, orders: OrderRow[], summary?: string | null): string {
+/** 本地短草稿：按 ai_language 选中英模板，可不依赖外部模型 */
+export function buildLocalDraft(
+  email: EmailRow,
+  orders: OrderRow[],
+  summary?: string | null,
+): string {
+  const lang = (email.ai_language ?? "en").toLowerCase().trim();
+  const sentiment = (email.ai_sentiment ?? "neutral").toLowerCase().trim();
   const orderLines = orders.length
     ? orders
         .map((o) => `Order ${o.order_no}: ${o.order_status ?? "-"}, shipping ${o.shipping_status ?? "-"}`)
         .join("\n")
-    : "No linked order.";
-  const greet = email.from_name ?? "there";
-  const summaryLine = summary ? `Summary: ${summary}\n` : "";
+    : lang === "zh" ? "（暂无关联订单）" : "No linked order.";
+  const greet = email.from_name ?? (lang === "zh" ? "您好" : "there");
+  const summaryLine = summary
+    ? lang === "zh"
+      ? `摘要：${summary}\n`
+      : `Summary: ${summary}\n`
+    : "";
+  const tone =
+    sentiment === "angry" || sentiment === "frustrated"
+      ? lang === "zh"
+        ? "我们理解您的心情，会尽快为您处理。"
+        : "We understand your concern and will address this promptly."
+      : "";
+
+  if (lang === "zh") {
+    return `${greet}，
+
+感谢您的来信，我们已查看您的邮件并将协助处理您的诉求。
+${tone ? tone + "\n\n" : ""}${summaryLine}${orderLines}
+
+此致
+客服团队`;
+  }
+
   return `Hi ${greet},
 
 Thank you for contacting us. We have reviewed your message and will help with your request.
-
+${tone ? tone + "\n\n" : ""}
 ${summaryLine}${orderLines}
 
 Best regards,

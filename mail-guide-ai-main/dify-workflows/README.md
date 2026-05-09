@@ -105,6 +105,7 @@ npx supabase functions deploy sync-mailbox --no-verify-jwt
 npx supabase functions deploy process-email --no-verify-jwt
 npx supabase functions deploy generate-draft
 npx supabase functions deploy schedule-draft-generation --no-verify-jwt
+npx supabase functions deploy schedule-compensating-alerts --no-verify-jwt
 npx supabase functions deploy close-email
 npx supabase functions deploy send-reply
 npx supabase functions deploy risk-intercept

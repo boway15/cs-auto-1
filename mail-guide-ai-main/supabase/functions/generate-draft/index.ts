@@ -141,7 +141,7 @@ Deno.serve(async (req) => {
 
     const { data: email, error: emailErr } = await supabase
       .from("emails")
-      .select("id, subject, body_text, from_email, from_name, ai_summary, status")
+      .select("id, subject, body_text, from_email, from_name, ai_summary, ai_language, ai_sentiment, status")
       .eq("id", email_id)
       .single();
     if (emailErr || !email) throw new Error("邮件不存在");

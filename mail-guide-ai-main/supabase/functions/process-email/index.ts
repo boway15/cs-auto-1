@@ -10,6 +10,39 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+const CUSTOMER_AUTO_REPLY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+function envBool(key: string, defaultValue: boolean): boolean {
+  const v = Deno.env.get(key);
+  if (v == null || v === "") return defaultValue;
+  return !/^false|0|off|no$/i.test(v.trim());
+}
+
+function normalizeLanguage(raw: unknown): string {
+  const s = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (s === "zh" || s === "zh-cn" || s === "zh_cn" || s === "chinese") return "zh";
+  if (s === "en" || s === "english") return "en";
+  if (s === "other") return "other";
+  if (s.length > 0 && s.length <= 16) return s;
+  return "en";
+}
+
+function normalizeSentiment(raw: unknown): string {
+  const s = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (["angry", "frustrated", "neutral", "happy"].includes(s)) return s;
+  return "neutral";
+}
+
+function getCustomerAutoReplyBlockReason(email: { received_at?: string | null }): string | null {
+  if (!envBool("AUTO_REPLY_CUSTOMER_ENABLED", true)) return "master_switch_off";
+  const ra = email.received_at;
+  if (!ra) return "missing_received_at";
+  const ms = Date.now() - new Date(ra).getTime();
+  if (Number.isNaN(ms) || ms < 0) return "invalid_received_at";
+  if (ms > CUSTOMER_AUTO_REPLY_MAX_AGE_MS) return "outside_24h_window";
+  return null;
+}
+
 type BusinessIntent =
   | "order_cancel"
   | "address_change"
@@ -40,6 +73,13 @@ type Analysis = {
   priority: "low" | "normal" | "high" | "urgent";
   risk_level: "normal" | "high";
   entities: Record<string, unknown>;
+  language: string;
+  sentiment: string;
+};
+
+type SendTemplateReplyOptions = {
+  extraTriggerTypes?: string[];
+  requireRiskMissingOrderSwitch?: boolean;
 };
 
 function extractOrderNo(text: string) {
@@ -119,6 +159,8 @@ function analyzeLocally(email: any): Analysis {
     priority: risk ? "urgent" : isAfterSale ? "high" : "normal",
     risk_level: risk ? "high" : "normal",
     entities: { order_no: orderNo, from_email: email.from_email },
+    language: "en",
+    sentiment: "neutral",
   };
 }
 
@@ -152,6 +194,9 @@ async function analyzeWithAi(email: any): Promise<Analysis> {
     const text = `${email.subject ?? ""}\n${email.body_text ?? ""}`;
     const candidate = (parsed?.business_intent as string) ?? merged.intent;
     merged.business_intent = mapToBusinessIntent(candidate, text);
+    const p = parsed as Record<string, unknown>;
+    merged.language = normalizeLanguage(p?.language ?? merged.language);
+    merged.sentiment = normalizeSentiment(p?.sentiment ?? merged.sentiment);
     return merged;
   } catch (error) {
     console.error("AI analyze fallback:", error);
@@ -180,20 +225,46 @@ async function recordEvent(admin: any, emailId: string, event_type: string, titl
   });
 }
 
-async function sendTemplateReply(admin: any, email: any, analysis: Analysis) {
+async function sendTemplateReply(
+  admin: any,
+  email: any,
+  analysis: Analysis,
+  options?: SendTemplateReplyOptions,
+) {
+  const block = getCustomerAutoReplyBlockReason(email);
+  if (block) {
+    await recordEvent(admin, email.id, "auto_reply_skipped", "跳过自动回复", block, { reason: block });
+    return false;
+  }
+  if (options?.requireRiskMissingOrderSwitch && !envBool("AUTO_REPLY_RISK_MISSING_ORDER_NO", false)) {
+    await recordEvent(admin, email.id, "auto_reply_skipped", "取消/改地址缺单号自动回复未开启", "", {
+      reason: "risk_missing_order_switch_off",
+    });
+    return false;
+  }
+
   const triggerCandidates = [
+    ...(options?.extraTriggerTypes ?? []),
     analysis.missing_elements.includes("order_no") ? "missing_order_no" : null,
     analysis.missing_elements.includes("image") ? "missing_image" : null,
     analysis.missing_elements.includes("product") ? "missing_product" : null,
     analysis.missing_elements.length > 0 ? "missing_any" : null,
-  ].filter(Boolean);
+  ].filter(Boolean) as string[];
+
+  const uniqueTriggers = [...new Set(triggerCandidates)];
+  if (uniqueTriggers.length === 0) {
+    await recordEvent(admin, email.id, "auto_reply_skipped", "无有效模板触发类型", "", {
+      reason: "no_trigger_types",
+    });
+    return false;
+  }
 
   const { data: templates } = await admin
     .from("reply_templates")
     .select("*")
     .eq("is_active", true)
     .eq("auto_send", true)
-    .in("trigger_type", triggerCandidates);
+    .in("trigger_type", uniqueTriggers);
 
   const template = templates?.[0];
   if (!template) return false;
@@ -325,6 +396,8 @@ async function processEmail(emailId: string) {
     ai_entities: analysis.entities,
     is_info_complete: analysis.is_info_complete,
     ai_summary: analysis.summary,
+    ai_language: analysis.language,
+    ai_sentiment: analysis.sentiment,
     ai_analyzed_at: new Date().toISOString(),
     priority: analysis.priority,
     risk_level: analysis.risk_level,
@@ -384,12 +457,50 @@ async function processEmail(emailId: string) {
     } else {
       await recordEvent(admin, emailId, "risk_intercept_requested", "已触发自动风控拦截");
     }
+    // 保留 risk-intercept 写入的 processing_status（如 risk_intercepted），仅保证 status 可被 schedule-draft 选中
+    await admin.from("emails").update({ status: "processing" }).eq("id", emailId);
+    await recordEvent(admin, emailId, "draft_pending", "已进入草稿待生成队列（由调度任务负责）");
     return { analysis, associationStatus, routed: "risk_intercept" };
   }
 
   if (mustIntercept && !linkedOrders.length) {
-    // 无单号无法自动拦截：仅记事件 + 告警（属信息缺失类，归 warning）
-    await recordEvent(admin, emailId, "risk_intercept_skipped_no_order", "意图为取消/改地址但无关联订单，未自动拦截");
+    if (associationStatus === "compensating") {
+      await recordEvent(
+        admin,
+        emailId,
+        "risk_intercept_deferred_compensating",
+        "取消/改地址：已提供单号但未关联，不拦截；满 2h 后由调度发内部预警",
+        null,
+        { order_no: analysis.order_no },
+      );
+    } else {
+      try {
+        const sent = await sendTemplateReply(admin, email, analysis, {
+          extraTriggerTypes: ["risk_missing_order_no", "missing_order_no", "missing_any"],
+          requireRiskMissingOrderSwitch: true,
+        });
+        if (sent) {
+          return { analysis, associationStatus, routed: "auto_template_risk" };
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await createAlertAndNotify(admin, {
+          source: "process-email",
+          kind: "auto_reply_failed",
+          title: "取消/改地址自动回复失败",
+          message: msg,
+          related_email_id: emailId,
+          severity: "warning",
+        });
+        return { analysis, associationStatus, routed: "auto_template_failed" };
+      }
+      await recordEvent(
+        admin,
+        emailId,
+        "risk_intercept_skipped_no_order",
+        "意图为取消/改地址但无关联订单，未自动拦截",
+      );
+    }
   }
 
   // 条件：首封邮件 + 售后意图 + 信息不完整（缺订单号或缺附件）→ 自动按模板回复
