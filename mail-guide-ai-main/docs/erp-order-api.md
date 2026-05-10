@@ -207,6 +207,8 @@ curl --location --request POST \
 
 外层与 §4.5 类似；`data` 内可能含 `orderId`、`success`、`message`（如「未查询到订单信息」）。调用方须区分 **HTTP / 外层 `code`** 与 **`data` 内业务结果**，避免将「无单」当作网络故障反复重试。
 
+**另见（与文档外壳不同、Edge 已适配）**：部分环境 OMS 经网关返回 **.NET 风格 PascalCase**，例如 `Success`、`ErrorCode`、`Msg`、`Data`，且订单列表在 **`Data.data` 数组** 中（字段为 `order_no`、`total_amount` 等）。Edge 的 `get-order-by-email` / `queryOrderInfo` 会将该形态归一化后再写入本地 `orders`。
+
 更完整的示例与注意事项见 [`erp-dome.md`](./erp-dome.md) §4。
 
 ---
@@ -221,11 +223,14 @@ curl --location --request POST \
 
 ---
 
-## 7. 待补充信息
+## 7. 待补充信息（需 ERP 书面确认；仓库内实现已保守解析）
 
-- `businessCode`、`data.message` 完整枚举与「拦截成功」判定规则。
-- OMS 查单在 **测试环境** 的 Base URL 与示例（若与正式路径不一致）。
-- 是否支持批量拦截（如 `orderIds` 多值传参规则）。
+以下项以 **ERP/OMS 接口说明** 为准。Edge 对 **OMS 查单** 的「有单」判定已放宽，以贴近 Apifox 实包：`code` 可为字符串、`data.success` 可为字符串；若 `data.success` 缺失但 `data` 内已有 `orderId`/`orderNo` 等且非「未查询到订单信息」类文案，仍视为可查并写入本地 `orders`。**网关拦截**仍要求 `data.success === true`（与 ERP 确认后再调枚举）。
+
+- [ ] `businessCode`、`data.message` 完整枚举与「拦截成功」**最终**判定规则（与上条保守规则差异时以 ERP 为准并改代码）。
+- [ ] OMS 查单在 **测试环境** 的 Base URL 与示例（若与正式路径不一致）。
+- [ ] 是否支持批量拦截（如 `orderIds` 多值传参规则）。
+- [ ] **放行（release）** 对称 HTTP 契约（若有）；当前 Edge 对 `release` 仅本地更新 `shipping_hold`，不调网关。
 
 ---
 

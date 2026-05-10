@@ -1,5 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { createAlertAndNotify } from "../_shared/ops-notify.ts";
+import { blockOrderByOrderId, isErpHttpConfigured } from "../_shared/erp-client.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -74,7 +75,24 @@ async function runIntercept(payload: any, actor: { userId: string | null }, admi
   if (logErr) throw logErr;
 
   let shopifyResponse: any = null;
+  let erpResponse: Record<string, unknown> | null = null;
   try {
+    if (action === "hold" && isErpHttpConfigured()) {
+      const br = await blockOrderByOrderId(String(order.order_no ?? ""));
+      erpResponse = { ...(br.envelope as Record<string, unknown>), _httpStatus: br.httpStatus };
+      await admin.from("risk_intercept_logs").update({ erp_response: erpResponse }).eq("id", log.id);
+      if (!br.ok) {
+        const hint = String(br.envelope.data?.message ?? br.rawText?.slice(0, 400) ?? "");
+        throw new Error(`ERP 拦截未确认成功 HTTP ${br.httpStatus} ${hint}`);
+      }
+    } else if (action === "hold") {
+      erpResponse = { erp: "skipped", reason: "erp_env_incomplete" };
+      await admin.from("risk_intercept_logs").update({ erp_response: erpResponse }).eq("id", log.id);
+    } else if (action === "release") {
+      erpResponse = { erp: "skipped", reason: "no_release_api_documented" };
+      await admin.from("risk_intercept_logs").update({ erp_response: erpResponse }).eq("id", log.id);
+    }
+
     const updates = action === "hold"
       ? {
           shipping_hold: true,
@@ -88,6 +106,7 @@ async function runIntercept(payload: any, actor: { userId: string | null }, admi
     await admin.from("risk_intercept_logs").update({
       status: "success",
       shopify_response: shopifyResponse,
+      erp_response: erpResponse ?? { erp: "skipped", reason: "none" },
       error_message: null,
     }).eq("id", log.id);
     await admin.from("order_hold_logs").insert({
@@ -111,10 +130,10 @@ async function runIntercept(payload: any, actor: { userId: string | null }, admi
         event_type: "risk_intercepted",
         title: action === "hold" ? "风控拦截成功" : "风控解除成功",
         detail: intercept_reason ?? null,
-        metadata: { order_id, shopify_response: shopifyResponse },
+        metadata: { order_id, shopify_response: shopifyResponse, erp_response: erpResponse },
       });
     }
-    return { ...log, status: "success", shopify_response: shopifyResponse };
+    return { ...log, status: "success", shopify_response: shopifyResponse, erp_response: erpResponse };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const retryCount = (log.retry_count ?? 0) + 1;
@@ -123,6 +142,7 @@ async function runIntercept(payload: any, actor: { userId: string | null }, admi
       status: finalStatus,
       retry_count: retryCount,
       shopify_response: shopifyResponse,
+      erp_response: erpResponse,
       error_message: message,
     }).eq("id", log.id);
     if (finalStatus === "failed") {

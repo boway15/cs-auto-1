@@ -155,6 +155,15 @@ npx supabase functions secrets set DIFY_ANALYZE_URL="https://xxxx.ngrok-free.app
 npx supabase functions secrets set DIFY_ANALYZE_KEY="app-xxxxx1"
 npx supabase functions secrets set DIFY_DRAFT_URL="https://xxxx.ngrok-free.app/v1/workflows/run"
 npx supabase functions secrets set DIFY_DRAFT_KEY="app-xxxxx2"
+
+# ERP（Edge 单出口；勿把密码写入仓库）
+# npx supabase functions secrets set ERP_TOKEN_URL="https://loginserver.bestwo.net:9443/connect/token"
+# npx supabase functions secrets set ERP_OMS_BASE="https://omsapi.bestwo.net:9443"
+# npx supabase functions secrets set ERP_GATEWAY_BASE="https://gatewayjava.bestwo.net:9443"
+# npx supabase functions secrets set ERP_USERNAME="..."
+# npx supabase functions secrets set ERP_PASSWORD="..."
+# npx supabase functions secrets set ERP_CLIENT_ID="ERP"
+# 测试环境 IdP 使用 pw 字段时：ERP_TOKEN_PASSWORD_FIELD=pw
 ```
 
 ### 4.5 Supabase 自建 Docker（`supabase-selfhost`）

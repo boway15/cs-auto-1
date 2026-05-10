@@ -9,11 +9,12 @@
 
 为避免对接预期偏差，先说明当前仓库状态：
 
-- 前端 `Erp.tsx` 已支持配置 `base_url`、鉴权方式、`order_endpoint`、字段映射；
-- 但当前 `supabase/functions/get-order-by-email` 实现是查询 Supabase 本地 `orders` 缓存表，不是直接请求 ERP HTTP；
-- `risk-intercept` 当前核心落点是**本地** `orders` 表的 hold 状态（**已不再调用 Shopify**）；ERP 拦截 HTTP 直连尚未在 Edge Function 中形成统一链路，本文档为目标契约。
+- 前端 `Erp.tsx` 已支持配置 `base_url`、鉴权方式、`order_endpoint`、字段映射（管理端 ERP 配置与 Edge 直连 **独立**：Edge 使用 **Functions secrets / `.env.functions`** 中的 `ERP_*`）。
+- **`supabase/functions/get-order-by-email`**：在配置齐全时通过 **OMS `QueryOrderInfo`** 查单，并可将结果写入本地 `orders`；未配置或失败时仍回退查询本地 `orders` 表。
+- **`risk-intercept`**：在配置齐全且 `hold` 时先调 **Java 网关订单拦截**，成功后再更新本地 `shipping_hold`；结果写入 `risk_intercept_logs.erp_response`（含 `traceId` 等）。**已不再调用 Shopify**。**`release`（解除拦截）操作不向 ERP 发送请求**：解除拦截由运营人员在 ERP 系统后台直接操作；本系统 release 仅将本地 `orders.shipping_hold` 置回 `false` 以同步前端展示状态，`erp_response` 中标记 `skipped`。
+- **凭据**：OAuth2 用户名密码、各 Base URL 仅存放在 **Supabase Functions secrets**（云端）或 **`supabase-selfhost/.env.functions`**（自建），**不入库、不进 Git**。
 
-因此本文档是**目标 ERP 接口契约**，用于后续把“ERP 直连链路”补齐。
+与 [`erp-order-api.md`](./erp-order-api.md) 不一致处以对接后 ERP 书面说明为准（如 `businessCode` 枚举、拦截成功判定，见该文档 §7）。
 
 ---
 
@@ -170,6 +171,10 @@ Accept: application/json
 ---
 
 ## 3. 接口二：订单拦截 / 放行
+
+> **注意（本系统边界）**：本系统仅调用 `action: "hold"`（拦截）接口。
+> **放行（`action: "release"`）由运营人员在 ERP 后台直接操作**，本系统不发送 release 请求。
+> 前端解除拦截按钮仅更新本地 `orders.shipping_hold = false`，不向本接口发起调用。
 
 ### 3.1 基本信息
 

@@ -28,10 +28,11 @@ workflow:
       - .SVG
       allowed_file_types:
       - image
+      - document
       allowed_file_upload_methods:
       - local_file
       - remote_url
-      enabled: false
+      enabled: true
       fileUploadConfig:
         attachment_image_file_size_limit: 2
         audio_file_size_limit: 50
@@ -133,7 +134,18 @@ workflow:
               required: false
               type: text-input
               variable: attachments
-        height: 158
+            - label: 附件内容
+              allowed_file_types:
+              - image
+              - document
+              allowed_file_upload_methods:
+              - local_file
+              - remote_url
+              max_length: 10
+              required: false
+              type: file-list
+              variable: attachment_files
+        height: 198
         id: start
         position:
           x: 80
@@ -331,7 +343,7 @@ workflow:
               type: boolean
             missing_elements:
               children: null
-              type: array
+              type: array[string]
             summary:
               children: null
               type: string
@@ -402,7 +414,7 @@ workflow:
             - value_selector:
                 - code_parse
                 - missing_elements
-              value_type: array
+              value_type: array[string]
               variable: missing_elements
             - value_selector:
                 - code_parse

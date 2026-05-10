@@ -21,12 +21,14 @@ import {
   BellRing,
   PanelLeftClose,
   PanelLeft,
+  Link2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
 
 const navItems = [
   { to: "/", label: "工作台", icon: Inbox, end: true },
+  { to: "/linked-orders", label: "邮件订单", icon: Link2 },
   { to: "/send-logs", label: "发送日志", icon: Send },
   { to: "/risk-logs", label: "风控记录", icon: ShieldAlert },
   { to: "/alerts", label: "运营告警", icon: BellRing },

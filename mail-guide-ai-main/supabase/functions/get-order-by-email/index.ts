@@ -1,11 +1,43 @@
-// 通过订单号 + 邮箱查询 ERP 订单 Edge Function（供 Dify 工作流调用）
+// 查询订单：order_no 与 email 二选一（至少其一）。优先本地 orders；配置 ERP_* 时走 OMS QueryOrderInfo 并回写本地。
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import {
+  erpEnvelopeNoOrderMessage,
+  erpEnvelopeOmsQuerySucceeded,
+  isErpOmsConfigured,
+  queryOrderInfo,
+} from "../_shared/erp-client.ts";
+import { upsertOrderFromOmsData } from "../_shared/erp-order-sync.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
+    "authorization, x-client-info, apikey, api-key, content-type",
 };
+
+function buildOrderResponse(order: Record<string, unknown>) {
+  let trackingUrl = String(order.tracking_no ?? "");
+  if (order.raw_data) {
+    try {
+      const raw = typeof order.raw_data === "string" ? JSON.parse(order.raw_data as string) : order.raw_data as Record<string, unknown>;
+      if (raw.tracking_url) trackingUrl = String(raw.tracking_url);
+      else if (raw.tracking_urls && Array.isArray(raw.tracking_urls) && raw.tracking_urls[0]) {
+        trackingUrl = String(raw.tracking_urls[0]);
+      }
+    } catch { /* ignore */ }
+  }
+  return {
+    order_no: order.order_no,
+    customer_name: order.customer_name ?? "",
+    product_name: order.product_summary ?? "",
+    status: order.order_status ?? "",
+    currency: order.currency ?? "USD",
+    amount: order.amount ?? 0,
+    placed_at: order.ordered_at ?? order.created_at,
+    tracking_url: trackingUrl,
+    shipping_status: order.shipping_status ?? "",
+    tracking_no: order.tracking_no ?? "",
+  };
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -16,7 +48,6 @@ Deno.serve(async (req) => {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-    // 鉴权：支持 service_role key 或已登录用户
     const authHeader = req.headers.get("Authorization") ?? "";
     const token = authHeader.replace(/^Bearer\s+/i, "").trim();
     const isServiceRole = token && token === SUPABASE_SERVICE_ROLE_KEY;
@@ -43,79 +74,122 @@ Deno.serve(async (req) => {
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
     const url = new URL(req.url);
-    const orderNo = url.searchParams.get("order_no");
-    const email = url.searchParams.get("email");
+    const orderNo = (url.searchParams.get("order_no") ?? "").trim();
+    const email = (url.searchParams.get("email") ?? "").trim();
 
-    if (!orderNo) {
-      return new Response(JSON.stringify({ error: "缺少 order_no 参数" }), {
+    if (!orderNo && !email) {
+      return new Response(JSON.stringify({ error: "请提供 order_no 或 email 至少填写其一" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // 查找订单（优先匹配 order_no + customer_email，其次仅匹配 order_no）
-    let query = admin
-      .from("orders")
-      .select("*")
-      .eq("order_no", orderNo);
+    let order: Record<string, unknown> | null = null;
+    let orderErr: unknown = null;
 
-    if (email) {
-      query = query.eq("customer_email", email);
-    }
-
-    let { data: order, error: orderErr } = await query.maybeSingle();
-
-    // 如果精确匹配没找到，用 order_no 单独查（取第一条）
-    if (!order && email) {
-      const { data: fallback } = await admin
+    if (orderNo && email) {
+      const q = await admin
         .from("orders")
         .select("*")
-        .eq("order_no", orderNo)
+        .ilike("order_no", orderNo)
+        .ilike("customer_email", email)
+        .maybeSingle();
+      order = q.data as Record<string, unknown> | null;
+      orderErr = q.error;
+      if (!order) {
+        const fb = await admin.from("orders").select("*").ilike("order_no", orderNo).limit(1);
+        if (fb.data?.[0]) order = fb.data[0] as Record<string, unknown>;
+      }
+    } else if (orderNo) {
+      const q = await admin.from("orders").select("*").ilike("order_no", orderNo).limit(1);
+      order = (q.data?.[0] as Record<string, unknown>) ?? null;
+      orderErr = q.error;
+    } else {
+      const q = await admin
+        .from("orders")
+        .select("*")
+        .ilike("customer_email", email)
+        .order("updated_at", { ascending: false })
         .limit(1);
-      if (fallback && fallback.length > 0) order = fallback[0];
+      order = (q.data?.[0] as Record<string, unknown>) ?? null;
+      orderErr = q.error;
     }
 
-    if (orderErr || !order) {
+    if (!orderErr && order) {
       return new Response(
         JSON.stringify({
-          found: false,
-          order: null,
+          found: true,
+          source: "local",
+          order: buildOrderResponse(order),
         }),
-        {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
-    // 尝试从 raw_data 中提取 tracking_url
-    let trackingUrl = order.tracking_no ?? "";
-    if (order.raw_data) {
+    if (isErpOmsConfigured()) {
       try {
-        const raw = typeof order.raw_data === "string" ? JSON.parse(order.raw_data) : order.raw_data;
-        if (raw.tracking_url) trackingUrl = raw.tracking_url;
-        else if (raw.tracking_urls?.[0]) trackingUrl = raw.tracking_urls[0];
-      } catch { /* ignore */ }
+        const qEmail = email;
+        const qEbay = orderNo;
+        const r = await queryOrderInfo(qEmail, qEbay);
+        const traceId = r.envelope.traceId ?? null;
+        const inner = r.envelope.data;
+
+        if (r.ok && inner && typeof inner === "object" && erpEnvelopeOmsQuerySucceeded(r.envelope)) {
+          const up = await upsertOrderFromOmsData(admin, inner as Record<string, unknown>, qEmail);
+          if (up) {
+            const { data: row } = await admin.from("orders").select("*").eq("id", up.id).maybeSingle();
+            if (row) {
+              return new Response(
+                JSON.stringify({
+                  found: true,
+                  source: "erp_oms",
+                  erp_trace_id: traceId,
+                  order: buildOrderResponse(row as Record<string, unknown>),
+                }),
+                { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+              );
+            }
+          }
+        }
+
+        if (erpEnvelopeNoOrderMessage(r.envelope)) {
+          return new Response(
+            JSON.stringify({
+              found: false,
+              order: null,
+              erp_trace_id: traceId,
+              erp_message: String(r.envelope.data?.message ?? ""),
+            }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+          );
+        }
+
+        return new Response(
+          JSON.stringify({
+            found: false,
+            order: null,
+            erp_trace_id: traceId,
+            erp_http_status: r.httpStatus,
+            erp_message: String(r.envelope.data?.message ?? r.rawText?.slice(0, 500) ?? ""),
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      } catch (e) {
+        console.error("get-order-by-email ERP:", e);
+        return new Response(
+          JSON.stringify({
+            found: false,
+            order: null,
+            erp_error: e instanceof Error ? e.message : String(e),
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
     }
 
     return new Response(
-      JSON.stringify({
-        found: true,
-        order: {
-          order_no: order.order_no,
-          customer_name: order.customer_name ?? "",
-          product_name: order.product_summary ?? "",
-          status: order.order_status ?? "",
-          currency: order.currency ?? "USD",
-          amount: order.amount ?? 0,
-          placed_at: order.ordered_at ?? order.created_at,
-          tracking_url: trackingUrl,
-          shipping_status: order.shipping_status ?? "",
-          tracking_no: order.tracking_no ?? "",
-        },
-      }),
-      {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
+      JSON.stringify({ found: false, order: null }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   } catch (e) {
     console.error("get-order-by-email error:", e);
@@ -124,7 +198,7 @@ Deno.serve(async (req) => {
       {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
+      },
     );
   }
 });

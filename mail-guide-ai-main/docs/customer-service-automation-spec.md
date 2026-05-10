@@ -20,6 +20,7 @@
 | Shopify | **不继续**：`risk-intercept` **不调用** Shopify API，仅更新本地 `orders` hold；与 ERP 的拦截以 `docs/erp-api-requirements.md` 为准。 |
 | 订单补偿任务 | **最多重试 10 次**；**每 30 分钟**调度一次重试（`next_run_at` 步长 30 分钟）。 |
 | 运营告警页文案 | 告警 `resolved` 状态对用户展示为 **「已处理」**（与邮件 `replied` 语义区分）。 |
+|| 订单解除拦截 | **由 ERP 端操作**，本系统不向 ERP 发送 release 指令。isk-intercept release 仅将本地 orders.shipping_hold 置回 alse 以同步前端展示状态，不调用任何外部接口。运营人员须在 ERP 后台手动解除拦截。 |
 | **发布环境** | **生产为自建 Supabase（Docker）**；**业务逻辑仍在 Supabase Edge Functions（Deno）** 中运行，与 Cloud 项目共用同一套 `mail-guide-ai-main/supabase/functions/` 源码，仅部署与网关 URL 不同。cron URL 须指向自建 Kong 的 `/functions/v1/...`，**不得**固定写 `*.supabase.co`（详见 `docs/self-hosted-supabase.md`）。 |
 
 ---
@@ -201,6 +202,7 @@
 - [ ] 补偿任务最多 **10** 次失败告警，**30 分钟** 间隔。  
 - [ ] 告警页 **resolved** 展示为 **已处理**。  
 - [ ] **自建**环境 cron URL 指向自建网关，无错误 `*.supabase.co`。
+- [ ] release 操作：仅本地解锁（orders.shipping_hold = false），ERP 侧由运营在 ERP 后台手动操作，不校验 ERP 响应。
 
 ---
 

@@ -1,5 +1,11 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { createAlertAndNotify } from "../_shared/ops-notify.ts";
+import {
+  erpEnvelopeOmsQuerySucceeded,
+  isErpOmsConfigured,
+  queryOrderInfo,
+} from "../_shared/erp-client.ts";
+import { upsertOrderFromOmsData } from "../_shared/erp-order-sync.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -33,6 +39,22 @@ Deno.serve(async (req) => {
 
     const results = [];
     for (const task of tasks ?? []) {
+      if (isErpOmsConfigured()) {
+        try {
+          const { data: em } = await admin.from("emails").select("from_email").eq("id", task.email_id).maybeSingle();
+          const from = String(em?.from_email ?? "").trim();
+          if (from) {
+            const r = await queryOrderInfo(from, task.order_no ?? "");
+            const inner = r.envelope.data;
+            if (r.ok && inner && typeof inner === "object" && erpEnvelopeOmsQuerySucceeded(r.envelope)) {
+              await upsertOrderFromOmsData(admin, inner as Record<string, unknown>, from);
+            }
+          }
+        } catch (e) {
+          console.error("run-compensation-tasks OMS:", e);
+        }
+      }
+
       const { data: order } = await admin
         .from("orders")
         .select("*")
@@ -62,6 +84,46 @@ Deno.serve(async (req) => {
           title: `补偿任务关联订单 ${order.order_no}`,
           metadata: { task_id: task.id, order_id: order.id },
         });
+
+        // 若邮件意图为取消/改地址，关联成功后立即触发风控拦截
+        const { data: emailRow } = await admin
+          .from("emails")
+          .select("business_intent")
+          .eq("id", task.email_id)
+          .maybeSingle();
+        const mustIntercept =
+          emailRow?.business_intent === "order_cancel" ||
+          emailRow?.business_intent === "address_change";
+        if (mustIntercept) {
+          try {
+            const interceptResp = await fetch(`${SUPABASE_URL}/functions/v1/risk-intercept`, {
+              method: "POST",
+              headers: { Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" },
+              body: JSON.stringify({
+                email_id: task.email_id,
+                order_id: order.id,
+                action: "hold",
+                intercept_reason: "补偿任务关联成功后自动拦截",
+                reason_category: emailRow.business_intent,
+                trigger_source: "auto",
+              }),
+            });
+            if (!interceptResp.ok) {
+              const errText = await interceptResp.text();
+              console.error("compensation auto-intercept failed:", errText);
+              await admin.from("email_processing_events").insert({
+                email_id: task.email_id,
+                event_type: "risk_intercept_failed",
+                title: "补偿关联后自动拦截失败",
+                detail: errText,
+                metadata: { order_id: order.id },
+              });
+            }
+          } catch (e) {
+            console.error("compensation auto-intercept error:", e);
+          }
+        }
+
         results.push({ id: task.id, status: "resolved", order_id: order.id });
         continue;
       }

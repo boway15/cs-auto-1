@@ -115,7 +115,7 @@ Deno.serve(async (req) => {
 
     await admin
       .from("emails")
-      .update({ status: "replied", processing_status: "auto_replied", assigned_to: userData.user.id })
+      .update({ status: "replied", processing_status: "manual_replied", assigned_to: userData.user.id })
       .eq("id", email_id);
 
     await admin.from("email_processing_events").insert({
@@ -127,12 +127,16 @@ Deno.serve(async (req) => {
       metadata: { message_id: messageId },
     });
 
-    await admin
+    const { data: latestDraft } = await admin
       .from("ai_drafts")
-      .update({ is_used: true })
+      .select("id")
       .eq("email_id", email_id)
       .order("version", { ascending: false })
-      .limit(1);
+      .limit(1)
+      .maybeSingle();
+    if (latestDraft?.id) {
+      await admin.from("ai_drafts").update({ is_used: true }).eq("id", latestDraft.id);
+    }
 
     return new Response(
       JSON.stringify({

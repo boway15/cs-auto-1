@@ -162,7 +162,7 @@ cd d:\Docker\project\cs-main\mail-guide-ai-main\scripts\selfhosted
 .\Ensure-FunctionsEnvFileInCompose.ps1
 ```
 
-2. 将 **[`self-hosted-env-functions.example`](./self-hosted-env-functions.example)** 复制为 **`supabase-selfhost/.env.functions`**，按与云端 `npx supabase functions secrets set` 相同的语义填写 `DIFY_*` 等（勿提交 Git）。
+2. 将 **[`self-hosted-env-functions.example`](./self-hosted-env-functions.example)** 复制为 **`supabase-selfhost/.env.functions`**，按与云端 `npx supabase functions secrets set` 相同的语义填写 `DIFY_*`、**`ERP_*`**（OAuth2 与 OMS/网关 Base URL，见 [`erp-order-api.md`](./erp-order-api.md)）等（勿提交 Git）。
 
 3. 重建 functions 容器：
 

@@ -88,13 +88,25 @@ npx supabase functions secrets set DIFY_DRAFT_URL="https://xxxx.ngrok-free.app/v
 npx supabase functions secrets set DIFY_DRAFT_KEY="app-xxxxx2"
 ```
 
+### 6.1 ERP 订单查询与 Dify（Edge 单出口）
+
+- **OAuth2 与 OMS 查单、Java 网关拦截**由 Supabase Edge 实现（`get-order-by-email`、`risk-intercept` 等），凭据放在 **Functions secrets** 或自建 **`supabase-selfhost/.env.functions`** 的 `ERP_*` 变量（见 [`docs/erp-order-api.md`](../docs/erp-order-api.md)、[`docs/self-hosted-env-functions.example`](../docs/self-hosted-env-functions.example)）。
+- **禁止**在 Dify 工作流环境变量中配置 `ERP_USERNAME` / `ERP_PASSWORD`；Dify 仅需能访问 **Kong 上的 Edge**（与现有 `DIFY_*` 同源网络策略）。
+- 工作流中需要订单上下文时，使用 **HTTP 请求**节点调用：
+
+  `GET {VITE_SUPABASE_URL 或自建 Kong}/functions/v1/get-order-by-email?order_no={单号}` **或** `...?email={买家邮箱}`，**至少填一个查询参数**（也可两个都填）。
+
+  请求头：`Authorization: Bearer {SERVICE_ROLE_KEY 或已登录用户的 access_token}`（与当前函数鉴权一致：`service_role` 或 `anon`+用户 JWT）。
+
+- 成功响应含 `found`、`order` 字段；经 OMS 命中时可能含 `erp_trace_id`，便于与 ERP 对账。
+
 自动草稿调度规则：
 
 - 0~4 小时：`schedule-draft-generation` 调用 Dify 长草稿
 - 4~24 小时：`schedule-draft-generation` 走本地草稿
 - 24 小时后：仅人工本地生成
 
-人工点击“生成草稿”已固定为本地模式，不再依赖 Dify 可用性。
+人工点击「生成草稿」默认走 Dify 草稿工作流（本地兜底见 Edge `generate-draft`）；勿与邮件分析的 Key 混用。
 
 ## 7. 部署相关 Edge Functions
 

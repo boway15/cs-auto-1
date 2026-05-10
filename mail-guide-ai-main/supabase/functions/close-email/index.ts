@@ -1,6 +1,6 @@
-// 人工结案：将邮件 status 置为 closed（业务上的「已处理」）
-// 与 send-reply 完成的「已回复」自动结案区分；要求 staff 鉴权
-// 写入 email_processing_events + audit_logs
+// 人工结案：将邮件 status 置为 replied（产品口径唯一完成态）
+// 与自动回复（auto_replied）区分：processing_status 写 manual_closed，便于统计溯源
+// 要求 staff 鉴权；写入 email_processing_events + audit_logs
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
@@ -53,7 +53,7 @@ Deno.serve(async (req) => {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-    if (before.status === "closed") {
+    if (before.status === "replied") {
       return new Response(JSON.stringify({ ok: true, deduped: true }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -63,8 +63,8 @@ Deno.serve(async (req) => {
     const { data: after, error: updErr } = await admin
       .from("emails")
       .update({
-        status: "closed",
-        processing_status: "closed",
+        status: "replied",
+        processing_status: "manual_closed",
         closed_at: nowIso,
         closed_by: actor.userId,
         sla_bucket: null,
@@ -79,9 +79,9 @@ Deno.serve(async (req) => {
       event_type: "status_closed_by_user",
       actor_type: actor.isService ? "system" : "user",
       actor_id: actor.userId,
-      title: "客服已结案（已处理）",
+      title: "客服已手动结案（标记已回复）",
       detail: reason ?? null,
-      metadata: { reason: reason ?? null },
+      metadata: { reason: reason ?? null, processing_status: "manual_closed" },
     });
 
     await admin.from("audit_logs").insert({

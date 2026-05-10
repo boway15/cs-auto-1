@@ -1,6 +1,13 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { sendMail } from "../_shared/smtp.ts";
 import { createAlertAndNotify } from "../_shared/ops-notify.ts";
+import {
+  erpEnvelopeNoOrderMessage,
+  erpEnvelopeOmsQuerySucceeded,
+  isErpOmsConfigured,
+  queryOrderInfo,
+} from "../_shared/erp-client.ts";
+import { upsertOrderFromOmsData } from "../_shared/erp-order-sync.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -105,7 +112,12 @@ function mapToBusinessIntent(rawIntent: string | undefined, text: string): Busin
   }
   // 关键词识别细分售后
   if (/破损|broken|damage|damaged|crushed/i.test(text)) return "damaged";
-  if (/缺陷|defect|defective|not\s*working|malfunction/i.test(text)) return "defect";
+  // 质量问题 / 品质差等口语归入 defect（与「缺陷」同档，区别于单纯描述不符）
+  if (
+    /缺陷|defect|defective|not\s*working|malfunction|质量问题|品质问题|质量差|做工差|品控差|品控问题|次品|劣质/i.test(text)
+  ) {
+    return "defect";
+  }
   if (/描述不符|与描述不符|不符|mismatch|not\s*as\s*described|wrong\s*item/i.test(text)) {
     return "description_mismatch";
   }
@@ -121,12 +133,22 @@ function mapToBusinessIntent(rawIntent: string | undefined, text: string): Busin
   if (rawIntent && VALID_BUSINESS_INTENTS.includes(rawIntent as BusinessIntent)) {
     return rawIntent as BusinessIntent;
   }
+  // Dify/本地 legacy：intent 为 after_sale、refund 时，上面细分关键词未命中则不再一律 other（常见中文售后用语）
+  if (
+    rawIntent === "after_sale" ||
+    rawIntent === "refund"
+  ) {
+    if (/退款|退货|换货|赔偿|补偿|质量问题|瑕疵|次品|少发|漏发|错发|发错|不符|描述|假货|仿品|不满意|投诉|差评|坏了|破损|损坏|缺陷|不能用|故障|漏液|开裂|碎裂|变形|污渍|褪色|掉色|缩水|起球|异味|过期|变质/i.test(text)) {
+      return "description_mismatch";
+    }
+  }
   return "other";
 }
 
 function analyzeLocally(email: any): Analysis {
-  const text = `${email.subject ?? ""}\n${email.body_text ?? ""}`.toLowerCase();
-  const orderNo = extractOrderNo(`${email.subject ?? ""}\n${email.body_text ?? ""}`);
+  const rawText = `${email.subject ?? ""}\n${email.body_text ?? ""}`;
+  const text = rawText.toLowerCase();
+  const orderNo = extractOrderNo(rawText);
   const missing = new Set<string>();
   const isAfterSale = /refund|return|broken|damage|wrong|missing|replace|cancel|address|退款|退货|损坏|取消|地址/.test(text);
   const needsImage = /broken|damage|wrong item|defect|损坏|破损|错发|瑕疵/.test(text);
@@ -145,7 +167,14 @@ function analyzeLocally(email: any): Analysis {
     ? "after_sale"
     : "general";
 
-  const business_intent = mapToBusinessIntent(intent, `${email.subject ?? ""}\n${email.body_text ?? ""}`);
+  const business_intent = mapToBusinessIntent(intent, rawText);
+
+  // 语言识别：检测中文字符
+  const hasChinese = /[\u4e00-\u9fa5]/.test(rawText);
+  const detectedLanguage = hasChinese ? "zh" : "en";
+
+  // 情绪识别：关键词信号
+  const isAngry = /angry|frustrated|terrible|awful|horrible|worst|unacceptable|outrageous|投诉|愤怒|太差|极差|不满|差评|欺骗|骗子/.test(text);
 
   const summarySource = (email.body_text ?? email.subject ?? "").replace(/\s+/g, " ").trim();
   return {
@@ -159,15 +188,31 @@ function analyzeLocally(email: any): Analysis {
     priority: risk ? "urgent" : isAfterSale ? "high" : "normal",
     risk_level: risk ? "high" : "normal",
     entities: { order_no: orderNo, from_email: email.from_email },
-    language: "en",
-    sentiment: "neutral",
+    language: detectedLanguage,
+    sentiment: isAngry ? "frustrated" : "neutral",
   };
 }
 
-async function analyzeWithAi(email: any): Promise<Analysis> {
+async function analyzeWithAi(email: any): Promise<{
+  analysis: Analysis;
+  source: "dify" | "local";
+  difyError?: string | null;
+  workflowRunId?: string | null;
+}> {
   const difyUrl = Deno.env.get("DIFY_ANALYZE_URL");
   const difyKey = Deno.env.get("DIFY_ANALYZE_KEY") || Deno.env.get("DIFY_API_KEY");
-  if (!difyUrl || !difyKey) return analyzeLocally(email);
+  if (!difyUrl || !difyKey) {
+    return { analysis: analyzeLocally(email), source: "local", difyError: "missing_dify_env" };
+  }
+
+  // Dify「文档列表 / 文件列表」变量 attachment_files：每项为 { type, transfer_method, url? | upload_file_id? }
+  // 当前同步链路尚未上传真实附件，默认传空数组；有公开 URL 或 upload_file_id 时可在此组装。
+  const attachmentFiles: Array<{
+    type: "document" | "image" | "audio" | "video" | "custom";
+    transfer_method: "remote_url" | "local_file";
+    url?: string;
+    upload_file_id?: string;
+  }> = [];
 
   try {
     const response = await fetch(difyUrl, {
@@ -175,32 +220,51 @@ async function analyzeWithAi(email: any): Promise<Analysis> {
       headers: { Authorization: `Bearer ${difyKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         inputs: {
-          subject: email.subject,
-          from_email: email.from_email,
-          body_text: email.body_text,
-          attachments: email.attachments ?? [],
+          subject: String(email.subject ?? ""),
+          from_email: String(email.from_email ?? ""),
+          body_text: String(email.body_text ?? ""),
+          // Dify 工作流将 attachments 定义为 text-input(string)，必须序列化
+          attachments: Array.isArray(email.attachments)
+            ? JSON.stringify(email.attachments)
+            : (email.attachments == null ? "" : String(email.attachments)),
+          attachment_files: attachmentFiles,
         },
         response_mode: "blocking",
         user: "mail-guide-ai",
       }),
     });
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
     const json = await response.json();
+    const workflowRunId =
+      typeof json.workflow_run_id === "string"
+        ? json.workflow_run_id
+        : typeof json?.data?.workflow_run_id === "string"
+        ? json.data.workflow_run_id
+        : typeof json?.data?.id === "string"
+        ? json.data.id
+        : null;
     const outputs = json.data?.outputs ?? json.answer ?? json;
     const parsed = typeof outputs === "string" ? JSON.parse(outputs) : outputs;
     const local = analyzeLocally(email);
     const merged: Analysis = { ...local, ...parsed };
     // 统一映射到 7 类（即便 Dify 直接给了 business_intent，也要校验）
     const text = `${email.subject ?? ""}\n${email.body_text ?? ""}`;
-    const candidate = (parsed?.business_intent as string) ?? merged.intent;
-    merged.business_intent = mapToBusinessIntent(candidate, text);
     const p = parsed as Record<string, unknown>;
+    const biRaw = typeof p?.business_intent === "string" ? p.business_intent.trim() : "";
+    const intentRaw = typeof p?.intent === "string" ? p.intent.trim() : "";
+    // Dify 可能返回 business_intent 为空串；或模型把 business_intent 一律标 other 但 intent 仍有 after_sale 等语义
+    let effective = biRaw || intentRaw || String(merged.intent ?? "");
+    if (biRaw === "other" && intentRaw && intentRaw !== "general") {
+      effective = intentRaw;
+    }
+    merged.business_intent = mapToBusinessIntent(effective, text);
     merged.language = normalizeLanguage(p?.language ?? merged.language);
     merged.sentiment = normalizeSentiment(p?.sentiment ?? merged.sentiment);
-    return merged;
+    return { analysis: merged, source: "dify", workflowRunId };
   } catch (error) {
-    console.error("AI analyze fallback:", error);
-    return analyzeLocally(email);
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error("AI analyze fallback:", msg);
+    return { analysis: analyzeLocally(email), source: "local", difyError: msg };
   }
 }
 
@@ -339,13 +403,60 @@ async function associateOrders(admin: any, email: any, analysis: Analysis) {
       linkedOrders.push(order);
       await recordEvent(admin, email.id, "order_linked", `自动关联订单 ${order.order_no}`);
     } else {
-      await admin.from("order_compensation_tasks").upsert({
-        email_id: email.id,
-        order_no: analysis.order_no,
-        status: "pending",
-        next_run_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-      }, { onConflict: "email_id,order_no" });
-      await recordEvent(admin, email.id, "compensation_created", `订单 ${analysis.order_no} 暂未查到，已创建补偿任务`);
+      let resolvedViaErp: any = null;
+      let omsTraceId: string | undefined;
+      if (isErpOmsConfigured() && email.from_email) {
+        try {
+          const r = await queryOrderInfo(email.from_email, analysis.order_no ?? "");
+          omsTraceId = r.envelope.traceId;
+          const inner = r.envelope.data;
+          if (r.ok && inner && typeof inner === "object" && erpEnvelopeOmsQuerySucceeded(r.envelope)) {
+            const up = await upsertOrderFromOmsData(admin, inner as Record<string, unknown>, email.from_email);
+            if (up) {
+              const { data: o2 } = await admin.from("orders").select("*").eq("id", up.id).maybeSingle();
+              if (o2) resolvedViaErp = o2;
+            }
+          } else if (!erpEnvelopeNoOrderMessage(r.envelope)) {
+            await recordEvent(
+              admin,
+              email.id,
+              "oms_query_order_failed",
+              "OMS 查单未成功",
+              String(r.envelope.data?.message ?? r.rawText?.slice(0, 300) ?? ""),
+              {
+                trace_id: omsTraceId ?? null,
+                http_status: r.httpStatus,
+              },
+            );
+          }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error("associateOrders OMS:", msg);
+          await recordEvent(admin, email.id, "oms_query_order_error", "OMS 查单异常", msg, {});
+        }
+      }
+      if (resolvedViaErp) {
+        await admin.from("email_order_links").upsert({
+          email_id: email.id,
+          order_id: resolvedViaErp.id,
+          link_source: "auto",
+          confidence: 1,
+          metadata: { matched_order_no: analysis.order_no, source: "erp_oms", trace_id: omsTraceId ?? null },
+        }, { onConflict: "email_id,order_id" });
+        linkedOrders.push(resolvedViaErp);
+        await recordEvent(admin, email.id, "order_linked", `自动关联订单 ${resolvedViaErp.order_no}（OMS）`, undefined, {
+          matched_order_no: analysis.order_no,
+          trace_id: omsTraceId ?? null,
+        });
+      } else {
+        await admin.from("order_compensation_tasks").upsert({
+          email_id: email.id,
+          order_no: analysis.order_no,
+          status: "pending",
+          next_run_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        }, { onConflict: "email_id,order_no" });
+        await recordEvent(admin, email.id, "compensation_created", `订单 ${analysis.order_no} 暂未查到，已创建补偿任务`);
+      }
     }
   }
   // 未提供口径：无单号且未链接 → 不做订单推荐
@@ -363,13 +474,96 @@ function computeSlaBucket(receivedAt: string | null | undefined): string | null 
   return "over_72h";
 }
 
-async function processEmail(emailId: string) {
+type ProcessEmailOptions = { analyzeOnly?: boolean };
+
+/** 仅重跑 AI 分析并写回分析字段，不触发关联订单、风控、自动回复等（用于人工/Dify 联调） */
+async function processEmailAnalyzeOnly(
+  admin: any,
+  emailId: string,
+  analysis: Analysis,
+  analyzeSource: "dify" | "local",
+  analyzeDifyError: string | null | undefined,
+  workflowRunId: string | null | undefined,
+) {
+  await admin.from("emails").update({
+    intent: analysis.intent,
+    intent_legacy: analysis.intent,
+    business_intent: analysis.business_intent,
+    category: analysis.category,
+    missing_elements: analysis.missing_elements,
+    ai_entities: analysis.entities,
+    is_info_complete: analysis.is_info_complete,
+    ai_summary: analysis.summary,
+    ai_language: analysis.language,
+    ai_sentiment: analysis.sentiment,
+    ai_analyzed_at: new Date().toISOString(),
+    priority: analysis.priority,
+    risk_level: analysis.risk_level,
+  }).eq("id", emailId);
+
+  if (analyzeSource === "local" && analyzeDifyError) {
+    await recordEvent(
+      admin,
+      emailId,
+      analyzeDifyError === "missing_dify_env" ? "ai_analyze_dify_missing_env" : "ai_analyze_dify_failed",
+      analyzeDifyError === "missing_dify_env"
+        ? "再次分析：未配置 DIFY_ANALYZE_URL/KEY，使用本地规则"
+        : "再次分析：Dify 调用失败，已回落本地规则",
+      analyzeDifyError,
+      { fallback: "local", analyze_only: true },
+    );
+  }
+
+  await recordEvent(
+    admin,
+    emailId,
+    "ai_reanalyzed",
+    analyzeSource === "dify" ? "再次分析完成（Dify 工作流）" : "再次分析完成（本地规则）",
+    analysis.summary,
+    {
+      ...(analysis as Record<string, unknown>),
+      analyze_engine: analyzeSource,
+      workflow_run_id: workflowRunId ?? null,
+      analyze_only: true,
+    },
+  );
+}
+
+async function processEmail(emailId: string, options?: ProcessEmailOptions) {
+  const analyzeOnly = options?.analyzeOnly === true;
   const admin = createClient(SUPABASE_URL, SERVICE_KEY);
   const { data: email, error } = await admin.from("emails").select("*").eq("id", emailId).single();
   if (error || !email) throw new Error("邮件不存在");
 
-  await admin.from("emails").update({ processing_status: "analyzing" }).eq("id", emailId);
-  const analysis = await analyzeWithAi(email);
+  if (!analyzeOnly) {
+    await admin.from("emails").update({ processing_status: "analyzing" }).eq("id", emailId);
+  }
+  const { analysis, source: analyzeSource, difyError: analyzeDifyError, workflowRunId } =
+    await analyzeWithAi(email);
+  if (analyzeSource === "local" && !analyzeOnly) {
+    await recordEvent(
+      admin,
+      emailId,
+      analyzeDifyError === "missing_dify_env" ? "ai_analyze_dify_missing_env" : "ai_analyze_dify_failed",
+      analyzeDifyError === "missing_dify_env"
+        ? "未配置 DIFY_ANALYZE_URL/KEY，使用本地规则分析"
+        : "Dify 分析调用失败，已回落本地规则",
+      analyzeDifyError ?? undefined,
+      { fallback: "local" },
+    );
+  }
+
+  if (analyzeOnly) {
+    await processEmailAnalyzeOnly(
+      admin,
+      emailId,
+      analysis,
+      analyzeSource,
+      analyzeDifyError,
+      workflowRunId,
+    );
+    return { analysis, associationStatus: email.association_status ?? "unlinked", routed: "analyze_only" as const };
+  }
 
   // 判断是否为近 30 天首封邮件（来自同一发件人）
   let isFirstEmail = false;
@@ -405,7 +599,20 @@ async function processEmail(emailId: string) {
     is_first_email: isFirstEmail,
     sla_bucket: ["pending", "processing"].includes(email.status) ? slaBucket : null,
   }).eq("id", emailId);
-  await recordEvent(admin, emailId, "ai_analyzed", "AI 分析完成", analysis.summary, analysis as any);
+  await recordEvent(
+    admin,
+    emailId,
+    "ai_analyzed",
+    analyzeSource === "dify"
+      ? "AI 分析完成（Dify：独立站智能客服-邮件智能分析）"
+      : "AI 分析完成（本地规则，未调用 Dify）",
+    analysis.summary,
+    {
+      ...(analysis as Record<string, unknown>),
+      analyze_engine: analyzeSource,
+      workflow_run_id: workflowRunId ?? null,
+    },
+  );
 
   const linkedOrders = await associateOrders(admin, email, analysis);
   // 关联状态语义：
@@ -470,7 +677,7 @@ async function processEmail(emailId: string) {
         emailId,
         "risk_intercept_deferred_compensating",
         "取消/改地址：已提供单号但未关联，不拦截；满 2h 后由调度发内部预警",
-        null,
+        undefined,
         { order_no: analysis.order_no },
       );
     } else {
@@ -557,9 +764,19 @@ Deno.serve(async (req) => {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
+    const analyzeOnly = body.analyze_only === true || body.mode === "analyze_only";
+    if (analyzeOnly && emailIds.length !== 1) {
+      return new Response(JSON.stringify({ error: "analyze_only 仅支持单次处理一封邮件" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
     const results = [];
     for (const emailId of emailIds) {
-      results.push({ email_id: emailId, ...(await processEmail(emailId)) });
+      results.push({
+        email_id: emailId,
+        ...(await processEmail(emailId, { analyzeOnly })),
+      });
     }
     return new Response(JSON.stringify({ results }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },

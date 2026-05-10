@@ -77,6 +77,7 @@ import {
   Clock3,
   ChevronDown,
   ChevronRight,
+  Pencil,
 } from "lucide-react";
 import { toast } from "sonner";
 import { formatDistanceToNow } from "date-fns";
@@ -89,6 +90,15 @@ import {
   DialogTrigger,
   DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 type Email = any;
@@ -120,26 +130,48 @@ export default function Workbench() {
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
   const [guidance, setGuidance] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [reanalyzing, setReanalyzing] = useState(false);
   const [replyContent, setReplyContent] = useState("");
   const [allOrders, setAllOrders] = useState<Order[]>([]);
+  /** 手工关联弹窗：从 OMS 拉单 */
+  const [erpPullOrderNo, setErpPullOrderNo] = useState("");
+  const [erpPullEmail, setErpPullEmail] = useState("");
+  const [erpPulling, setErpPulling] = useState(false);
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
   const [orderSearch, setOrderSearch] = useState("");
   const [holdDialog, setHoldDialog] = useState<{ open: boolean; order?: Order }>({ open: false });
   const [holdReason, setHoldReason] = useState("");
   const [holdCategory, setHoldCategory] = useState("cancel_order");
   const [holdSubmitting, setHoldSubmitting] = useState(false);
+  const [holdConfirmOpen, setHoldConfirmOpen] = useState(false);
+  const [holdPending, setHoldPending] = useState<{
+    orderId: string;
+    orderNo: string;
+    reason: string;
+    category: string;
+  } | null>(null);
+
+  const [orderEditDialog, setOrderEditDialog] = useState<{ open: boolean; order?: Order }>({ open: false });
+  const [orderEditCustomerName, setOrderEditCustomerName] = useState("");
+  const [orderEditOrderStatus, setOrderEditOrderStatus] = useState("");
+  const [orderEditSaving, setOrderEditSaving] = useState(false);
+
+  /** 私有桶 email-attachments：按 storage_path 生成的短期签名 URL（索引 → url） */
+  const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
 
   const selected = emails.find((e) => e.id === selectedId);
 
-  const loadEmails = useCallback(async () => {
+  const loadEmails = useCallback(async (): Promise<Email[]> => {
     const { data } = await supabase
       .from("emails")
       .select("*")
       .order("received_at", { ascending: false });
-    setEmails(data ?? []);
-    if (data && data.length > 0 && !selectedId) {
-      setSelectedId(data[0].id);
+    const list = (data ?? []) as Email[];
+    setEmails(list);
+    if (list.length > 0 && !selectedId) {
+      setSelectedId(list[0].id);
     }
+    return list;
   }, [selectedId]);
 
   const loadDetail = useCallback(async (email: Email) => {
@@ -205,7 +237,61 @@ export default function Workbench() {
     supabase.from("mailboxes").select("id, email_address, display_name").eq("is_active", true).then(({ data }) => {
       setMailboxes(data ?? []);
     });
+
+    // Realtime：监听 emails 表变更，自动刷新列表
+    const channel = supabase
+      .channel("workbench-emails-realtime")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "emails" },
+        () => { loadEmails(); },
+      )
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
   }, []);
+
+  useEffect(() => {
+    if (!selected?.attachments || !Array.isArray(selected.attachments)) {
+      setAttachmentSignedUrls({});
+      return;
+    }
+    let cancelled = false;
+    const arr = selected.attachments as Record<string, unknown>[];
+    (async () => {
+      const next: Record<number, string> = {};
+      const signErrors: string[] = [];
+      await Promise.all(
+        arr.map(async (a, i) => {
+          if (typeof a?.url === "string" && a.url) {
+            next[i] = a.url;
+            return;
+          }
+          const path = a?.storage_path;
+          if (typeof path !== "string" || !path) return;
+          const { data, error } = await supabase.storage
+            .from("email-attachments")
+            .createSignedUrl(path, 3600);
+          if (error) {
+            console.error("[attachment signed url]", path, error.message);
+            signErrors.push(error.message);
+            return;
+          }
+          if (data?.signedUrl && !cancelled) next[i] = data.signedUrl;
+        }),
+      );
+      if (!cancelled) {
+        setAttachmentSignedUrls(next);
+        if (signErrors.length > 0) {
+          const first = signErrors[0];
+          const suffix = signErrors.length > 1 ? `（共 ${signErrors.length} 项失败）` : "";
+          toast.error(`附件下载链接生成失败：${first}${suffix}`);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selected?.id, selected?.attachments]);
 
   useEffect(() => {
     if (selected) {
@@ -218,9 +304,10 @@ export default function Workbench() {
   async function generateDraft() {
     if (!selectedId) return;
     setGenerating(true);
-    // 人工生成草稿：固定走本地，避免 Dify 不稳定时人工被卡（自动草稿由调度任务负责）
+    // 人工二次生成草稿：默认走 Dify 工作流，由后端读取上一版草稿 + 指导意见进行二次优化
+    // Dify 调用失败时，后端按 GENERATE_DRAFT_FALLBACK_LOCAL 决定是否回落本地
     const { data, error } = await supabase.functions.invoke("generate-draft", {
-      body: { email_id: selectedId, guidance: guidance || undefined, mode: "local" },
+      body: { email_id: selectedId, guidance: guidance || undefined },
     });
     setGenerating(false);
     if (error) {
@@ -231,9 +318,47 @@ export default function Workbench() {
       toast.error(data.error);
       return;
     }
-    toast.success("草稿已生成（本地）");
+    const model = data?.draft?.model ?? "";
+    if (model === "dify-workflow") {
+      toast.success("草稿已生成（Dify 工作流）");
+    } else if (model === "pipeline-local-fallback") {
+      toast.warning("Dify 调用失败，已回落本地兜底草稿");
+    } else {
+      toast.success("草稿已生成（本地）");
+    }
     if (selected) loadDetail(selected);
     loadEmails();
+  }
+
+  /** 仅重跑邮件智能分析（Dify 工作流 / 本地兜底），不触发关联订单、风控、自动回复 */
+  async function reanalyzeEmail() {
+    if (!selectedId) return;
+    setReanalyzing(true);
+    const { data, error } = await supabase.functions.invoke("process-email", {
+      body: { email_ids: [selectedId], analyze_only: true },
+    });
+    setReanalyzing(false);
+    if (error) {
+      toast.error("再次分析失败：" + error.message);
+      return;
+    }
+    const errMsg = typeof (data as { error?: string })?.error === "string"
+      ? (data as { error: string }).error
+      : null;
+    if (errMsg) {
+      toast.error(errMsg);
+      return;
+    }
+    const row = (data as { results?: { routed?: string; analysis?: { summary?: string } }[] })?.results?.[0];
+    if (!row) {
+      toast.error("未返回分析结果");
+      return;
+    }
+    const src = row.routed === "analyze_only" ? "已更新摘要与意图" : "分析已完成";
+    toast.success(src);
+    const list = await loadEmails();
+    const cur = list.find((e) => e.id === selectedId);
+    if (cur) await loadDetail(cur);
   }
 
   async function updateEmailStatus(targetStatus: "processing" | "replied") {
@@ -296,9 +421,76 @@ export default function Workbench() {
   }
 
   async function openLinkDialog() {
-    const { data } = await supabase.from("orders").select("*").order("ordered_at", { ascending: false }).limit(50);
+    const { data } = await supabase
+      .from("orders")
+      .select("*")
+      .order("updated_at", { ascending: false })
+      .limit(200);
     setAllOrders(data ?? []);
+    setErpPullOrderNo("");
+    setErpPullEmail(selected?.from_email ?? "");
     setLinkDialogOpen(true);
+  }
+
+  async function pullOrderFromErp() {
+    const orderNo = erpPullOrderNo.trim();
+    const buyerEmail = erpPullEmail.trim();
+    if (!orderNo && !buyerEmail) {
+      toast.error("请填写订单号或买家邮箱至少一项");
+      return;
+    }
+    setErpPulling(true);
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+      if (!token) {
+        toast.error("请先登录");
+        return;
+      }
+      const base = import.meta.env.VITE_SUPABASE_URL as string;
+      const anon = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
+      const u = new URL(`${base.replace(/\/+$/, "")}/functions/v1/get-order-by-email`);
+      if (orderNo) u.searchParams.set("order_no", orderNo);
+      if (buyerEmail) u.searchParams.set("email", buyerEmail);
+      const res = await fetch(u.toString(), {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          apikey: anon,
+        },
+      });
+      const json = (await res.json()) as {
+        error?: string;
+        found?: boolean;
+        source?: string;
+        erp_message?: string;
+        erp_error?: string;
+      };
+      if (!res.ok && json.error) {
+        toast.error(json.error);
+        return;
+      }
+      if (json.error) {
+        toast.error(json.error);
+        return;
+      }
+      if (!json.found) {
+        toast.message("未查到可关联订单", {
+          description: json.erp_message || json.erp_error || "本地与 OMS 均无有效记录，或 ERP 未配置",
+        });
+        return;
+      }
+      toast.success(json.source === "erp_oms" ? "已从 OMS 拉取并写入本地" : "已在本地找到该订单");
+      const { data: refreshed } = await supabase
+        .from("orders")
+        .select("*")
+        .order("updated_at", { ascending: false })
+        .limit(200);
+      setAllOrders(refreshed ?? []);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "拉取失败");
+    } finally {
+      setErpPulling(false);
+    }
   }
 
   async function linkOrder(orderId: string) {
@@ -359,20 +551,36 @@ export default function Workbench() {
   }
 
   function openHoldDialog(order: Order) {
+    setHoldPending(null);
+    setHoldConfirmOpen(false);
     setHoldDialog({ open: true, order });
     setHoldReason("");
     setHoldCategory("cancel_order");
   }
 
-  async function submitHold() {
-    if (!holdDialog.order) return;
+  function requestHoldConfirm() {
+    const order = holdDialog.order;
+    if (!order?.id) return;
+    setHoldPending({
+      orderId: order.id,
+      orderNo: String(order.order_no ?? ""),
+      reason: holdReason,
+      category: holdCategory,
+    });
+    setHoldDialog({ open: false });
+    setHoldConfirmOpen(true);
+  }
+
+  async function executeHoldSubmit() {
+    const p = holdPending;
+    if (!p?.orderId) return;
     setHoldSubmitting(true);
     const { data, error } = await supabase.functions.invoke("risk-intercept", {
       body: {
-        order_id: holdDialog.order.id,
+        order_id: p.orderId,
         action: "hold",
-        intercept_reason: holdReason,
-        reason_category: holdCategory,
+        intercept_reason: p.reason,
+        reason_category: p.category,
         email_id: selectedId,
         trigger_source: "manual",
       },
@@ -383,7 +591,40 @@ export default function Workbench() {
       return;
     }
     toast.success("已暂停发货（本地订单已标记；ERP 拦截对接见文档）");
-    setHoldDialog({ open: false });
+    setHoldConfirmOpen(false);
+    setHoldPending(null);
+    if (selected) loadDetail(selected);
+  }
+
+  function openOrderEditDialog(order: Order) {
+    setOrderEditDialog({ open: true, order });
+    setOrderEditCustomerName(String(order.customer_name ?? ""));
+    setOrderEditOrderStatus(String(order.order_status ?? ""));
+  }
+
+  async function saveOrderEdit() {
+    const o = orderEditDialog.order;
+    if (!o?.id) return;
+    setOrderEditSaving(true);
+    const { error } = await supabase
+      .from("orders")
+      .update({
+        customer_name: orderEditCustomerName.trim() || null,
+        order_status: orderEditOrderStatus.trim() || null,
+      })
+      .eq("id", o.id);
+    setOrderEditSaving(false);
+    if (error) {
+      const msg = error.message ?? "";
+      if (/permission|policy|rls|42501/i.test(msg)) {
+        toast.error("无权限：需要 admin / leader / agent 角色才能更新订单");
+      } else {
+        toast.error(msg);
+      }
+      return;
+    }
+    toast.success("订单信息已更新");
+    setOrderEditDialog({ open: false });
     if (selected) loadDetail(selected);
   }
 
@@ -405,13 +646,73 @@ export default function Workbench() {
 
   async function syncMailboxes() {
     setSyncing(true);
-    const { data, error } = await supabase.functions.invoke("sync-mailbox", { body: { force_bulk: true } });
-    setSyncing(false);
-    if (error) { toast.error("同步失败：" + error.message); return; }
-    if (data?.error) { toast.error(data.error); return; }
-    const total = (data?.results ?? []).reduce((s: number, r: any) => s + (r.inserted ?? 0), 0);
-    toast.success(`同步完成，新增 ${total} 封邮件`);
-    loadEmails();
+    const MAX_ROUNDS = 20;
+    try {
+      const { data: activeMbs, error: listErr } = await supabase
+        .from("mailboxes")
+        .select("id, email_address")
+        .eq("is_active", true);
+      if (listErr) {
+        toast.error("读取邮箱列表失败：" + listErr.message);
+        return;
+      }
+      const rows = activeMbs ?? [];
+      if (rows.length === 0) {
+        toast.message("没有启用的邮箱");
+        return;
+      }
+
+      let grandTotalInserted = 0;
+      const failures: string[] = [];
+
+      for (const mb of rows) {
+        const label = mb.email_address ?? mb.id;
+        let rounds = 0;
+        while (rounds < MAX_ROUNDS) {
+          rounds++;
+          const { data, error } = await supabase.functions.invoke("sync-mailbox", {
+            body: { mailbox_id: mb.id, force_bulk: true },
+          });
+          if (error) {
+            failures.push(`${label}：${error.message}`);
+            break;
+          }
+          if (data?.error) {
+            failures.push(`${label}：${data.error}`);
+            break;
+          }
+          const r = data?.results?.[0];
+          if (r?.error) {
+            failures.push(`${label}：${r.error}`);
+            break;
+          }
+          if (!r) {
+            failures.push(`${label}：未获取到同步结果`);
+            break;
+          }
+          const ins = r.inserted ?? 0;
+          grandTotalInserted += ins;
+          toast.message(`[${label}] 第 ${rounds} 轮：新增 ${ins} 封，剩余 ${r.remaining ?? 0} 封`);
+          if (!r.remaining || r.remaining === 0) break;
+        }
+      }
+
+      if (failures.length > 0) {
+        toast.error(failures.slice(0, 3).join("；") + (failures.length > 3 ? `…等 ${failures.length} 条` : ""));
+      }
+      if (grandTotalInserted > 0) {
+        toast.success(
+          failures.length === 0
+            ? `同步完成，共新增 ${grandTotalInserted} 封邮件`
+            : `同步结束，共新增 ${grandTotalInserted} 封邮件（部分邮箱失败见上方提示）`,
+        );
+      } else if (failures.length === 0) {
+        toast.success("同步完成，共新增 0 封邮件");
+      }
+      await loadEmails();
+    } finally {
+      setSyncing(false);
+    }
   }
 
   async function sendReply() {
@@ -467,7 +768,7 @@ export default function Workbench() {
   const filteredEmails = emails.filter((e) => {
     if (filter !== "all") {
       if (filter === "replied") {
-        if (e.status !== "replied" && e.status !== "closed") return false;
+        if (e.status !== "replied") return false;
       } else if (e.status !== filter) {
         return false;
       }
@@ -481,10 +782,12 @@ export default function Workbench() {
     }
     if (search) {
       const s = search.toLowerCase();
+      const mid = (e.message_id ?? "").trim().toLowerCase();
       return (
         e.from_email?.toLowerCase().includes(s) ||
         e.subject?.toLowerCase().includes(s) ||
         e.body_text?.toLowerCase().includes(s) ||
+        mid.includes(s) ||
         JSON.stringify(e.ai_entities ?? {}).toLowerCase().includes(s)
       );
     }
@@ -513,7 +816,7 @@ export default function Workbench() {
           <div className="relative">
             <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="搜索发件人、主题..."
+              placeholder="搜索发件人、主题、正文、Message-ID…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="pl-7 h-8 text-sm"
@@ -597,7 +900,7 @@ export default function Workbench() {
               const statusBar =
                 email.status === "pending" ? "bg-warning"
                 : email.status === "processing" ? "bg-primary"
-                : (email.status === "replied" || email.status === "closed") ? "bg-success"
+                : email.status === "replied" ? "bg-success"
                 : "bg-muted";
               const missing = (email.missing_elements ?? []) as string[];
               return (
@@ -697,6 +1000,15 @@ export default function Workbench() {
                     </Badge>
                   )}
                 </div>
+                <div className="mt-2 text-xs">
+                  <span className="text-muted-foreground">Message-ID：</span>
+                  <span
+                    className="font-mono break-all"
+                    title={selected.message_id ?? undefined}
+                  >
+                    {selected.message_id?.trim() ? selected.message_id : "—"}
+                  </span>
+                </div>
                 <div className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-2 text-xs">
                   <Card className="p-2">
                     <div className="text-muted-foreground">AI 摘要</div>
@@ -738,27 +1050,41 @@ export default function Workbench() {
                     </div>
                   </Card>
                 </div>
-                <div className="mt-3 flex justify-end">
-                  {(selected.status === "pending" || selected.status === "processing") && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={updatingStatus}
-                      onClick={() => updateEmailStatus("replied")}
-                    >
-                      {updatingStatus ? "处理中..." : "标记为已回复"}
-                    </Button>
-                  )}
-                  {(selected.status === "replied" || selected.status === "closed") && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={updatingStatus}
-                      onClick={() => updateEmailStatus("processing")}
-                    >
-                      {updatingStatus ? "处理中..." : "改回处理中"}
-                    </Button>
-                  )}
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    className="h-8 text-xs"
+                    disabled={!selectedId || reanalyzing}
+                    title="仅重跑 Dify/本地分析并更新摘要与意图；不会自动关联订单、风控或发信"
+                    onClick={reanalyzeEmail}
+                  >
+                    <RefreshCw className={reanalyzing ? "w-3.5 h-3.5 mr-1.5 animate-spin" : "w-3.5 h-3.5 mr-1.5"} />
+                    {reanalyzing ? "分析中…" : "再次分析"}
+                  </Button>
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    {(selected.status === "pending" || selected.status === "processing") && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={updatingStatus}
+                        onClick={() => updateEmailStatus("replied")}
+                      >
+                        {updatingStatus ? "处理中..." : "标记为已回复"}
+                      </Button>
+                    )}
+                    {selected.status === "replied" && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={updatingStatus}
+                        onClick={() => updateEmailStatus("processing")}
+                      >
+                        {updatingStatus ? "处理中..." : "改回处理中"}
+                      </Button>
+                    )}
+                  </div>
                 </div>
                 {(selected.missing_elements ?? []).length > 0 && (
                   <div className="mt-2 p-2 bg-warning/10 border border-warning/30 rounded text-xs text-warning flex items-center gap-2">
@@ -777,9 +1103,77 @@ export default function Workbench() {
               </div>
 
               {/* 正文 */}
-              <Card className="p-4 bg-muted/30 overflow-hidden">
-                <EmailBody content={selected.body_text} />
-              </Card>
+              <div>
+                <h3 className="font-medium text-sm mb-2">邮件正文</h3>
+                <Card className="p-4 bg-muted/30 overflow-hidden">
+                  <EmailBody
+                    content={
+                      selected.body_html?.trim()
+                        ? selected.body_html
+                        : selected.body_text
+                    }
+                  />
+                </Card>
+              </div>
+
+              {/* 附件 */}
+              {Array.isArray(selected.attachments) && selected.attachments.length > 0 && (
+                <div>
+                  <h3 className="font-medium text-sm mb-2">附件 ({selected.attachments.length})</h3>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(selected.attachments as any[]).map((a, i) => {
+                      const contentType = String(a.contentType ?? "");
+                      const isImg = contentType.startsWith("image/");
+                      const signedOrUrl =
+                        attachmentSignedUrls[i] ||
+                        (typeof a.url === "string" ? a.url : "") ||
+                        "";
+                      const hasLink = Boolean(signedOrUrl);
+                      const imgSrc = isImg && signedOrUrl ? signedOrUrl : null;
+                      const inner = (
+                        <>
+                          {isImg && imgSrc ? (
+                            <img src={imgSrc} alt={a.filename} className="w-12 h-12 object-cover rounded" />
+                          ) : (
+                            <div className="w-12 h-12 bg-muted rounded flex items-center justify-center text-muted-foreground">📎</div>
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <div className="truncate font-medium">{a.filename ?? "附件"}</div>
+                            <div className="text-muted-foreground">
+                              {a.size ? `${(Number(a.size) / 1024).toFixed(1)} KB` : ""}{" "}
+                              {hasLink
+                                ? ""
+                                : a.storage_path
+                                  ? "（签名链接生成中…）"
+                                  : a.note
+                                    ? String(a.note)
+                                    : "（未上传）"}
+                            </div>
+                          </div>
+                        </>
+                      );
+                      return hasLink ? (
+                        <a
+                          key={i}
+                          href={signedOrUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="flex items-center gap-2 p-2 border rounded hover:bg-muted/50 text-xs"
+                        >
+                          {inner}
+                        </a>
+                      ) : (
+                        <div
+                          key={i}
+                          className="flex items-center gap-2 p-2 border rounded text-xs opacity-80"
+                        >
+                          {inner}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               {/* 同往来历史 */}
               <div>
@@ -839,39 +1233,6 @@ export default function Workbench() {
                 )}
               </div>
 
-              {/* 附件 */}
-              {Array.isArray(selected.attachments) && selected.attachments.length > 0 && (
-                <div>
-                  <h3 className="font-medium text-sm mb-2">附件 ({selected.attachments.length})</h3>
-                  <div className="grid grid-cols-2 gap-2">
-                    {(selected.attachments as any[]).map((a, i) => {
-                      const isImg = (a.contentType || "").startsWith("image/");
-                      return (
-                        <a
-                          key={i}
-                          href={a.url || "#"}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="flex items-center gap-2 p-2 border rounded hover:bg-muted/50 text-xs"
-                        >
-                          {isImg && a.url ? (
-                            <img src={a.url} alt={a.filename} className="w-12 h-12 object-cover rounded" />
-                          ) : (
-                            <div className="w-12 h-12 bg-muted rounded flex items-center justify-center text-muted-foreground">📎</div>
-                          )}
-                          <div className="flex-1 min-w-0">
-                            <div className="truncate font-medium">{a.filename}</div>
-                            <div className="text-muted-foreground">
-                              {a.size ? `${(a.size / 1024).toFixed(1)} KB` : ""} {a.url ? "" : "（未上传）"}
-                            </div>
-                          </div>
-                        </a>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
               {/* 关联订单 */}
               <div>
                 <div className="flex items-center justify-between mb-2">
@@ -888,33 +1249,70 @@ export default function Workbench() {
                       <DialogHeader>
                         <DialogTitle>关联订单</DialogTitle>
                       </DialogHeader>
+                      <div className="rounded-md border p-3 space-y-2 bg-muted/30 text-xs">
+                        <div className="font-medium text-foreground">从 ERP（OMS）拉取到本地</div>
+                        <p className="text-muted-foreground">
+                          下方列表只展示本地已存在的订单。若为空，请填写<strong>订单号或买家邮箱至少一项</strong>（可同时填）后从 OMS 拉取。
+                        </p>
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <Input
+                            placeholder="订单号（与邮箱二选一或同填）"
+                            value={erpPullOrderNo}
+                            onChange={(e) => setErpPullOrderNo(e.target.value)}
+                            className="h-8 text-xs"
+                          />
+                          <Input
+                            placeholder="买家邮箱（与单号二选一或同填）"
+                            value={erpPullEmail}
+                            onChange={(e) => setErpPullEmail(e.target.value)}
+                            className="h-8 text-xs flex-1"
+                          />
+                          <Button type="button" size="sm" className="h-8 shrink-0" disabled={erpPulling} onClick={pullOrderFromErp}>
+                            {erpPulling ? "拉取中…" : "从 OMS 拉取"}
+                          </Button>
+                        </div>
+                      </div>
                       <Input
-                        placeholder="搜索订单号、客户邮箱..."
+                        placeholder="在下列订单中搜索订单号、客户邮箱..."
                         value={orderSearch}
                         onChange={(e) => setOrderSearch(e.target.value)}
                       />
                       <ScrollArea className="h-80">
-                        {allOrders
-                          .filter((o) => {
-                            if (!orderSearch) return true;
-                            const s = orderSearch.toLowerCase();
-                            return (
-                              o.order_no?.toLowerCase().includes(s) ||
-                              o.customer_email?.toLowerCase().includes(s) ||
-                              o.customer_name?.toLowerCase().includes(s)
-                            );
-                          })
-                          .map((o) => (
-                            <div key={o.id} className="flex items-center justify-between p-2 hover:bg-accent rounded">
-                              <div className="text-sm">
-                                <div className="font-medium">{o.order_no}</div>
-                                <div className="text-xs text-muted-foreground">
-                                  {o.customer_name} · {o.product_summary}
+                        {allOrders.length === 0 ? (
+                          <div className="text-center text-muted-foreground py-8 text-sm px-2">
+                            本地尚无订单记录。请使用上方「从 OMS 拉取」，或确认 `orders` 表是否已有同步数据。
+                          </div>
+                        ) : (
+                          (() => {
+                            const filtered = allOrders.filter((o) => {
+                              if (!orderSearch) return true;
+                              const s = orderSearch.toLowerCase();
+                              return (
+                                o.order_no?.toLowerCase().includes(s) ||
+                                o.customer_email?.toLowerCase().includes(s) ||
+                                o.customer_name?.toLowerCase().includes(s)
+                              );
+                            });
+                            if (filtered.length === 0) {
+                              return (
+                                <div className="text-center text-muted-foreground py-8 text-sm">
+                                  没有匹配「{orderSearch}」的订单，请调整搜索词或先拉取 OMS。
                                 </div>
+                              );
+                            }
+                            return filtered.map((o) => (
+                              <div key={o.id} className="flex items-center justify-between p-2 hover:bg-accent rounded">
+                                <div className="text-sm">
+                                  <div className="font-medium">{o.order_no}</div>
+                                  <div className="text-xs text-muted-foreground">
+                                    {o.customer_name} · {o.product_summary}
+                                  </div>
+                                </div>
+                                <Button size="sm" onClick={() => linkOrder(o.id)}>关联</Button>
                               </div>
-                              <Button size="sm" onClick={() => linkOrder(o.id)}>关联</Button>
-                            </div>
-                          ))}
+                            ));
+                          })()
+                        )}
                       </ScrollArea>
                     </DialogContent>
                   </Dialog>
@@ -946,38 +1344,77 @@ export default function Workbench() {
                 ) : (
                   <div className="space-y-2">
                     {orders.map((o) => (
-                      <Card key={o._link_id} className={`p-3 ${o.shipping_hold ? "border-warning/50 bg-warning/5" : ""}`}>
+                      <Card
+                        key={o._link_id}
+                        className={`p-3 ${o.shipping_hold ? "border-warning/30 bg-warning/5" : "border-border"}`}
+                      >
                         <div className="flex items-start justify-between gap-2">
-                          <div className="space-y-1 text-sm flex-1 min-w-0">
+                          <div className="space-y-2 text-sm flex-1 min-w-0">
                             <div className="flex items-center gap-2 flex-wrap">
                               <span className="font-semibold">{o.order_no}</span>
                               <Badge variant={o._link_source === "manual" ? "default" : "secondary"} className="text-[10px] py-0 h-4">
                                 {o._link_source === "manual" ? "手工" : "自动"}
                               </Badge>
-                              {o.order_status && <Badge variant="outline" className="text-[10px] py-0 h-4">{o.order_status}</Badge>}
-                              {o.shipping_hold && (
-                                <Badge variant="outline" className="text-[10px] py-0 h-4 border-warning text-warning">
-                                  <PauseCircle className="w-2.5 h-2.5 mr-0.5" /> 已暂停发货
-                                </Badge>
-                              )}
                             </div>
-                            <div className="text-xs text-muted-foreground space-y-0.5">
-                              <div>客户：{o.customer_name} ({o.customer_email})</div>
-                              <div>商品：{o.product_summary}</div>
-                              <div>物流：{o.shipping_status ?? "-"} · {o.tracking_no ?? "-"}</div>
-                              <div>金额：{o.amount} {o.currency}</div>
-                              {o.shipping_hold && o.hold_reason && (
-                                <div className="text-warning">暂停原因：{o.hold_reason}</div>
-                              )}
+                            <div className="rounded-md border bg-muted/30 px-2.5 py-2 space-y-1.5">
+                              <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                                <div>
+                                  <span className="text-xs text-muted-foreground">客户姓名</span>
+                                  <div className="font-medium">{o.customer_name?.trim() ? o.customer_name : "—"}</div>
+                                </div>
+                                <div>
+                                  <span className="text-xs text-muted-foreground">订单状态</span>
+                                  <div className="font-medium">{o.order_status?.trim() ? o.order_status : "—"}</div>
+                                </div>
+                              </div>
+                              <div className="text-[11px] text-muted-foreground space-y-0.5 pt-0.5 border-t border-border/60">
+                                <div>邮箱：{o.customer_email ?? "—"}</div>
+                                <div>商品：{o.product_summary ?? "—"}</div>
+                                <div>物流：{o.shipping_status ?? "—"} · {o.tracking_no ?? "—"}</div>
+                                <div>金额：{o.amount ?? "—"} {o.currency ?? ""}</div>
+                              </div>
                             </div>
-                            <div className="flex gap-2 pt-1">
+                            <div className="text-[11px] text-muted-foreground flex items-center gap-1.5 flex-wrap">
                               {o.shipping_hold ? (
-                                <Button size="sm" variant="outline" className="h-6 text-[11px]" onClick={() => releaseHold(o)}>
+                                <>
+                                  <PauseCircle className="w-3 h-3 shrink-0 text-warning/80" />
+                                  <span>发货拦截：已拦截</span>
+                                  {o.hold_reason ? (
+                                    <span className="truncate max-w-[220px]" title={o.hold_reason}>
+                                      （{o.hold_reason}）
+                                    </span>
+                                  ) : null}
+                                </>
+                              ) : (
+                                <>
+                                  <span className="opacity-80">发货拦截：未拦截</span>
+                                </>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                className="h-7 text-[11px] text-muted-foreground"
+                                onClick={() => openOrderEditDialog(o)}
+                              >
+                                <Pencil className="w-3 h-3 mr-1" />
+                                编辑订单信息
+                              </Button>
+                              {o.shipping_hold ? (
+                                <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => releaseHold(o)}>
                                   <PlayCircle className="w-3 h-3 mr-1" /> 恢复发货
                                 </Button>
                               ) : (
-                                <Button size="sm" variant="outline" className="h-6 text-[11px] border-warning/40 text-warning hover:bg-warning/10" onClick={() => openHoldDialog(o)}>
-                                  <PauseCircle className="w-3 h-3 mr-1" /> 暂停发货（待核实）
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 text-[11px] text-muted-foreground hover:text-foreground"
+                                  onClick={() => openHoldDialog(o)}
+                                >
+                                  暂停发货…
                                 </Button>
                               )}
                             </div>
@@ -1014,7 +1451,7 @@ export default function Workbench() {
                       ? "AI 生成中..."
                       : drafts.length === 0
                       ? "生成 AI 草稿"
-                      : `重新生成（基于指导思想，下一版本 v${drafts.length + 1}）`}
+                      : `重新生成（基于指导思想）`}
                   </Button>
                   {drafts.length > 0 && (
                     <div className="space-y-2">
@@ -1128,9 +1565,71 @@ export default function Workbench() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setHoldDialog({ open: false })}>取消</Button>
-            <Button onClick={submitHold} disabled={holdSubmitting} className="bg-warning hover:bg-warning/90 text-warning-foreground">
+            <Button onClick={requestHoldConfirm} disabled={holdSubmitting} className="bg-warning hover:bg-warning/90 text-warning-foreground">
               <PauseCircle className="w-4 h-4 mr-1" />
-              {holdSubmitting ? "处理中..." : "确认暂停"}
+              下一步：确认拦截
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog
+        open={holdConfirmOpen}
+        onOpenChange={(open) => {
+          setHoldConfirmOpen(open);
+          if (!open) setHoldPending(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认暂停发货？</AlertDialogTitle>
+            <AlertDialogDescription>
+              订单号 <span className="font-medium text-foreground">{holdPending?.orderNo ?? "—"}</span>
+              ：将向 ERP 尝试拦截（若已配置），并在本地标记暂停发货与风控日志。请再次确认无误后再执行。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={holdSubmitting}>取消</AlertDialogCancel>
+            <Button
+              type="button"
+              className="bg-warning hover:bg-warning/90 text-warning-foreground"
+              disabled={holdSubmitting}
+              onClick={() => void executeHoldSubmit()}
+            >
+              {holdSubmitting ? "处理中…" : "确定拦截"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <Dialog open={orderEditDialog.open} onOpenChange={(v) => setOrderEditDialog({ open: v, order: v ? orderEditDialog.order : undefined })}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>编辑订单信息 · {orderEditDialog.order?.order_no}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">客户姓名</label>
+              <Input
+                value={orderEditCustomerName}
+                onChange={(e) => setOrderEditCustomerName(e.target.value)}
+                placeholder="与 OMS / 客户称呼一致"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">订单状态</label>
+              <Input
+                value={orderEditOrderStatus}
+                onChange={(e) => setOrderEditOrderStatus(e.target.value)}
+                placeholder="与 ERP / OMS 状态文案一致"
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">仅更新本地 `orders` 表；与 ERP 状态不一致时请按需从 OMS 重新拉取或人工对齐。</p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOrderEditDialog({ open: false })}>取消</Button>
+            <Button onClick={() => void saveOrderEdit()} disabled={orderEditSaving}>
+              {orderEditSaving ? "保存中…" : "保存"}
             </Button>
           </DialogFooter>
         </DialogContent>

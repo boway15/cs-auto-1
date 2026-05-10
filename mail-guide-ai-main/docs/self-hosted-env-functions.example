@@ -4,9 +4,11 @@
 # ============================================================
 
 # --- Dify（与云端 npx supabase functions secrets set 对应）---
+# DIFY_ANALYZE_*：必须对应 Dify 应用「独立站智能客服-邮件智能分析」→ API 访问 → Workflow 密钥（app-xxxx），切勿填成草稿应用的 Key
 DIFY_GATEWAY_API_KEY=
 DIFY_ANALYZE_URL=
 DIFY_ANALYZE_KEY=
+# DIFY_DRAFT_*：对应「独立站智能客服-邮件草稿生成」等工作流的密钥，与 ANALYZE 不可混用
 DIFY_DRAFT_URL=
 DIFY_DRAFT_KEY=
 
@@ -15,6 +17,10 @@ LOVABLE_API_KEY=
 
 # sync-mailbox：若 cron 使用独立 key（可选，见 functions 源码）
 # CRON_SERVICE_ROLE_KEY=
+
+# sync-mailbox：完整 RFC822 体积上限（字节）。含附件邮件常 >500KB，过小会导致从不拉 MIME、附件无法入库。
+# MAIL_SYNC_FULL_BODY_MAX_BYTES=5000000
+# MAIL_SYNC_FULL_BODY_WITH_ATTACH_MAX_BYTES=25000000
 
 # get-email-context 等
 # API_KEY=
@@ -26,3 +32,14 @@ LOVABLE_API_KEY=
 # 运维告警邮件（可选，有代码内默认值）
 # ALERT_SENDER_ADDRESS=
 # ALERT_EMAIL_TO=
+
+# --- ERP（Edge 单出口：Token + OMS 查单 + Java 网关拦截；勿提交 Git）---
+# 详见 docs/erp-order-api.md、docs/erp-api-requirements.md §0
+# ERP_TOKEN_URL=https://loginserver.bestwo.net:9443/connect/token
+# ERP_OMS_BASE=https://omsapi.bestwo.net:9443
+# ERP_GATEWAY_BASE=https://gatewayjava.bestwo.net:9443
+# ERP_USERNAME=
+# ERP_PASSWORD=
+# ERP_CLIENT_ID=ERP
+# 测试联调用 pw 时：ERP_TOKEN_PASSWORD_FIELD=pw
+# ERP_TOKEN_PASSWORD_FIELD=password

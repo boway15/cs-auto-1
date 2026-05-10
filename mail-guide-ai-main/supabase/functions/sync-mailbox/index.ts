@@ -1,7 +1,16 @@
 // IMAP 收件 Edge Function（Deno 原生 TLS 实现，不依赖 Node 库）
 // 实现最小 IMAP 子集：LOGIN / ID / SELECT / SEARCH / FETCH / LOGOUT
 // 适配 Gmail / Outlook / 163 / QQ 等主流 IMAP 服务器
+//
+// 环境变量（可选，控制是否拉取完整 RFC822 以解析附件）：
+// - MAIL_SYNC_FULL_BODY_MAX_BYTES：无附件邮件时，RFC822.SIZE 超过此值则只取 BODY[TEXT]，默认 5000000（5MB）
+// - MAIL_SYNC_FULL_BODY_WITH_ATTACH_MAX_BYTES：BODYSTRUCTURE 已标记有附件时，允许完整拉取的上限，默认 25000000（25MB）
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import {
+  extractTextFromMime,
+  parseFullMime,
+  type MimeAttachmentPart,
+} from "../_shared/mime-parse.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -14,6 +23,16 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const CRON_SERVICE_ROLE_KEY = Deno.env.get("CRON_SERVICE_ROLE_KEY");
 const MAIL_LOCAL_TEST_MODE = Deno.env.get("MAIL_LOCAL_TEST_MODE") === "true";
 declare const EdgeRuntime: { waitUntil: (promise: Promise<unknown>) => void };
+
+const DEFAULT_FULL_BODY_MAX_BYTES = 5_000_000;
+const DEFAULT_FULL_BODY_WITH_ATTACH_MAX_BYTES = 25_000_000;
+
+function parseEnvPositiveInt(name: string, fallback: number): number {
+  const raw = Deno.env.get(name)?.trim();
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 
 let cachedMailTlsCaCerts: string[] | undefined | null;
 
@@ -61,6 +80,21 @@ interface SyncResult {
   error?: string;
 }
 
+/**
+ * 从 IMAP FETCH 响应中按 literal 声明的字节数截取正文（RFC 3501）。
+ * 不能用 [\s\S]*? 非贪婪到 `\r\n)`：MIME/二进制正文里可能含 `)\r\n` 等序列，会导致截断、正文丢失、附件损坏。
+ */
+function sliceImapLiteral(resp: string, path: string): string | null {
+  const esc = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`${esc}\\s*\\{(\\d+)\\}\\r?\\n`, "m");
+  const m = resp.match(re);
+  if (!m || m.index === undefined) return null;
+  const start = m.index + m[0].length;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return resp.slice(start, start + n);
+}
+
 /** 业务 received_at：RFC 5322 Date 头；缺失或无法解析时回退为本次入库时刻 */
 function receivedAtFromDateHeader(dateHeader: string | null | undefined, ingestedAtIso: string): string {
   const raw = dateHeader?.trim();
@@ -75,7 +109,8 @@ class ImapClient {
   private conn!: Deno.Conn | Deno.TlsConn;
   private reader!: ReadableStreamDefaultReader<Uint8Array>;
   private encoder = new TextEncoder();
-  private decoder = new TextDecoder();
+  /** 使用 latin1 与 IMAP 原始字节一一对应，便于按 literal 字节数 slice；避免 UTF-8 解码损坏二进制 MIME 导致正文/附件截断 */
+  private decoder = new TextDecoder("iso-8859-1");
   private buffer = "";
   private tagCounter = 0;
 
@@ -207,10 +242,22 @@ class ImapClient {
   }
 
   // 下载邮件完整 MIME 正文（含 multipart 结构）：使用 BODY.PEEK[] 保留边界信息
-  // 对 HTML-only 邮件也能正确提取；超过 500KB 的邮件回退到 BODY[TEXT]
-  async fetchFullBody(uid: number, rfc822Size: number, timeoutMs = 10000): Promise<{ raw: string; isFull: boolean }> {
-    // 大邮件只取 BODY[TEXT]，避免下载附件撑爆内存
-    if (rfc822Size > 500_000) {
+  // rfc822Size 超过 maxBytes 时只取 BODY[TEXT]，避免超大信撑爆内存
+  async fetchFullBody(
+    uid: number,
+    rfc822Size: number,
+    timeoutMs = 10000,
+    maxBytes = DEFAULT_FULL_BODY_MAX_BYTES,
+  ): Promise<{ raw: string; isFull: boolean }> {
+    if (rfc822Size > maxBytes) {
+      console.log(
+        "[fetchFullBody] rfc822 over maxBytes, using BODY[TEXT] only. uid:",
+        uid,
+        "rfc822Size:",
+        rfc822Size,
+        "maxBytes:",
+        maxBytes,
+      );
       const text = await this.fetchBodyTextFallback(uid, timeoutMs);
       return { raw: text, isFull: false };
     }
@@ -220,11 +267,9 @@ class ImapClient {
     const re = new RegExp(`^${tag} (OK|NO|BAD)[^\\r\\n]*\\r?\\n`, "m");
     try {
       const raw = await this.readUntil(re, timeoutMs);
-      const literalMatch = raw.match(/BODY\[\]\s*\{(\d+)\}\r?\n([\s\S]*?)(?=\r?\n\)|\r?\nA\d+ )/);
-      if (literalMatch) {
-        const size = Number(literalMatch[1]);
-        const body = literalMatch[2].slice(0, size);
-        console.log("[fetchFullBody] uid:", uid, "size:", body.length);
+      const body = sliceImapLiteral(raw, "BODY[]");
+      if (body != null) {
+        console.log("[fetchFullBody] uid:", uid, "literalBytes:", body.length);
         return { raw: body, isFull: true };
       }
     } catch (e) {
@@ -241,10 +286,9 @@ class ImapClient {
     await this.write(`${tag} UID FETCH ${uid} (BODY.PEEK[TEXT])\r\n`);
     const re = new RegExp(`^${tag} (OK|NO|BAD)[^\\r\\n]*\\r?\\n`, "m");
     const raw = await this.readUntil(re, timeoutMs);
-    const ok = raw.match(re)?.[1];
-    const literalMatch = raw.match(/BODY\[TEXT\]\s*\{(\d+)\}\r?\n([\s\S]*?)(?=\r?\n\)|\r?\nA\d+ )/);
-    if (literalMatch) {
-      return literalMatch[2].slice(0, Number(literalMatch[1]));
+    const body = sliceImapLiteral(raw, "BODY[TEXT]");
+    if (body != null) {
+      return body;
     }
     const quotedMatch = raw.match(/BODY\[TEXT\]\s+"([^"]*?)"\s*\)/);
     if (quotedMatch) return quotedMatch[1];
@@ -304,145 +348,89 @@ function parseAddress(value: string | null): { name: string | null; address: str
   return { name: null, address: plain };
 }
 
-// 从 MIME 正文中提取可读的纯文本，处理 base64 / quoted-printable 及 charset 转换
-function extractTextFromMime(raw: string): string {
-  if (!raw) return "";
-
-  function decodePart(headers: string, body: string): string {
-    const charset = headers.match(/charset=(["']?)([\w-]+)\1/i)?.[2] ?? "utf-8";
-    const cte = (headers.match(/content-transfer-encoding:\s*(\S+)/i)?.[1] ?? "7bit").toLowerCase();
-    let decoded: Uint8Array;
-    try {
-      if (cte === "base64") {
-        const bin = atob(body.replace(/\s/g, ""));
-        decoded = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) decoded[i] = bin.charCodeAt(i);
-      } else if (cte === "quoted-printable") {
-        const buf: number[] = [];
-        for (let i = 0; i < body.length; i++) {
-          if (body[i] === '=') {
-            if (i + 2 < body.length) {
-              if (body[i+1] === '\r' && body[i+2] === '\n') { i += 2; continue; } // 软换行
-              if (body[i+1] === '\n') { i += 1; continue; }
-              buf.push(parseInt(body.substring(i + 1, i + 3), 16));
-              i += 2;
-            }
-          } else if (body[i] !== '\r' && body[i] !== '\n') {
-            buf.push(body.charCodeAt(i));
-          }
-        }
-        decoded = new Uint8Array(buf);
-      } else {
-        const enc = new TextEncoder();
-        decoded = enc.encode(body);
-      }
-    } catch {
-      decoded = new TextEncoder().encode(body);
-    }
-    try { return new TextDecoder(charset).decode(decoded); }
-    catch { return new TextDecoder().decode(decoded); }
-  }
-
-  // 检查是否为 multipart（有 boundary）
-  const boundaryMatch = raw.match(/^--([^\s\r\n]+)/m);
-  if (boundaryMatch) {
-    const esc = boundaryMatch[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const parts = raw.split(new RegExp(`\\r?\\n--${esc}`, 'g'));
-    // 优先找 text/plain
-    for (const part of parts) {
-      if (/content-type:\s*text\/plain/i.test(part)) {
-        const sep = part.search(/\r?\n\r?\n/);
-        if (sep === -1) continue;
-        const text = decodePart(part.substring(0, sep), part.substring(sep).trim());
-        if (text.trim()) return text.trim();
-      }
-    }
-    // 降级到 text/html
-    for (const part of parts) {
-      if (/content-type:\s*text\/html/i.test(part)) {
-        const sep = part.search(/\r?\n\r?\n/);
-        if (sep === -1) continue;
-        const html = decodePart(part.substring(0, sep), part.substring(sep).trim());
-        return html.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/["\n]{2,}/g, '\n').trim();
-      }
-    }
-    return "";
-  }
-
-  // 非 multipart：判断是否有 MIME 头部
-  const headerEnd = raw.search(/\r?\n\r?\n/);
-  if (headerEnd > 0 && headerEnd < 2000 && /content-type|content-transfer-encoding/i.test(raw.substring(0, headerEnd))) {
-    return decodePart(raw.substring(0, headerEnd), raw.substring(headerEnd).trim());
-  }
-  return raw.trim();
+function sanitizeStorageFilename(name: string): string {
+  return name.replace(/[/\\]/g, "_").replace(/\0/g, "").replace(/\s+/g, " ").trim().slice(0, 180) ||
+    "file";
 }
 
-// 从 MIME 正文中提取原始 HTML 内容（与 extractTextFromMime 类似但返回原始 HTML）
-function extractHtmlFromMime(raw: string): string | null {
-  if (!raw) return null;
-
-  function decodePart(headers: string, body: string): string {
-    const charset = headers.match(/charset=(["']?)([\w-]+)\1/i)?.[2] ?? "utf-8";
-    const cte = (headers.match(/content-transfer-encoding:\s*(\S+)/i)?.[1] ?? "7bit").toLowerCase();
-    let decoded: Uint8Array;
+/** 上传 MIME 解析出的附件到 Storage，写 email_attachments 并返回 emails.attachments JSON 数组项 */
+async function persistEmailAttachments(
+  admin: ReturnType<typeof createClient>,
+  mailboxId: string,
+  emailId: string,
+  parts: MimeAttachmentPart[],
+): Promise<Record<string, unknown>[]> {
+  const out: Record<string, unknown>[] = [];
+  const bucket = "email-attachments";
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    const safe = sanitizeStorageFilename(p.filename);
+    const storagePath = `${mailboxId}/${emailId}/${i}_${safe}`;
     try {
-      if (cte === "base64") {
-        const bin = atob(body.replace(/\s/g, ""));
-        decoded = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) decoded[i] = bin.charCodeAt(i);
-      } else if (cte === "quoted-printable") {
-        const buf: number[] = [];
-        for (let i = 0; i < body.length; i++) {
-          if (body[i] === '=') {
-            if (i + 2 < body.length) {
-              if (body[i+1] === '\r' && body[i+2] === '\n') { i += 2; continue; }
-              if (body[i+1] === '\n') { i += 1; continue; }
-              buf.push(parseInt(body.substring(i + 1, i + 3), 16));
-              i += 2;
-            }
-          } else if (body[i] !== '\r' && body[i] !== '\n') {
-            buf.push(body.charCodeAt(i));
-          }
-        }
-        decoded = new Uint8Array(buf);
-      } else {
-        const enc = new TextEncoder();
-        decoded = enc.encode(body);
+      const blob = new Blob([p.bytes], { type: p.contentType || "application/octet-stream" });
+      const { error: upErr } = await admin.storage.from(bucket).upload(storagePath, blob, {
+        contentType: p.contentType || "application/octet-stream",
+        upsert: true,
+      });
+      if (upErr) {
+        const warning = upErr.message;
+        await admin.from("email_attachments").insert({
+          email_id: emailId,
+          filename: p.filename,
+          content_type: p.contentType,
+          size_bytes: p.bytes.length,
+          storage_bucket: bucket,
+          storage_path: null,
+          download_status: "failed",
+          warning,
+        });
+        out.push({
+          filename: p.filename,
+          contentType: p.contentType,
+          size: p.bytes.length,
+          storage_path: null,
+          warning,
+        });
+        continue;
       }
-    } catch {
-      decoded = new TextEncoder().encode(body);
+      await admin.from("email_attachments").insert({
+        email_id: emailId,
+        filename: p.filename,
+        content_type: p.contentType,
+        size_bytes: p.bytes.length,
+        storage_bucket: bucket,
+        storage_path: storagePath,
+        download_status: "completed",
+        warning: null,
+      });
+      out.push({
+        filename: p.filename,
+        contentType: p.contentType,
+        size: p.bytes.length,
+        storage_path: storagePath,
+      });
+    } catch (e) {
+      const warning = e instanceof Error ? e.message : String(e);
+      await admin.from("email_attachments").insert({
+        email_id: emailId,
+        filename: p.filename,
+        content_type: p.contentType,
+        size_bytes: p.bytes.length,
+        storage_bucket: bucket,
+        storage_path: null,
+        download_status: "failed",
+        warning,
+      });
+      out.push({
+        filename: p.filename,
+        contentType: p.contentType,
+        size: p.bytes.length,
+        storage_path: null,
+        warning,
+      });
     }
-    try { return new TextDecoder(charset).decode(decoded); }
-    catch { return new TextDecoder().decode(decoded); }
   }
-
-  // 检查是否为 multipart（有 boundary）
-  const boundaryMatch = raw.match(/^--([^\s\r\n]+)/m);
-  if (boundaryMatch) {
-    const esc = boundaryMatch[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const parts = raw.split(new RegExp(`\\r?\\n--${esc}`, 'g'));
-    // 找 text/html 部分
-    for (const part of parts) {
-      if (/content-type:\s*text\/html/i.test(part)) {
-        const sep = part.search(/\r?\n\r?\n/);
-        if (sep === -1) continue;
-        const html = decodePart(part.substring(0, sep), part.substring(sep).trim());
-        if (html.trim()) return html.trim();
-      }
-    }
-    return null;
-  }
-
-  // 非 multipart：直接检查是否为 HTML
-  if (/^\s*<(html|!DOCTYPE|head|body|div|p|table)/i.test(raw)) {
-    return raw.trim();
-  }
-  // 检查是否有 MIME 头部且内容是 HTML
-  const headerEnd = raw.search(/\r?\n\r?\n/);
-  if (headerEnd > 0 && headerEnd < 2000 && /content-type:\s*text\/html/i.test(raw.substring(0, headerEnd))) {
-    return decodePart(raw.substring(0, headerEnd), raw.substring(headerEnd).trim());
-  }
-  return null;
+  return out;
 }
 
 // 增强的附件检测：从 BODYSTRUCTURE 响应中检测附件
@@ -607,17 +595,38 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
         const subject = decodeRfc2047(headerValue(meta.raw, "Subject"));
         // 业务时间与 SLA / 草稿窗口一致：使用 MIME Date 头；缺失则回退为同步入库时刻
         const messageDateHeader = headerValue(meta.raw, "Date");
-        const rfc822Size = parseInt(headerValue(meta.raw, "RFC822.SIZE") ?? "0", 10) || 0;
+        // FETCH 应答里是「RFC822.SIZE 12345」，不是 MIME 头「RFC822.SIZE:」
+        const rfc822SizeMatch = meta.raw.match(/RFC822\.SIZE\s+(\d+)/i);
+        const rfc822Size = rfc822SizeMatch ? parseInt(rfc822SizeMatch[1], 10) || 0 : 0;
         const attachInfo = detectAttachments(meta.raw);
+        const maxBytesNoAttach = parseEnvPositiveInt(
+          "MAIL_SYNC_FULL_BODY_MAX_BYTES",
+          DEFAULT_FULL_BODY_MAX_BYTES,
+        );
+        const maxBytesWithAttach = parseEnvPositiveInt(
+          "MAIL_SYNC_FULL_BODY_WITH_ATTACH_MAX_BYTES",
+          DEFAULT_FULL_BODY_WITH_ATTACH_MAX_BYTES,
+        );
+        const maxBytesForFetch = attachInfo.hasAttachment ? maxBytesWithAttach : maxBytesNoAttach;
 
         let bodyText = "";
         let bodyHtml: string | null = null;
+        let mimeAttachmentParts: MimeAttachmentPart[] = [];
+        let fullBodyFetched = false;
         try {
-          const { raw: rawBody, isFull } = await client.fetchFullBody(meta.uid, rfc822Size, 5000);
+          const { raw: rawBody, isFull } = await client.fetchFullBody(
+            meta.uid,
+            rfc822Size,
+            5000,
+            maxBytesForFetch,
+          );
+          fullBodyFetched = isFull;
           if (rawBody) {
             if (isFull) {
-              bodyText = extractTextFromMime(rawBody);
-              bodyHtml = extractHtmlFromMime(rawBody);
+              const parsed = parseFullMime(rawBody);
+              bodyText = parsed.bodyText;
+              bodyHtml = parsed.bodyHtml;
+              mimeAttachmentParts = parsed.attachments;
             } else {
               bodyText = extractTextFromMime(rawBody);
             }
@@ -627,6 +636,15 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
         } catch (bodyErr) {
           console.error(`[body uid ${meta.uid}]`, bodyErr);
         }
+
+        const initialAttachments: Record<string, unknown>[] = !fullBodyFetched && attachInfo.hasAttachment
+          ? [{
+            count: attachInfo.count,
+            note: "附件已检测到；仅拉取了正文摘要，附件未同步（整封大于 500KB 时仅取 BODY[TEXT]）。",
+          }]
+          : [];
+
+        const hasAttFlag = mimeAttachmentParts.length > 0 || attachInfo.hasAttachment;
 
         const ingestedAt = new Date().toISOString();
         const { data: insertedEmail, error: insErr } = await admin.from("emails").insert({
@@ -639,8 +657,8 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
           body_text: bodyText,
           body_html: bodyHtml,
           received_at: receivedAtFromDateHeader(messageDateHeader, ingestedAt),
-          has_attachment: attachInfo.hasAttachment,
-          attachments: attachInfo.hasAttachment ? [{ count: attachInfo.count, note: "附件已检测到，完整下载将在后续后台任务中处理" }] : [],
+          has_attachment: hasAttFlag,
+          attachments: initialAttachments,
           missing_elements: [],
           status: "pending",
           is_read: false,
@@ -650,7 +668,33 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
           console.error("[insert err]", insErr);
           break; // 入库失败则不继续本轮
         }
-        if (insertedEmail?.id) insertedEmailIds.push(insertedEmail.id);
+        if (insertedEmail?.id) {
+          insertedEmailIds.push(insertedEmail.id);
+          if (fullBodyFetched && mimeAttachmentParts.length > 0) {
+            try {
+              const attJson = await persistEmailAttachments(
+                admin,
+                String(mb.id),
+                insertedEmail.id,
+                mimeAttachmentParts,
+              );
+              await admin.from("emails").update({
+                attachments: attJson as unknown,
+                has_attachment: attJson.length > 0 || attachInfo.hasAttachment,
+              }).eq("id", insertedEmail.id);
+            } catch (attErr) {
+              console.error("[persist attachments]", attErr);
+            }
+          } else if (fullBodyFetched && attachInfo.hasAttachment && mimeAttachmentParts.length === 0) {
+            await admin.from("emails").update({
+              attachments: [{
+                count: attachInfo.count,
+                note: "IMAP 已标记附件，但未从 MIME 中解析出二进制（结构特殊或超过单文件大小限制）。",
+              }] as unknown,
+              has_attachment: true,
+            }).eq("id", insertedEmail.id);
+          }
+        }
         roundInserted++;
         roundHandledUid = meta.uid;
       }

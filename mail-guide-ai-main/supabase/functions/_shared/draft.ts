@@ -31,7 +31,91 @@ export function formatOrderInfo(orders: OrderRow[]): string {
     .join("\n");
 }
 
-/** 本地短草稿：按 ai_language 选中英模板，可不依赖外部模型 */
+type LangTemplates = {
+  greetPrefix: string;
+  greetSuffix: string;
+  intro: string;
+  tone: string;
+  summaryLabel: string;
+  noOrder: string;
+  closing: string;
+  signature: string;
+};
+
+const LANG_TEMPLATES: Record<string, LangTemplates> = {
+  zh: {
+    greetPrefix: "",
+    greetSuffix: "，",
+    intro: "感谢您的来信，我们已查看您的邮件并将协助处理您的诉求。",
+    tone: "我们理解您的心情，会尽快为您处理。",
+    summaryLabel: "摘要：",
+    noOrder: "（暂无关联订单）",
+    closing: "此致",
+    signature: "客服团队",
+  },
+  en: {
+    greetPrefix: "Hi ",
+    greetSuffix: ",",
+    intro: "Thank you for contacting us. We have reviewed your message and will help with your request.",
+    tone: "We understand your concern and will address this promptly.",
+    summaryLabel: "Summary: ",
+    noOrder: "No linked order.",
+    closing: "Best regards,",
+    signature: "Customer Service Team",
+  },
+  fr: {
+    greetPrefix: "Bonjour ",
+    greetSuffix: ",",
+    intro: "Merci de nous avoir contactés. Nous avons bien reçu votre message et nous vous aiderons.",
+    tone: "Nous comprenons votre préoccupation et y répondrons rapidement.",
+    summaryLabel: "Résumé : ",
+    noOrder: "No linked order.",
+    closing: "Cordialement,",
+    signature: "Service Client",
+  },
+  de: {
+    greetPrefix: "Hallo ",
+    greetSuffix: ",",
+    intro: "Vielen Dank für Ihre Nachricht. Wir haben Ihre Anfrage erhalten und helfen Ihnen gerne weiter.",
+    tone: "Wir verstehen Ihr Anliegen und werden es schnellstmöglich bearbeiten.",
+    summaryLabel: "Zusammenfassung: ",
+    noOrder: "No linked order.",
+    closing: "Mit freundlichen Grüßen,",
+    signature: "Kundenservice",
+  },
+  ja: {
+    greetPrefix: "",
+    greetSuffix: " 様、",
+    intro: "お問い合わせいただきありがとうございます。内容を確認し、対応いたします。",
+    tone: "ご不便をおかけして申し訳ございません。迅速に対応いたします。",
+    summaryLabel: "概要：",
+    noOrder: "（注文情報なし）",
+    closing: "よろしくお願いいたします。",
+    signature: "カスタマーサポート",
+  },
+  es: {
+    greetPrefix: "Hola ",
+    greetSuffix: ",",
+    intro: "Gracias por contactarnos. Hemos recibido su mensaje y le ayudaremos con su solicitud.",
+    tone: "Entendemos su preocupación y la atenderemos a la brevedad posible.",
+    summaryLabel: "Resumen: ",
+    noOrder: "No linked order.",
+    closing: "Atentamente,",
+    signature: "Servicio al Cliente",
+  },
+  ko: {
+    greetPrefix: "",
+    greetSuffix: " 고객님,",
+    intro: "문의해 주셔서 감사합니다. 메시지를 확인하였으며 도움을 드리겠습니다.",
+    tone: "불편을 드려 죄송합니다. 신속하게 처리하겠습니다.",
+    summaryLabel: "요약: ",
+    noOrder: "연결된 주문이 없습니다.",
+    closing: "감사합니다,",
+    signature: "고객 서비스팀",
+  },
+};
+
+/** 本地短草稿：按 ai_language 选对应语言模板，可不依赖外部模型 */
 export function buildLocalDraft(
   email: EmailRow,
   orders: OrderRow[],
@@ -39,42 +123,29 @@ export function buildLocalDraft(
 ): string {
   const lang = (email.ai_language ?? "en").toLowerCase().trim();
   const sentiment = (email.ai_sentiment ?? "neutral").toLowerCase().trim();
+  const tmpl = LANG_TEMPLATES[lang] ?? LANG_TEMPLATES["en"];
+
   const orderLines = orders.length
     ? orders
         .map((o) => `Order ${o.order_no}: ${o.order_status ?? "-"}, shipping ${o.shipping_status ?? "-"}`)
         .join("\n")
-    : lang === "zh" ? "（暂无关联订单）" : "No linked order.";
-  const greet = email.from_name ?? (lang === "zh" ? "您好" : "there");
-  const summaryLine = summary
-    ? lang === "zh"
-      ? `摘要：${summary}\n`
-      : `Summary: ${summary}\n`
-    : "";
-  const tone =
-    sentiment === "angry" || sentiment === "frustrated"
-      ? lang === "zh"
-        ? "我们理解您的心情，会尽快为您处理。"
-        : "We understand your concern and will address this promptly."
-      : "";
+    : tmpl.noOrder;
 
-  if (lang === "zh") {
-    return `${greet}，
+  const name = email.from_name ?? (lang === "zh" ? "您好" : lang === "ja" || lang === "ko" ? "" : "there");
+  const greetLine = `${tmpl.greetPrefix}${name}${tmpl.greetSuffix}`;
 
-感谢您的来信，我们已查看您的邮件并将协助处理您的诉求。
-${tone ? tone + "\n\n" : ""}${summaryLine}${orderLines}
+  const summaryLine = summary ? `${tmpl.summaryLabel}${summary}\n` : "";
 
-此致
-客服团队`;
-  }
+  const isAngry = sentiment === "angry" || sentiment === "frustrated";
+  const toneLine = isAngry ? tmpl.tone + "\n\n" : "";
 
-  return `Hi ${greet},
+  return `${greetLine}
 
-Thank you for contacting us. We have reviewed your message and will help with your request.
-${tone ? tone + "\n\n" : ""}
-${summaryLine}${orderLines}
+${tmpl.intro}
+${toneLine}${summaryLine}${orderLines}
 
-Best regards,
-Customer Service Team`;
+${tmpl.closing}
+${tmpl.signature}`;
 }
 
 /** Dify 长草稿：通过工作流生成；返回 draft_content 字符串 */
