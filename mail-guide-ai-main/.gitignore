@@ -31,3 +31,6 @@ dify/
 
 # Supabase CLI temp files
 supabase/.temp/
+
+# Cursor IDE（本地技能与规则，勿提交）
+.cursor/
