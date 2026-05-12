@@ -40,6 +40,8 @@ function normalizeSentiment(raw: unknown): string {
   return "neutral";
 }
 
+const VALID_FIRST_CONTACT_DAYS = new Set([0, 3, 7, 15, 30]);
+
 function getCustomerAutoReplyBlockReason(email: { received_at?: string | null }): string | null {
   if (!envBool("AUTO_REPLY_CUSTOMER_ENABLED", true)) return "master_switch_off";
   const ra = email.received_at;
@@ -84,10 +86,98 @@ type Analysis = {
   sentiment: string;
 };
 
-type SendTemplateReplyOptions = {
-  extraTriggerTypes?: string[];
-  requireRiskMissingOrderSwitch?: boolean;
-};
+const AUTO_SLOT_MISSING_ORDER = "ar_missing_order";
+const AUTO_SLOT_MISSING_ORDER_OR_ATTACHMENT = "ar_missing_order_or_attachment";
+
+async function queryIsFirstEmailInWindow(
+  admin: any,
+  fromEmail: string,
+  excludeEmailId: string,
+  firstContactDays: number,
+): Promise<boolean> {
+  if (firstContactDays <= 0) return false;
+  const since = new Date(Date.now() - firstContactDays * 24 * 60 * 60 * 1000).toISOString();
+  const { data: recentEmails } = await admin
+    .from("emails")
+    .select("id")
+    .eq("from_email", fromEmail)
+    .neq("id", excludeEmailId)
+    .gte("received_at", since)
+    .limit(1);
+  return !recentEmails || recentEmails.length === 0;
+}
+
+/** 0 = 不做首封校验（视为通过）；否则须同发件人在近 N 天内无其它邮件 */
+async function passesFirstContactForEmail(
+  admin: any,
+  email: { id: string; from_email?: string | null },
+  firstContactDays: number,
+): Promise<boolean> {
+  if (firstContactDays === 0) return true;
+  if (!email.from_email) return false;
+  return queryIsFirstEmailInWindow(admin, email.from_email, email.id, firstContactDays);
+}
+
+async function getTemplateFirstContactDaysByTrigger(admin: any, triggerType: string): Promise<number> {
+  const { data, error } = await admin
+    .from("reply_templates")
+    .select("auto_reply_first_contact_days")
+    .eq("trigger_type", triggerType)
+    .maybeSingle();
+  if (error) {
+    console.warn("reply_templates first_contact read failed:", error.message);
+    return 30;
+  }
+  const d = (data as { auto_reply_first_contact_days?: unknown } | null)?.auto_reply_first_contact_days;
+  if (typeof d === "number" && VALID_FIRST_CONTACT_DAYS.has(d)) return d;
+  return 30;
+}
+
+/** 用于 emails.is_first_email：取双槽非 0 天数的最大值（窗口更宽则更难算「首封」） */
+async function getMaxFirstContactDaysForAutoSlots(admin: any): Promise<number> {
+  const { data: rows, error } = await admin
+    .from("reply_templates")
+    .select("auto_reply_first_contact_days")
+    .in("trigger_type", [AUTO_SLOT_MISSING_ORDER, AUTO_SLOT_MISSING_ORDER_OR_ATTACHMENT]);
+  if (error) {
+    console.warn("reply_templates max first_contact read failed:", error.message);
+    return 30;
+  }
+  const list = (rows ?? [])
+    .map((r: { auto_reply_first_contact_days?: unknown }) => r.auto_reply_first_contact_days)
+    .filter((d: unknown): d is number => typeof d === "number" && VALID_FIRST_CONTACT_DAYS.has(d));
+  const positive = list.filter((d) => d > 0);
+  if (positive.length === 0) return 0;
+  return Math.max(...positive);
+}
+
+function isR1BusinessIntent(bi: BusinessIntent): boolean {
+  return bi === "order_cancel" || bi === "address_change" || bi === "logistics";
+}
+
+function isR2BusinessIntent(bi: BusinessIntent): boolean {
+  return bi === "damaged" || bi === "defect" || bi === "description_mismatch";
+}
+
+/** R1/R2：写库前归一化 missing_elements 与 is_info_complete（其它意图不改） */
+function applyR1R2Completeness(analysis: Analysis, email: { has_attachment?: boolean | null }): void {
+  const hasOrder = String(analysis.order_no ?? "").trim().length > 0;
+  const hasAtt = !!email.has_attachment;
+  const bi = analysis.business_intent;
+
+  if (isR2BusinessIntent(bi)) {
+    analysis.is_info_complete = hasOrder && hasAtt;
+    const m: string[] = [];
+    if (!hasOrder) m.push("order_no");
+    if (!hasAtt) m.push("attachment");
+    analysis.missing_elements = m;
+    return;
+  }
+  if (isR1BusinessIntent(bi)) {
+    analysis.is_info_complete = hasOrder;
+    analysis.missing_elements = hasOrder ? [] : ["order_no"];
+  }
+}
 
 function extractOrderNo(text: string) {
   const patterns = [
@@ -151,11 +241,7 @@ function analyzeLocally(email: any): Analysis {
   const orderNo = extractOrderNo(rawText);
   const missing = new Set<string>();
   const isAfterSale = /refund|return|broken|damage|wrong|missing|replace|cancel|address|退款|退货|损坏|取消|地址/.test(text);
-  const needsImage = /broken|damage|wrong item|defect|损坏|破损|错发|瑕疵/.test(text);
   const risk = /cancel|change address|修改地址|取消订单|拦截|stop shipment/.test(text);
-
-  if (isAfterSale && !orderNo) missing.add("order_no");
-  if (needsImage && !email.has_attachment) missing.add("image");
 
   const intent = risk
     ? (/address|地址/.test(text) ? "change_address" : "cancel_order")
@@ -168,6 +254,17 @@ function analyzeLocally(email: any): Analysis {
     : "general";
 
   const business_intent = mapToBusinessIntent(intent, rawText);
+
+  if (isR2BusinessIntent(business_intent)) {
+    if (!orderNo) missing.add("order_no");
+    if (!email.has_attachment) missing.add("attachment");
+  } else if (isR1BusinessIntent(business_intent)) {
+    if (!orderNo) missing.add("order_no");
+  } else {
+    const needsImage = /broken|damage|wrong item|defect|损坏|破损|错发|瑕疵/.test(text);
+    if (isAfterSale && !orderNo) missing.add("order_no");
+    if (needsImage && !email.has_attachment) missing.add("image");
+  }
 
   // 语言识别：检测中文字符
   const hasChinese = /[\u4e00-\u9fa5]/.test(rawText);
@@ -289,49 +386,38 @@ async function recordEvent(admin: any, emailId: string, event_type: string, titl
   });
 }
 
-async function sendTemplateReply(
+/** 双槽自动回邮：按 trigger_type 取唯一模板，并校验 business_intent ∈ enabled_business_intents */
+async function sendAutoReplyBySlot(
   admin: any,
   email: any,
   analysis: Analysis,
-  options?: SendTemplateReplyOptions,
-) {
+  slot: typeof AUTO_SLOT_MISSING_ORDER | typeof AUTO_SLOT_MISSING_ORDER_OR_ATTACHMENT,
+): Promise<boolean> {
   const block = getCustomerAutoReplyBlockReason(email);
   if (block) {
     await recordEvent(admin, email.id, "auto_reply_skipped", "跳过自动回复", block, { reason: block });
     return false;
   }
-  if (options?.requireRiskMissingOrderSwitch && !envBool("AUTO_REPLY_RISK_MISSING_ORDER_NO", false)) {
-    await recordEvent(admin, email.id, "auto_reply_skipped", "取消/改地址缺单号自动回复未开启", "", {
-      reason: "risk_missing_order_switch_off",
-    });
-    return false;
-  }
 
-  const triggerCandidates = [
-    ...(options?.extraTriggerTypes ?? []),
-    analysis.missing_elements.includes("order_no") ? "missing_order_no" : null,
-    analysis.missing_elements.includes("image") ? "missing_image" : null,
-    analysis.missing_elements.includes("product") ? "missing_product" : null,
-    analysis.missing_elements.length > 0 ? "missing_any" : null,
-  ].filter(Boolean) as string[];
-
-  const uniqueTriggers = [...new Set(triggerCandidates)];
-  if (uniqueTriggers.length === 0) {
-    await recordEvent(admin, email.id, "auto_reply_skipped", "无有效模板触发类型", "", {
-      reason: "no_trigger_types",
-    });
-    return false;
-  }
-
-  const { data: templates } = await admin
+  const { data: template, error } = await admin
     .from("reply_templates")
     .select("*")
-    .eq("is_active", true)
-    .eq("auto_send", true)
-    .in("trigger_type", uniqueTriggers);
+    .eq("trigger_type", slot)
+    .maybeSingle();
+  if (error || !template) return false;
+  if (!template.auto_send) return false;
 
-  const template = templates?.[0];
-  if (!template) return false;
+  const enabled: string[] = Array.isArray(template.enabled_business_intents)
+    ? (template.enabled_business_intents as string[])
+    : [];
+  const bi = String(analysis.business_intent ?? "");
+  if (!enabled.includes(bi)) {
+    await recordEvent(admin, email.id, "auto_reply_skipped", "意图未启用该自动模板", slot, {
+      reason: "intent_not_enabled",
+      business_intent: bi,
+    });
+    return false;
+  }
 
   const cooldownMs = Number(template.cooldown_minutes ?? 120) * 60 * 1000;
   const since = new Date(Date.now() - cooldownMs).toISOString();
@@ -380,7 +466,15 @@ async function sendTemplateReply(
 
   if (sendError) throw new Error(sendError);
   await admin.from("emails").update({ status: "replied", processing_status: "auto_replied" }).eq("id", email.id);
-  await recordEvent(admin, email.id, "auto_reply_sent", "信息缺失模板已自动回复", template.name);
+  await recordEvent(
+    admin,
+    email.id,
+    "auto_reply_sent",
+    "信息缺失模板已自动回复",
+    template.name,
+    undefined,
+    { trigger_type: template.trigger_type, template_id: template.id },
+  );
   return true;
 }
 
@@ -453,7 +547,7 @@ async function associateOrders(admin: any, email: any, analysis: Analysis) {
           email_id: email.id,
           order_no: analysis.order_no,
           status: "pending",
-          next_run_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+          next_run_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
         }, { onConflict: "email_id,order_no" });
         await recordEvent(admin, email.id, "compensation_created", `订单 ${analysis.order_no} 暂未查到，已创建补偿任务`);
       }
@@ -540,6 +634,7 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
   }
   const { analysis, source: analyzeSource, difyError: analyzeDifyError, workflowRunId } =
     await analyzeWithAi(email);
+  applyR1R2Completeness(analysis, email);
   if (analyzeSource === "local" && !analyzeOnly) {
     await recordEvent(
       admin,
@@ -565,18 +660,20 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
     return { analysis, associationStatus: email.association_status ?? "unlinked", routed: "analyze_only" as const };
   }
 
-  // 判断是否为近 30 天首封邮件（来自同一发件人）
+  // 首封展示字段：双槽各自可配天数，此处用「非 0 天数」的最大值统计 is_first_email（与任一条较宽窗口一致）
+  const maxFirstContactDaysForDisplay = await getMaxFirstContactDaysForAutoSlots(admin);
   let isFirstEmail = false;
   if (email.from_email) {
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const { data: recentEmails } = await admin
-      .from("emails")
-      .select("id")
-      .eq("from_email", email.from_email)
-      .neq("id", email.id)
-      .gte("received_at", thirtyDaysAgo)
-      .limit(1);
-    isFirstEmail = !recentEmails || recentEmails.length === 0;
+    if (maxFirstContactDaysForDisplay === 0) {
+      isFirstEmail = false;
+    } else {
+      isFirstEmail = await queryIsFirstEmailInWindow(
+        admin,
+        email.from_email,
+        email.id,
+        maxFirstContactDaysForDisplay,
+      );
+    }
   }
 
   const slaBucket = computeSlaBucket(email.received_at);
@@ -614,12 +711,16 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
     },
   );
 
-  const linkedOrders = await associateOrders(admin, email, analysis);
+  const skipAutoAssociation = email.association_status === "manual_unlink";
+  const linkedOrders = skipAutoAssociation ? [] : await associateOrders(admin, email, analysis);
   // 关联状态语义：
-  //   linked        - 已关联订单
-  //   compensating  - 客户提供单号但暂未匹配，已创建补偿任务
-  //   not_provided  - 未提供单号且无关联（不推荐）
-  const associationStatus = linkedOrders.length
+  //   linked           - 已关联订单（自动 / 人工 / 补偿）
+  //   compensating     - 客户提供单号但暂未匹配，已创建补偿任务
+  //   not_provided     - 未提供单号且无关联
+  //   manual_unlink    - 人工解除关联：不再自动关联、不建补偿任务；仅人工再关联后变为 linked
+  const associationStatus = skipAutoAssociation
+    ? "manual_unlink"
+    : linkedOrders.length
     ? "linked"
     : analysis.order_no
     ? "compensating"
@@ -670,56 +771,84 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
     return { analysis, associationStatus, routed: "risk_intercept" };
   }
 
-  if (mustIntercept && !linkedOrders.length) {
-    if (associationStatus === "compensating") {
-      await recordEvent(
-        admin,
-        emailId,
-        "risk_intercept_deferred_compensating",
-        "取消/改地址：已提供单号但未关联，不拦截；满 2h 后由调度发内部预警",
-        undefined,
-        { order_no: analysis.order_no },
-      );
+  const providedOrderNo = String(analysis.order_no ?? "").trim();
+
+  // 拦截分流：取消/改地址 + 有邮件单号但未关联本地订单 → 仍按单号调 ERP hold（与关联解耦）
+  if (!skipAutoAssociation && mustIntercept && !linkedOrders.length && providedOrderNo) {
+    const response = await fetch(`${SUPABASE_URL}/functions/v1/risk-intercept`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email_id: emailId,
+        order_no: providedOrderNo,
+        action: "hold",
+        intercept_reason: analysis.summary,
+        reason_category: analysis.business_intent,
+        trigger_source: "auto",
+      }),
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      await recordEvent(admin, emailId, "risk_intercept_failed", "调用 risk-intercept（邮件单号）失败", errText);
+      await createAlertAndNotify(admin, {
+        source: "process-email",
+        kind: "risk_intercept_http_failed",
+        title: "风控拦截调用失败（邮件单号）",
+        message: errText,
+        related_email_id: emailId,
+        related_order_id: null,
+        severity: "critical",
+        metadata: { http_status: response.status, order_no: providedOrderNo },
+      });
     } else {
-      try {
-        const sent = await sendTemplateReply(admin, email, analysis, {
-          extraTriggerTypes: ["risk_missing_order_no", "missing_order_no", "missing_any"],
-          requireRiskMissingOrderSwitch: true,
-        });
-        if (sent) {
-          return { analysis, associationStatus, routed: "auto_template_risk" };
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        await createAlertAndNotify(admin, {
-          source: "process-email",
-          kind: "auto_reply_failed",
-          title: "取消/改地址自动回复失败",
-          message: msg,
-          related_email_id: emailId,
-          severity: "warning",
-        });
-        return { analysis, associationStatus, routed: "auto_template_failed" };
-      }
-      await recordEvent(
-        admin,
-        emailId,
-        "risk_intercept_skipped_no_order",
-        "意图为取消/改地址但无关联订单，未自动拦截",
-      );
+      await recordEvent(admin, emailId, "risk_intercept_requested", "已触发自动风控拦截（邮件单号，未关联本地订单）");
     }
+    await admin.from("emails").update({ status: "processing" }).eq("id", emailId);
+    await recordEvent(admin, emailId, "draft_pending", "已进入草稿待生成队列（由调度任务负责）");
+    return { analysis, associationStatus, routed: "risk_intercept" };
   }
 
-  // 条件：首封邮件 + 售后意图 + 信息不完整（缺订单号或缺附件）→ 自动按模板回复
-  const isAfterSaleLike =
-    analysis.intent === "after_sale" ||
-    ["damaged", "defect", "description_mismatch"].includes(analysis.business_intent);
-  if (isFirstEmail && isAfterSaleLike && !analysis.is_info_complete) {
+  // R1（取消/改地址/物流）与 R2（破损/缺陷/描述不符）：统一缺信息自动回邮（合并单号+附件为一封）
+  const isR1 = isR1BusinessIntent(analysis.business_intent);
+  const isR2 = isR2BusinessIntent(analysis.business_intent);
+  const hasOrder = providedOrderNo.length > 0;
+  const hasAtt = !!email.has_attachment;
+  const needOrder = ((isR1 && !linkedOrders.length) || isR2) && !hasOrder;
+  const needAtt = isR2 && !hasAtt;
+  const baseMissingInfoEligible = !skipAutoAssociation && (needOrder || needAtt);
+
+  let missingInfoTemplateSent = false;
+  if (baseMissingInfoEligible) {
     try {
-      const sent = await sendTemplateReply(admin, email, analysis);
-      return { analysis, associationStatus, routed: sent ? "auto_template" : "manual_missing_info" };
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
+      if (isR2 && (needOrder || needAtt)) {
+        const daysR2 = await getTemplateFirstContactDaysByTrigger(admin, AUTO_SLOT_MISSING_ORDER_OR_ATTACHMENT);
+        if (await passesFirstContactForEmail(admin, email, daysR2)) {
+          missingInfoTemplateSent = await sendAutoReplyBySlot(
+            admin,
+            email,
+            analysis,
+            AUTO_SLOT_MISSING_ORDER_OR_ATTACHMENT,
+          );
+          if (missingInfoTemplateSent) {
+            return { analysis, associationStatus, routed: "auto_template" };
+          }
+        }
+      } else if (isR1 && !linkedOrders.length && needOrder) {
+        const daysR1 = await getTemplateFirstContactDaysByTrigger(admin, AUTO_SLOT_MISSING_ORDER);
+        if (await passesFirstContactForEmail(admin, email, daysR1)) {
+          missingInfoTemplateSent = await sendAutoReplyBySlot(
+            admin,
+            email,
+            analysis,
+            AUTO_SLOT_MISSING_ORDER,
+          );
+          if (missingInfoTemplateSent) {
+            return { analysis, associationStatus, routed: "auto_template_risk" };
+          }
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       await createAlertAndNotify(admin, {
         source: "process-email",
         kind: "auto_reply_failed",
@@ -727,9 +856,28 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
         message: msg,
         related_email_id: emailId,
         severity: "warning",
+        metadata: { branch: "missing_info_two_slot" },
       });
       return { analysis, associationStatus, routed: "auto_template_failed" };
     }
+  }
+
+  if (!skipAutoAssociation && mustIntercept && !linkedOrders.length && !hasOrder && !missingInfoTemplateSent) {
+    await recordEvent(
+      admin,
+      emailId,
+      "risk_intercept_skipped_no_order",
+      "取消/改地址缺单号且未自动回邮（未发或条件不满足）",
+    );
+  } else if (skipAutoAssociation && mustIntercept && !linkedOrders.length) {
+    await recordEvent(
+      admin,
+      emailId,
+      "risk_intercept_skipped_manual_unlink",
+      "人工解除关联：不自动拦截、不自动索要单号",
+      undefined,
+      {},
+    );
   }
 
   // 非首封或非售后但信息不完整 → 标记待人工处理

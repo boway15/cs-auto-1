@@ -6,7 +6,7 @@
 //       * mode === 'dify'（默认）+ GENERATE_DRAFT_FALLBACK_LOCAL=true → 回落本地，model=pipeline-local-fallback
 //       * 否则直接 502，让用户感知问题（避免悄悄退化为关键词模板）
 //   - 客户端可强制 mode='local' 跳过 Dify（保留旧能力作为兜底开关）
-//   - 自动草稿（1-6h Dify、6-24h 本地）由 schedule-draft-generation 30 分钟调度负责
+//   - 自动草稿（1-6h Dify、6-24h 本地）由 schedule-draft-generation（pg_cron 每 4 分钟自第 2 分起）负责
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { buildLocalDraft, callDifyDraftWorkflow, insertDraft } from "../_shared/draft.ts";

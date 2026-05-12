@@ -129,10 +129,10 @@ cd d:\Docker\project\cs-main\mail-guide-ai-main\scripts\selfhosted
 
 | jobname | schedule | Edge Function |
 |---------|----------|----------------|
-| `auto-sync-mailbox-every-5min` | `*/5 * * * *` | `sync-mailbox` |
-| `auto-draft-every-30min` | `*/30 * * * *` | `schedule-draft-generation` |
-| `compensating-alerts-every-30min` | `*/30 * * * *` | `schedule-compensating-alerts` |
-| `run-compensation-tasks-every-30min` | `*/30 * * * *` | `run-compensation-tasks` |
+| `auto-sync-mailbox-every-5min` | `*/4 * * * *` | `sync-mailbox` |
+| `auto-draft-every-30min` | `2-59/4 * * * *` | `schedule-draft-generation` |
+| `compensating-alerts-every-30min` | `15 * * * *` | `schedule-compensating-alerts` |
+| `run-compensation-tasks-every-30min` | `14 * * * *` | `run-compensation-tasks` |
 
 **注意**：不要把 Cloud 的 cron URL 留在生产自建库中，否则定时任务会打到云端。
 

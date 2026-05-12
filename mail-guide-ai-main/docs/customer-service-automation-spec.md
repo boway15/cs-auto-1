@@ -97,7 +97,6 @@
 | 配置 | 作用 | 存放 |
 |------|------|------|
 | **总开关**（`AUTO_REPLY_CUSTOMER_ENABLED`） | 关闭时，**所有**给客户自动模板 **一律不发**。 | Supabase Functions **secrets** |
-| **取消/改地址缺单号**（`AUTO_REPLY_RISK_MISSING_ORDER_NO`） | 在总开关打开前提下，控制「取消/改地址 + 缺单号」是否对客户发索要单号类模板。 | Supabase Functions **secrets** |
 
 ### 5.2 客户自动回复通用前置条件
 
@@ -105,8 +104,7 @@
 
 1. **总开关** 打开；  
 2. **`received_at` 距今 ≤ 24h**；  
-3. 对应 **分场景开关**（若该场景有独立开关）；  
-4. 模板存在、`auto_send`、冷却与去重逻辑正常（与现有 `reply_templates` / `sendTemplateReply` 一致）。
+3. 模板存在、后台 **自动回复**（`auto_send`）已打开、当前 `business_intent` 在该模板的 `enabled_business_intents` 内、冷却与去重逻辑正常（`process-email` 的 `sendAutoReplyBySlot`；`is_active` 仅与 `auto_send` 同步写入，发信不单独判断）。
 
 不满足任一项 → **跳过发送**，建议写处理事件（如 `auto_reply_skipped_*`）便于排查。
 
@@ -118,7 +116,7 @@
 
 | 条件 | 客户自动回复 | 订单/风控 | 内部预警 |
 |------|----------------|-----------|----------|
-| **未提供订单号**（无法关联） | 总开关 + 分场景开关开 **且** ≤24h：发索要单号等模板；否则不发 | **不**调用拦截 | **不**发内部预警（已确认） |
+| **未提供订单号**（无法关联） | 总开关开 **且** ≤24h **且** 槽一模板（`ar_missing_order`）`auto_send` 与意图勾选满足：发索要单号等模板；否则不发 | **不**调用拦截 | **不**发内部预警（已确认） |
 | **有单号且关联成功** | 一般不先发「缺单号」模板 | **调用** `risk-intercept`（本地 hold；**不**调 Shopify） | 拦截失败时现有告警机制 |
 | **有单号但未关联成功**（compensating） | **不对客户**发「缺单号」模板 | **不**拦截（直至关联成功） | **2h～72h** 窗口内发 **内部预警**（去重）；**超过 72h** 不再预警 |
 
@@ -128,10 +126,12 @@
 
 | 条件 | 行为 |
 |------|------|
-| **近 30 天首封**（同发件人）+ **信息不完整**（缺单号或缺附件等，与 `missing_elements` 一致） | 命中自动模板回复时，仍须满足 **§5.2 通用条件**（含 ≤24h、总开关） |
+| **可配置首封窗口**（每条双槽模板 `reply_templates.auto_reply_first_contact_days`：0=不限，3/7/15/30 天；**按实际触发的槽**各自校验；同发件人在该窗口内无其它邮件）+ **信息不完整**（缺单号或缺附件等，与 `missing_elements` 一致） | 命中自动模板回复时，仍须满足 **§5.2 通用条件**（含 ≤24h、总开关） |
 | 非首封或信息完整 | 按现有逻辑进入人工或其它分支，**不**强行自动回复 |
 
-（「首封」口径与现网 `process-email` 中 `isFirstEmail` 一致：近 30 天同发件人无其它邮件。）
+（「首封」口径：`process-email` 按**当前槽位模板**配置的天数查询同发件人近期邮件；天数为 0 时不做首封校验。`emails.is_first_email` 展示字段取双槽非 0 天数的**较大值**统计。管理端在「回复模板」每条卡片内配置。）
+
+**双槽自动回邮（实现摘要）**：`reply_templates` 固定两条——`ar_missing_order`（缺单号）、`ar_missing_order_or_attachment`（缺单号或附件）。每条含 `enabled_business_intents`（后台勾选）。R1 场景（`order_cancel` / `address_change` / `logistics` + 无单号 + 无关联）走槽一；R2 场景（`damaged` / `defect` / `description_mismatch` + 缺单号或缺任意附件）走槽二。两槽与 R1/R2 一致，**仅**受总开关、`auto_send`、首封窗口等约束，**无**单独的 Functions 环境变量门闸。历史多 `trigger_type` 模板已由迁移关闭 `auto_send`。
 
 ### 6.3 其它意图
 

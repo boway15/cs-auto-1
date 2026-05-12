@@ -39,6 +39,20 @@ Deno.serve(async (req) => {
 
     const results = [];
     for (const task of tasks ?? []) {
+      const { data: emailAssoc } = await admin
+        .from("emails")
+        .select("association_status")
+        .eq("id", task.email_id)
+        .maybeSingle();
+      if (emailAssoc?.association_status === "manual_unlink") {
+        await admin.from("order_compensation_tasks").update({
+          status: "failed",
+          last_error: "邮件已人工解除关联，停止补偿",
+        }).eq("id", task.id);
+        results.push({ id: task.id, status: "skipped_manual_unlink" });
+        continue;
+      }
+
       if (isErpOmsConfigured()) {
         try {
           const { data: em } = await admin.from("emails").select("from_email").eq("id", task.email_id).maybeSingle();
@@ -133,19 +147,19 @@ Deno.serve(async (req) => {
       await admin.from("order_compensation_tasks").update({
         retry_count: retryCount,
         status: failed ? "failed" : "pending",
-        next_run_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        next_run_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
         last_error: failed ? "达到最大重试次数，仍未查到订单" : "本次未查到订单",
       }).eq("id", task.id);
       if (failed) {
         await admin.from("emails").update({
-          association_status: "not_found",
+          association_status: "not_provided",
           priority: "high",
         }).eq("id", task.email_id);
         await createAlertAndNotify(admin, {
           source: "run-compensation-tasks",
           kind: "failed",
           title: "订单补偿失败",
-          message: `订单号 ${task.order_no} 重试 ${retryCount} 次仍未查到`,
+          message: `订单号 ${task.order_no} 重试 ${retryCount} 次仍未查到，邮件关联状态已置为未提供`,
           related_email_id: task.email_id,
           severity: "warning",
           metadata: { task_id: task.id, order_no: task.order_no, retry_count: retryCount },

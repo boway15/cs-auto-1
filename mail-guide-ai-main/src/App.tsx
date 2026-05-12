@@ -8,7 +8,6 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 import AuthPage from "./pages/Auth";
 import Workbench from "./pages/Workbench";
 import Mailboxes from "./pages/Mailboxes";
-import Erp from "./pages/Erp";
 import Templates from "./pages/Templates";
 import Users from "./pages/Users";
 import SendLogs from "./pages/SendLogs";
@@ -31,7 +30,6 @@ const App = () => (
             <Route path="/" element={<Workbench />} />
             <Route path="/linked-orders" element={<LinkedOrders />} />
             <Route path="/mailboxes" element={<ProtectedRoute adminOnly><Mailboxes /></ProtectedRoute>} />
-            <Route path="/erp" element={<ProtectedRoute adminOnly><Erp /></ProtectedRoute>} />
             <Route path="/templates" element={<ProtectedRoute adminOnly><Templates /></ProtectedRoute>} />
             <Route path="/users" element={<ProtectedRoute adminOnly><Users /></ProtectedRoute>} />
             <Route path="/send-logs" element={<SendLogs />} />

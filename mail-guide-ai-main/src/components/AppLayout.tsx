@@ -12,7 +12,6 @@ import {
   Inbox,
   Mail,
   Settings,
-  Database,
   Users,
   LogOut,
   Headphones,
@@ -35,7 +34,6 @@ const navItems = [
   { to: "/mailboxes", label: "邮箱配置", icon: Mail, adminOnly: true },
   // Shopify 入口暂时关闭，订单主链路走 ERP。
   // { to: "/shops", label: "Shopify 店铺", icon: Store, adminOnly: true },
-  { to: "/erp", label: "ERP 配置", icon: Database, adminOnly: true },
   { to: "/templates", label: "回复模板", icon: Settings, adminOnly: true },
   { to: "/users", label: "用户管理", icon: Users, adminOnly: true },
 ];
@@ -56,46 +54,65 @@ export default function AppLayout() {
     <div className="flex h-screen bg-background">
       <aside
         className={cn(
-          "bg-sidebar text-sidebar-foreground flex flex-col shrink-0 transition-all duration-200",
-          collapsed ? "w-16" : "w-60",
+          "relative z-20 bg-sidebar text-sidebar-foreground flex flex-col shrink-0 transition-[width] duration-200 border-r border-sidebar-border",
+          collapsed ? "w-16" : "w-48",
         )}
       >
-        {/* Logo + Toggle */}
-        <div className="flex items-center px-4 py-5 border-b border-sidebar-border gap-2 min-h-[65px]">
-          {collapsed ? (
-            <div className="w-8 h-8 rounded bg-sidebar-primary text-sidebar-primary-foreground flex items-center justify-center shrink-0 mx-auto">
+        {/* Logo + Toggle：收起时按钮留在侧栏宽度内，避免 absolute 伸出后被右侧 main 挡住无法点击 */}
+        {collapsed ? (
+          <div className="flex flex-col items-center gap-2 py-4 border-b border-sidebar-border">
+            <div className="w-8 h-8 rounded bg-sidebar-primary text-sidebar-primary-foreground flex items-center justify-center shrink-0">
               <Headphones className="w-4 h-4" />
             </div>
-          ) : (
-            <>
-              <div className="w-8 h-8 rounded bg-sidebar-primary text-sidebar-primary-foreground flex items-center justify-center shrink-0">
-                <Headphones className="w-4 h-4" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="font-semibold text-sm">智能客服</div>
-                <div className="text-xs opacity-60">Customer Service</div>
-              </div>
-            </>
-          )}
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setCollapsed(!collapsed)}
-            className={cn(
-              "shrink-0 text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent",
-              collapsed && "absolute -right-3 z-10 w-6 h-6 rounded-full bg-sidebar border border-sidebar-border shadow-sm",
-            )}
-          >
-            {collapsed ? (
-              <PanelLeft className="w-4 h-4" />
-            ) : (
-              <PanelLeftClose className="w-4 h-4" />
-            )}
-          </Button>
-        </div>
+            <Tooltip delayDuration={300}>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="展开侧栏"
+                  onClick={() => setCollapsed(false)}
+                  className="h-8 w-8 text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent"
+                >
+                  <PanelLeft className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="right" className="ml-1">
+                展开侧栏
+              </TooltipContent>
+            </Tooltip>
+          </div>
+        ) : (
+          <div className="flex items-center px-2.5 py-3 border-b border-sidebar-border gap-1.5 min-h-[60px]">
+            <div className="w-7 h-7 rounded bg-sidebar-primary text-sidebar-primary-foreground flex items-center justify-center shrink-0">
+              <Headphones className="w-3.5 h-3.5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="font-semibold text-sm leading-tight">智能客服</div>
+              <div className="text-[10px] opacity-60 tracking-wide">CS</div>
+            </div>
+            <Tooltip delayDuration={300}>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="收起侧栏"
+                  onClick={() => setCollapsed(true)}
+                  className="shrink-0 text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-sidebar-accent"
+                >
+                  <PanelLeftClose className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="mt-1">
+                收起侧栏
+              </TooltipContent>
+            </Tooltip>
+          </div>
+        )}
 
         {/* Navigation */}
-        <nav className="flex-1 p-2 space-y-0.5 overflow-y-auto">
+        <nav className="flex-1 p-1.5 space-y-0.5 overflow-y-auto">
           {filteredItems.map((item) => {
             const link = (
               <NavLink
@@ -104,7 +121,7 @@ export default function AppLayout() {
                 end={item.end as any}
                 className={({ isActive }) =>
                   cn(
-                    "flex items-center gap-2.5 px-3 py-2 rounded text-sm transition-colors",
+                    "flex items-center gap-2 px-2.5 py-2 rounded text-sm transition-colors",
                     collapsed ? "justify-center px-2" : "",
                     isActive
                       ? "bg-sidebar-primary text-sidebar-primary-foreground"
@@ -134,7 +151,7 @@ export default function AppLayout() {
         {/* User section */}
         <div
           className={cn(
-            "p-3 border-t border-sidebar-border",
+            "p-2 border-t border-sidebar-border",
             collapsed ? "flex flex-col items-center gap-2" : "space-y-2",
           )}
         >
@@ -157,6 +174,7 @@ export default function AppLayout() {
                               admin: "管理员",
                               leader: "组长",
                               agent: "客服",
+                              guest: "游客",
                             } as Record<string, string>
                           )[r] || r,
                       )
@@ -195,7 +213,9 @@ export default function AppLayout() {
                         ? "管理员"
                         : r === "leader"
                           ? "组长"
-                          : "客服"}
+                          : r === "guest"
+                            ? "游客"
+                            : "客服"}
                     </Badge>
                   ))}
                 </div>

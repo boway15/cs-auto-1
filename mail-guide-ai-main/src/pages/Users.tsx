@@ -8,7 +8,15 @@ import { toast } from "sonner";
 
 type Row = { user_id: string; display_name: string | null; email?: string; roles: string[] };
 
-const ROLE_LABEL: Record<string, string> = { admin: "管理员", leader: "组长", agent: "客服" };
+const ROLE_LABEL: Record<string, string> = { admin: "管理员", leader: "组长", agent: "客服", guest: "游客" };
+
+function visibleScopeLabel(roles: string[]): string {
+  if (roles.includes("admin")) return "全局配置与审计";
+  if (roles.includes("leader")) return "团队队列与客服审计";
+  if (roles.includes("agent")) return "本人处理队列";
+  if (roles.includes("guest")) return "仅登录（游客，无业务数据）";
+  return "未分配角色";
+}
 
 export default function UsersPage() {
   const [rows, setRows] = useState<Row[]>([]);
@@ -62,19 +70,20 @@ export default function UsersPage() {
             <div className="flex-1">
               <div className="font-medium">{r.display_name ?? "未命名"}</div>
               <div className="text-xs text-muted-foreground font-mono">{r.user_id.slice(0, 8)}...</div>
-              <div className="text-xs text-muted-foreground mt-1">
-                可见范围：{r.roles.includes("admin") ? "全局配置与审计" : r.roles.includes("leader") ? "团队队列与客服审计" : "本人处理队列"}
-              </div>
+              <div className="text-xs text-muted-foreground mt-1">可见范围：{visibleScopeLabel(r.roles)}</div>
             </div>
             <div className="flex gap-1">
               {r.roles.map((rl) => <Badge key={rl}>{ROLE_LABEL[rl] ?? rl}</Badge>)}
             </div>
-            <Select value={r.roles[0] ?? "agent"} onValueChange={(v) => setRole(r.user_id, v)}>
-              <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+            <Select value={r.roles[0] ?? undefined} onValueChange={(v) => setRole(r.user_id, v)}>
+              <SelectTrigger className="w-32">
+                <SelectValue placeholder="选择角色" />
+              </SelectTrigger>
               <SelectContent>
                 <SelectItem value="admin">管理员</SelectItem>
                 <SelectItem value="leader">组长</SelectItem>
                 <SelectItem value="agent">客服</SelectItem>
+                <SelectItem value="guest">游客</SelectItem>
               </SelectContent>
             </Select>
           </Card>
@@ -82,7 +91,7 @@ export default function UsersPage() {
       </div>
 
       <Card className="p-4 mt-6 bg-info/10 border-info/30 text-sm text-muted-foreground">
-        提示：新用户通过登录页"注册"加入。首位注册者自动为管理员，后续注册者默认是客服角色，可在此调整。
+        提示：新用户可在登录页注册。若系统尚无管理员，首位注册者自动成为管理员；否则新账号默认为游客（无业务数据权限），请在此分配管理员 / 组长 / 客服角色。
       </Card>
     </div>
   );

@@ -47,6 +47,7 @@ export default function RiskLogs() {
     const haystack = [
       log.intercept_no,
       log.orders?.order_no,
+      log.referenced_order_no,
       log.orders?.customer_email,
       log.emails?.subject,
       log.emails?.from_email,
@@ -116,8 +117,13 @@ export default function RiskLogs() {
                 <TableRow key={log.id}>
                   <TableCell className="font-mono text-xs">{log.intercept_no}</TableCell>
                   <TableCell>
-                    <div className="text-sm">{log.orders?.order_no ?? "—"}</div>
-                    <div className="text-xs text-muted-foreground">{log.orders?.customer_email}</div>
+                    <div className="text-sm">
+                      {log.orders?.order_no ?? log.referenced_order_no ?? "—"}
+                      {!log.orders?.order_no && log.referenced_order_no ? (
+                        <span className="ml-1 text-[10px] text-muted-foreground">（仅邮件单号）</span>
+                      ) : null}
+                    </div>
+                    <div className="text-xs text-muted-foreground">{log.orders?.customer_email ?? "—"}</div>
                   </TableCell>
                   <TableCell><Badge variant="outline">{log.trigger_source === "auto" ? "自动" : log.trigger_source}</Badge></TableCell>
                   <TableCell>
@@ -142,20 +148,34 @@ export default function RiskLogs() {
       </Card>
 
       <Dialog open={!!detail} onOpenChange={(open) => !open && setDetail(null)}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-h-[min(90vh,900px)] w-[min(96vw,56rem)] max-w-[min(96vw,56rem)] overflow-y-auto overflow-x-hidden">
           <DialogHeader><DialogTitle>拦截详情</DialogTitle></DialogHeader>
           {detail && (
-            <div className="space-y-3 text-sm">
-              <div className="grid grid-cols-2 gap-3">
-                <div><span className="text-muted-foreground">编号：</span>{detail.intercept_no}</div>
-                <div><span className="text-muted-foreground">动作：</span>{detail.action === "hold" ? "暂停发货" : "恢复发货"}</div>
-                <div><span className="text-muted-foreground">状态：</span>{statusMap[detail.status] ?? detail.status}</div>
-                <div><span className="text-muted-foreground">重试：</span>{detail.retry_count}</div>
-                <div className="col-span-2"><span className="text-muted-foreground">邮件：</span>{detail.emails?.subject ?? "—"}</div>
-                <div className="col-span-2"><span className="text-muted-foreground">原因：</span>{detail.intercept_reason || "—"}</div>
+            <div className="space-y-3 text-sm min-w-0">
+              <div className="grid grid-cols-2 gap-3 min-w-0">
+                <div className="min-w-0 break-words"><span className="text-muted-foreground">编号：</span>{detail.intercept_no}</div>
+                <div className="min-w-0 break-words"><span className="text-muted-foreground">动作：</span>{detail.action === "hold" ? "暂停发货" : "恢复发货"}</div>
+                <div className="min-w-0 break-words"><span className="text-muted-foreground">状态：</span>{statusMap[detail.status] ?? detail.status}</div>
+                <div className="min-w-0 break-words"><span className="text-muted-foreground">重试：</span>{detail.retry_count}</div>
+                <div className="col-span-2 min-w-0 break-words"><span className="text-muted-foreground">邮件：</span>{detail.emails?.subject ?? "—"}</div>
+                <div className="col-span-2 min-w-0 break-words">
+                  <span className="text-muted-foreground">引用单号：</span>
+                  {detail.referenced_order_no ?? detail.orders?.order_no ?? "—"}
+                  {!detail.order_id && detail.referenced_order_no ? (
+                    <span className="text-muted-foreground text-xs">（未关联本地订单）</span>
+                  ) : null}
+                </div>
+                <div className="col-span-2 min-w-0 whitespace-pre-wrap break-words break-all">
+                  <span className="text-muted-foreground">原因：</span>
+                  {detail.intercept_reason || "—"}
+                </div>
               </div>
-              {detail.error_message && <div className="p-2 rounded border border-destructive/30 bg-destructive/10 text-destructive text-xs">{detail.error_message}</div>}
-              <pre className="max-h-60 overflow-auto rounded bg-muted p-3 text-xs">{JSON.stringify({
+              {detail.error_message && (
+                <div className="p-2 rounded border border-destructive/30 bg-destructive/10 text-destructive text-xs min-w-0 whitespace-pre-wrap break-words break-all">
+                  {detail.error_message}
+                </div>
+              )}
+              <pre className="max-h-[min(50vh,22rem)] overflow-auto rounded bg-muted p-3 text-xs min-w-0 whitespace-pre-wrap break-all">{JSON.stringify({
                 shopify_response: detail.shopify_response,
                 erp_response: detail.erp_response,
               }, null, 2)}</pre>

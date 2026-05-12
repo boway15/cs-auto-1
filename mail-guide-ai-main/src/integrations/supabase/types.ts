@@ -594,6 +594,84 @@ export type Database = {
           },
         ]
       }
+      risk_intercept_logs: {
+        Row: {
+          action: string
+          created_at: string
+          email_id: string | null
+          erp_response: Json | null
+          error_message: string | null
+          id: string
+          idempotency_key: string | null
+          intercept_no: string
+          intercept_reason: string | null
+          operated_by: string | null
+          order_id: string | null
+          reason_category: string | null
+          referenced_order_no: string | null
+          retry_count: number
+          shopify_response: Json | null
+          status: string
+          trigger_source: string
+          updated_at: string
+        }
+        Insert: {
+          action?: string
+          created_at?: string
+          email_id?: string | null
+          erp_response?: Json | null
+          error_message?: string | null
+          id?: string
+          idempotency_key?: string | null
+          intercept_no?: string
+          intercept_reason?: string | null
+          operated_by?: string | null
+          order_id?: string | null
+          reason_category?: string | null
+          referenced_order_no?: string | null
+          retry_count?: number
+          shopify_response?: Json | null
+          status?: string
+          trigger_source?: string
+          updated_at?: string
+        }
+        Update: {
+          action?: string
+          created_at?: string
+          email_id?: string | null
+          erp_response?: Json | null
+          error_message?: string | null
+          id?: string
+          idempotency_key?: string | null
+          intercept_no?: string
+          intercept_reason?: string | null
+          operated_by?: string | null
+          order_id?: string | null
+          reason_category?: string | null
+          referenced_order_no?: string | null
+          retry_count?: number
+          shopify_response?: Json | null
+          status?: string
+          trigger_source?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "risk_intercept_logs_email_id_fkey"
+            columns: ["email_id"]
+            isOneToOne: false
+            referencedRelation: "emails"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "risk_intercept_logs_order_id_fkey"
+            columns: ["order_id"]
+            isOneToOne: false
+            referencedRelation: "orders"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       profiles: {
         Row: {
           avatar_url: string | null
@@ -621,39 +699,81 @@ export type Database = {
         }
         Relationships: []
       }
+      automation_settings: {
+        Row: {
+          auto_reply_first_contact_days: number
+          singleton: string
+          updated_at: string
+        }
+        Insert: {
+          auto_reply_first_contact_days?: number
+          singleton?: string
+          updated_at?: string
+        }
+        Update: {
+          auto_reply_first_contact_days?: number
+          singleton?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       reply_templates: {
         Row: {
+          auto_reply_first_contact_days: number
           auto_send: boolean
           body_template: string
+          cooldown_minutes?: number | null
           created_at: string
+          enabled_business_intents: string[]
           id: string
+          intent?: string | null
           is_active: boolean
+          last_test_result?: Json | null
+          last_tested_at?: string | null
           name: string
           subject_template: string | null
           trigger_type: string
           updated_at: string
+          updated_by?: string | null
+          variables?: Json
         }
         Insert: {
+          auto_reply_first_contact_days?: number
           auto_send?: boolean
           body_template: string
+          cooldown_minutes?: number | null
           created_at?: string
+          enabled_business_intents?: string[]
           id?: string
+          intent?: string | null
           is_active?: boolean
+          last_test_result?: Json | null
+          last_tested_at?: string | null
           name: string
           subject_template?: string | null
           trigger_type: string
           updated_at?: string
+          updated_by?: string | null
+          variables?: Json
         }
         Update: {
+          auto_reply_first_contact_days?: number
           auto_send?: boolean
           body_template?: string
+          cooldown_minutes?: number | null
           created_at?: string
+          enabled_business_intents?: string[]
           id?: string
+          intent?: string | null
           is_active?: boolean
+          last_test_result?: Json | null
+          last_tested_at?: string | null
           name?: string
           subject_template?: string | null
           trigger_type?: string
           updated_at?: string
+          updated_by?: string | null
+          variables?: Json
         }
         Relationships: []
       }
@@ -735,7 +855,7 @@ export type Database = {
       is_staff: { Args: { _user_id: string }; Returns: boolean }
     }
     Enums: {
-      app_role: "admin" | "leader" | "agent"
+      app_role: "admin" | "leader" | "agent" | "guest"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -863,7 +983,7 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
-      app_role: ["admin", "leader", "agent"],
+      app_role: ["admin", "leader", "agent", "guest"],
     },
   },
 } as const

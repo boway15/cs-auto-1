@@ -175,7 +175,7 @@ workflow:
 
                 ## Output Format
                 Return ONLY a valid JSON object with NO markdown formatting, NO code blocks. Example:
-                {"intent":"after_sale","business_intent":"damaged","category":"售后","order_no":"SO20240315001","is_info_complete":false,"missing_elements":["order_no"],"summary":"客户反馈收到的商品有破损，要求退款","priority":"high","risk_level":"normal","sentiment":"frustrated","language":"zh","entities":{"order_no":null,"product_name":"Wireless Mouse"}}
+                {"intent":"after_sale","business_intent":"damaged","category":"售后","order_no":"SO20240315001","is_info_complete":false,"missing_elements":["order_no","attachment"],"summary":"客户反馈收到的商品有破损，要求退款","priority":"high","risk_level":"normal","sentiment":"frustrated","language":"zh","entities":{"order_no":null,"product_name":"Wireless Mouse"}}
 
                 ## Fields
                 - intent: legacy field. one of "after_sale" (售后), "refund" (退款), "cancel_order" (取消), "change_address" (改地址), "shipping_query" (物流), "general" (其他)
@@ -189,8 +189,8 @@ workflow:
                     "other"                 (其他问题 - 含一般咨询、退款、模糊不清等)
                 - category: "售后" for after_sale/refund/cancel_order/change_address/damaged/defect/description_mismatch, "咨询" for shipping_query/logistics/general/other
                 - order_no: extract order number if present (patterns like SO20240315001, ORD-12345, 6+ digit numbers), null if not found
-                - is_info_complete: true if email has enough info to proceed, false if missing order_no/images/product details
-                - missing_elements: array of what's missing. Values: "order_no" (after-sale without order number), "image" (quality issue without images), "product" (unclear which product). Empty array if complete.
+                - is_info_complete: for damaged/defect/description_mismatch: true only if order_no is present AND the email has at least one attachment; for order_cancel/address_change/logistics: true if order_no is present; otherwise follow rules below
+                - missing_elements: array of what's missing. Values: "order_no", "attachment" (no file attached when quality/damage/defect/mismatch context needs evidence; use "attachment" not "image"), "image" (legacy), "product" (unclear product). Empty array if complete.
                 - summary: concise Chinese summary of the customer's issue, max 200 characters
                 - priority: "urgent" (angry / cancel / address change), "high" (after-sale / refund), "normal" (shipping query / general), "low" (just inquiry)
                 - risk_level: "high" if customer wants to cancel order or change address, otherwise "normal"
@@ -201,11 +201,11 @@ workflow:
                 ## Rules
                 1. If customer asks to cancel an order → intent: "cancel_order", business_intent: "order_cancel", risk_level: "high"
                 2. If customer asks to change shipping address → intent: "change_address", business_intent: "address_change", risk_level: "high"
-                3. If customer reports damage/broken/crushed item → business_intent: "damaged"; add "image" to missing_elements (even if they didn't attach one, they should)
-                4. If customer reports product not working / defective / quality issue (non-physical damage) → business_intent: "defect"
-                5. If customer says product does not match description / wrong color / wrong size / "not as described" → business_intent: "description_mismatch"
+                3. If customer reports damage/broken/crushed item → business_intent: "damaged"; if no attachment in email add "attachment" to missing_elements (any attachment counts)
+                4. If customer reports product not working / defective / quality issue (non-physical damage) → business_intent: "defect"; if no attachment add "attachment" when evidence is needed
+                5. If customer says product does not match description / wrong color / wrong size / "not as described" → business_intent: "description_mismatch"; if no attachment add "attachment" when evidence is needed
                 6. Shipping/tracking/delivery/late package questions → intent: "shipping_query", business_intent: "logistics"
-                7. For after-sale issues without any order number → add "order_no" to missing_elements
+                7. For after-sale issues without any order number → add "order_no" to missing_elements; for logistics/cancel/address without order_no in text → add "order_no"
                 8. If email is very brief, unclear, just says "hello", or none of above categories fit → business_intent: "other"
                 9. Chinese customers using Chinese → set language to "zh", write summary in Chinese; English customers → "en"
                 10. business_intent must be exactly one value from the list above (single-select).

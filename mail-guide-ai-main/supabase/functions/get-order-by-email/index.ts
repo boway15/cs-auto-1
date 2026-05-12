@@ -1,4 +1,5 @@
-// 查询订单：order_no 与 email 二选一（至少其一）。优先本地 orders；配置 ERP_* 时走 OMS QueryOrderInfo 并回写本地。
+// 查询订单：order_no 与 email 二选一（至少其一）。默认优先本地 orders；配置 ERP_* 时本地无命中可走 OMS QueryOrderInfo 并回写本地。
+// 查询参数 refresh=1 且提供 order_no 时：跳过本地短路，优先调 OMS 拉取并 upsert（用于「更新订单信息」）；未配置 ERP 时行为与默认一致。
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import {
   erpEnvelopeNoOrderMessage,
@@ -39,6 +40,69 @@ function buildOrderResponse(order: Record<string, unknown>) {
   };
 }
 
+async function runErpQueryOrder(
+  admin: ReturnType<typeof createClient>,
+  qEmail: string,
+  qEbay: string,
+): Promise<Response> {
+  try {
+    const r = await queryOrderInfo(qEmail, qEbay);
+    const traceId = r.envelope.traceId ?? null;
+    const inner = r.envelope.data;
+
+    if (r.ok && inner && typeof inner === "object" && erpEnvelopeOmsQuerySucceeded(r.envelope)) {
+      const up = await upsertOrderFromOmsData(admin, inner as Record<string, unknown>, qEmail);
+      if (up) {
+        const { data: row } = await admin.from("orders").select("*").eq("id", up.id).maybeSingle();
+        if (row) {
+          return new Response(
+            JSON.stringify({
+              found: true,
+              source: "erp_oms",
+              erp_trace_id: traceId,
+              order: buildOrderResponse(row as Record<string, unknown>),
+            }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+          );
+        }
+      }
+    }
+
+    if (erpEnvelopeNoOrderMessage(r.envelope)) {
+      return new Response(
+        JSON.stringify({
+          found: false,
+          order: null,
+          erp_trace_id: traceId,
+          erp_message: String(r.envelope.data?.message ?? ""),
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    return new Response(
+      JSON.stringify({
+        found: false,
+        order: null,
+        erp_trace_id: traceId,
+        erp_http_status: r.httpStatus,
+        erp_message: String(r.envelope.data?.message ?? r.rawText?.slice(0, 500) ?? ""),
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  } catch (e) {
+    console.error("get-order-by-email ERP:", e);
+    return new Response(
+      JSON.stringify({
+        found: false,
+        order: null,
+        erp_error: e instanceof Error ? e.message : String(e),
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -76,12 +140,25 @@ Deno.serve(async (req) => {
     const url = new URL(req.url);
     const orderNo = (url.searchParams.get("order_no") ?? "").trim();
     const email = (url.searchParams.get("email") ?? "").trim();
+    const refreshRaw = (url.searchParams.get("refresh") ?? "").trim().toLowerCase();
+    const refresh = refreshRaw === "1" || refreshRaw === "true" || refreshRaw === "yes";
 
     if (!orderNo && !email) {
       return new Response(JSON.stringify({ error: "请提供 order_no 或 email 至少填写其一" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
+    }
+
+    if (refresh && !orderNo) {
+      return new Response(JSON.stringify({ error: "refresh=1 时需同时提供 order_no" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (refresh && orderNo && isErpOmsConfigured()) {
+      return await runErpQueryOrder(admin, email, orderNo);
     }
 
     let order: Record<string, unknown> | null = null;
@@ -127,64 +204,7 @@ Deno.serve(async (req) => {
     }
 
     if (isErpOmsConfigured()) {
-      try {
-        const qEmail = email;
-        const qEbay = orderNo;
-        const r = await queryOrderInfo(qEmail, qEbay);
-        const traceId = r.envelope.traceId ?? null;
-        const inner = r.envelope.data;
-
-        if (r.ok && inner && typeof inner === "object" && erpEnvelopeOmsQuerySucceeded(r.envelope)) {
-          const up = await upsertOrderFromOmsData(admin, inner as Record<string, unknown>, qEmail);
-          if (up) {
-            const { data: row } = await admin.from("orders").select("*").eq("id", up.id).maybeSingle();
-            if (row) {
-              return new Response(
-                JSON.stringify({
-                  found: true,
-                  source: "erp_oms",
-                  erp_trace_id: traceId,
-                  order: buildOrderResponse(row as Record<string, unknown>),
-                }),
-                { headers: { ...corsHeaders, "Content-Type": "application/json" } },
-              );
-            }
-          }
-        }
-
-        if (erpEnvelopeNoOrderMessage(r.envelope)) {
-          return new Response(
-            JSON.stringify({
-              found: false,
-              order: null,
-              erp_trace_id: traceId,
-              erp_message: String(r.envelope.data?.message ?? ""),
-            }),
-            { headers: { ...corsHeaders, "Content-Type": "application/json" } },
-          );
-        }
-
-        return new Response(
-          JSON.stringify({
-            found: false,
-            order: null,
-            erp_trace_id: traceId,
-            erp_http_status: r.httpStatus,
-            erp_message: String(r.envelope.data?.message ?? r.rawText?.slice(0, 500) ?? ""),
-          }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } },
-        );
-      } catch (e) {
-        console.error("get-order-by-email ERP:", e);
-        return new Response(
-          JSON.stringify({
-            found: false,
-            order: null,
-            erp_error: e instanceof Error ? e.message : String(e),
-          }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } },
-        );
-      }
+      return await runErpQueryOrder(admin, email, orderNo);
     }
 
     return new Response(

@@ -1,7 +1,14 @@
 import type { Json } from "@/integrations/supabase/types";
 
 export type EmailPriority = "low" | "normal" | "high" | "urgent";
-export type AssociationStatus = "unlinked" | "linked" | "recommended" | "compensating" | "not_found";
+export type AssociationStatus =
+  | "unlinked"
+  | "linked"
+  | "recommended"
+  | "compensating"
+  | "not_found"
+  | "not_provided"
+  | "manual_unlink";
 export type ProcessingStatus = "pending" | "analyzing" | "associated" | "drafted" | "auto_replied" | "risk_intercepted" | "failed";
 export type RiskStatus = "pending" | "success" | "failed" | "retrying";
 

@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
   自建 Supabase：更新 vault.service_role_key，并将 pg_cron 改为调用栈内 Kong 的 Functions URL。
-  注册 4 条任务：sync-mailbox(5min)、schedule-draft-generation、schedule-compensating-alerts、run-compensation-tasks（后三者均为 */30）。
+  注册 4 条任务：sync-mailbox(每 4 分钟整分)、schedule-draft-generation(每 4 分钟自第 2 分起，与收信错峰)、schedule-compensating-alerts(每小时第 15 分)、run-compensation-tasks(每小时第 14 分，与补偿任务 next_run_at 步长 1 小时一致)。
 
 .PARAMETER SelfhostRoot
   supabase-selfhost 目录，默认 <cs-main>/supabase-selfhost
@@ -127,10 +127,10 @@ function Add-CronBlock {
     $Out.Add("")
 }
 
-Add-CronBlock -Out $lines -JobName "auto-sync-mailbox-every-5min" -Schedule "*/5 * * * *" -UrlEscaped $uSync
-Add-CronBlock -Out $lines -JobName "auto-draft-every-30min" -Schedule "*/30 * * * *" -UrlEscaped $uDraft
-Add-CronBlock -Out $lines -JobName "compensating-alerts-every-30min" -Schedule "*/30 * * * *" -UrlEscaped $uAlert
-Add-CronBlock -Out $lines -JobName "run-compensation-tasks-every-30min" -Schedule "*/30 * * * *" -UrlEscaped $uComp
+Add-CronBlock -Out $lines -JobName "auto-sync-mailbox-every-5min" -Schedule "*/4 * * * *" -UrlEscaped $uSync
+Add-CronBlock -Out $lines -JobName "auto-draft-every-30min" -Schedule "2-59/4 * * * *" -UrlEscaped $uDraft
+Add-CronBlock -Out $lines -JobName "compensating-alerts-every-30min" -Schedule "15 * * * *" -UrlEscaped $uAlert
+Add-CronBlock -Out $lines -JobName "run-compensation-tasks-every-30min" -Schedule "14 * * * *" -UrlEscaped $uComp
 
 $sql = ($lines -join "`n") + "`n"
 $tempSql = [IO.Path]::GetTempFileName() + ".sql"

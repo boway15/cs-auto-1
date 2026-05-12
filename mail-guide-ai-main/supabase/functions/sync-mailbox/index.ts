@@ -95,6 +95,16 @@ function sliceImapLiteral(resp: string, path: string): string | null {
   return resp.slice(start, start + n);
 }
 
+/** FETCH 响应里 literal 的字段名因服务器而异（发 PEEK[] 仍可能回 BODY.PEEK[]） */
+function sliceImapFullBodyLiteral(resp: string): { body: string; matched: string } | null {
+  const candidates = ["BODY[]", "BODY.PEEK[]", "RFC822"] as const;
+  for (const path of candidates) {
+    const body = sliceImapLiteral(resp, path);
+    if (body != null) return { body, matched: path };
+  }
+  return null;
+}
+
 /** 业务 received_at：RFC 5322 Date 头；缺失或无法解析时回退为本次入库时刻 */
 function receivedAtFromDateHeader(dateHeader: string | null | undefined, ingestedAtIso: string): string {
   const raw = dateHeader?.trim();
@@ -267,11 +277,19 @@ class ImapClient {
     const re = new RegExp(`^${tag} (OK|NO|BAD)[^\\r\\n]*\\r?\\n`, "m");
     try {
       const raw = await this.readUntil(re, timeoutMs);
-      const body = sliceImapLiteral(raw, "BODY[]");
-      if (body != null) {
-        console.log("[fetchFullBody] uid:", uid, "literalBytes:", body.length);
-        return { raw: body, isFull: true };
+      const sliced = sliceImapFullBodyLiteral(raw);
+      if (sliced != null) {
+        console.log(
+          "[fetchFullBody] uid:",
+          uid,
+          "field:",
+          sliced.matched,
+          "literalBytes:",
+          sliced.body.length,
+        );
+        return { raw: sliced.body, isFull: true };
       }
+      console.log("[fetchFullBody] uid:", uid, "no BODY[]/BODY.PEEK[]/RFC822 literal in FETCH response");
     } catch (e) {
       console.log("[fetchFullBody] uid:", uid, "fallback to TEXT due to:", e);
     }
@@ -286,11 +304,12 @@ class ImapClient {
     await this.write(`${tag} UID FETCH ${uid} (BODY.PEEK[TEXT])\r\n`);
     const re = new RegExp(`^${tag} (OK|NO|BAD)[^\\r\\n]*\\r?\\n`, "m");
     const raw = await this.readUntil(re, timeoutMs);
-    const body = sliceImapLiteral(raw, "BODY[TEXT]");
+    const body =
+      sliceImapLiteral(raw, "BODY[TEXT]") ?? sliceImapLiteral(raw, "BODY.PEEK[TEXT]");
     if (body != null) {
       return body;
     }
-    const quotedMatch = raw.match(/BODY\[TEXT\]\s+"([^"]*?)"\s*\)/);
+    const quotedMatch = raw.match(/(?:BODY\[TEXT\]|BODY\.PEEK\[TEXT\])\s+"([^"]*?)"\s*\)/);
     if (quotedMatch) return quotedMatch[1];
     console.log("[fetchBodyTextFallback] uid:", uid, "FAILED");
     return "";
@@ -349,8 +368,22 @@ function parseAddress(value: string | null): { name: string | null; address: str
 }
 
 function sanitizeStorageFilename(name: string): string {
-  return name.replace(/[/\\]/g, "_").replace(/\0/g, "").replace(/\s+/g, " ").trim().slice(0, 180) ||
-    "file";
+  const cleaned = name.replace(/[/\\]/g, "_").replace(/\0/g, "").replace(/\s+/g, " ").trim();
+  const extMatch = cleaned.match(/\.([A-Za-z0-9]{1,10})$/);
+  const ext = extMatch ? `.${extMatch[1].toLowerCase()}` : "";
+  const stem = ext ? cleaned.slice(0, -ext.length) : cleaned;
+  const asciiStem = stem
+    .normalize("NFKD")
+    .replace(/[^\x20-\x7E]/g, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^[_ .-]+|[_ .-]+$/g, "")
+    .slice(0, 120);
+  return `${asciiStem || "file"}${ext}`.slice(0, 180);
+}
+
+function attachmentJsonLength(value: unknown): number {
+  return Array.isArray(value) ? value.length : 0;
 }
 
 /** 上传 MIME 解析出的附件到 Storage，写 email_attachments 并返回 emails.attachments JSON 数组项 */
@@ -433,41 +466,48 @@ async function persistEmailAttachments(
   return out;
 }
 
-// 增强的附件检测：从 BODYSTRUCTURE 响应中检测附件
+/**
+ * 从 FETCH 元数据（含 BODYSTRUCTURE）判断是否有附件。
+ * 注意：不能用「从 BODYSTRUCTURE( 到末尾 ))」这种正则——嵌套括号与同一 FETCH 里还有 RFC822.SIZE 等字段时会匹配失败，
+ * 若匹配失败就返回 false，会导致误判为无附件、整封体积上限变小、只拉 BODY[TEXT]，attachments 永远为空。
+ */
 function detectAttachments(metaRaw: string): { hasAttachment: boolean; count: number } {
-  // 检查 BODYSTRUCTURE 中的常见附件标记
-  const bodyStructure = metaRaw.match(/BODYSTRUCTURE\s*\(([\s\S]+)\)\s*\)\s*$/m);
-  if (!bodyStructure) return { hasAttachment: false, count: 0 };
-
-  const structure = bodyStructure[1];
+  const raw = metaRaw;
   let hasAttachment = false;
   let count = 0;
 
-  // multipart/mixed 通常表示有附件
-  if (/mixed/i.test(structure)) {
+  // 1) 全文启发式（不依赖嵌套括号解析）
+  if (/"attachment"/i.test(raw)) {
+    hasAttachment = true;
+    count = Math.max(count, (raw.match(/"attachment"/gi) ?? []).length);
+  }
+  if (/BODYSTRUCTURE/i.test(raw) && /\bMIXED\b/i.test(raw)) {
+    hasAttachment = true;
+  }
+  if (/FILENAME\s*=/i.test(raw) || /\bNAME\s*=\s*"/i.test(raw)) {
     hasAttachment = true;
   }
 
-  // 查找 ATTACHMENT 或 INLINE 中的 filename/name 参数
-  const attachMatches = structure.match(/"attachment"|"ATTACHMENT"|FILENAME\s*["\[]|NAME\s*["\[]/gi);
-  if (attachMatches) {
-    hasAttachment = true;
-    count = attachMatches.length;
-  }
-
-  // 回退：从原始元数据中匹配
-  if (!hasAttachment) {
-    const fallback = /(ATTACHMENT|FILENAME|NAME)\s*=/i.test(metaRaw) ||
-                     /"attachment"/i.test(metaRaw);
-    if (fallback) {
+  // 2) 仅从 BODYSTRUCTURE 起始处截取一段做细化（避免误把整个 FETCH 当 structure）
+  const bs = raw.match(/BODYSTRUCTURE\s*\(/i);
+  if (bs && bs.index !== undefined) {
+    const slice = raw.slice(bs.index, Math.min(bs.index + 400_000, raw.length));
+    if (/mixed/i.test(slice)) hasAttachment = true;
+    const attachMatches = slice.match(/"attachment"|"ATTACHMENT"|FILENAME\s*["\[]|NAME\s*["\[]/gi);
+    if (attachMatches) {
       hasAttachment = true;
-      // 尝试计数
-      const fn = metaRaw.match(/FILENAME\s*=\s*["\[]?([^"\]\s)]+)/gi);
-      count = fn?.length ?? 1;
+      count = Math.max(count, attachMatches.length);
     }
   }
 
   return { hasAttachment, count: Math.max(count, hasAttachment ? 1 : 0) };
+}
+
+/** 拉取整封 RFC822 时 readUntil 等待 tagged OK 的超时：大体积+慢链路需要更长 */
+function imapFullBodyReadTimeoutMs(hasAttachment: boolean, rfc822Size: number): number {
+  const base = hasAttachment ? 35_000 : 15_000;
+  const extra = Math.min(120_000, Math.floor(rfc822Size / 8192) * 1000);
+  return Math.min(180_000, base + extra);
 }
 
 // ============ 同步逻辑 ============
@@ -556,8 +596,9 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
       overallFetched += roundFetched;
       console.log(`[sync] round ${round + 1} phase1: metaList=${roundFetched}`);
 
-      // --- Phase 2: 去重 ---
-      const existingSet = new Set<string>();
+      // --- Phase 2: 去重；对历史空附件/失败附件记录允许在 Phase 3 修复 ---
+      const existingByMessageId = new Map<string, { id: string; message_id: string; attachments: unknown }>();
+      const failedAttachmentEmailIds = new Set<string>();
       if (metaList.length > 0) {
         const messageIds = metaList.map(m => m.messageId);
         const CHUNK = 200;
@@ -565,36 +606,36 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
           const chunk = messageIds.slice(i, i + CHUNK);
           const { data: existRows } = await admin
             .from("emails")
-            .select("message_id")
+            .select("id, message_id, attachments")
             .in("message_id", chunk);
           for (const row of (existRows ?? [])) {
-            existingSet.add(row.message_id);
+            existingByMessageId.set(row.message_id, row);
+          }
+          const emailIds = (existRows ?? []).map((row: { id: string }) => row.id);
+          if (emailIds.length > 0) {
+            const { data: failedRows } = await admin
+              .from("email_attachments")
+              .select("email_id")
+              .in("email_id", emailIds)
+              .eq("download_status", "failed");
+            for (const row of (failedRows ?? [])) {
+              failedAttachmentEmailIds.add(row.email_id);
+            }
           }
         }
       }
-      console.log(`[sync] round ${round + 1} phase2: existing=${existingSet.size}`);
+      console.log(`[sync] round ${round + 1} phase2: existing=${existingByMessageId.size}`);
 
       // --- Phase 3: 下载正文 + 入库 ---
       let roundInserted = 0;
       let roundHandledUid = progressUid;
       const insertedEmailIds: string[] = [];
       for (const meta of metaList) {
-        // 已存在 → 推进进度（DB 中已有，安全跨过）
-        if (existingSet.has(meta.messageId)) {
-          roundHandledUid = meta.uid;
-          continue;
-        }
-
         if (Date.now() - startedAt > TIME_BUDGET_MS - 5000) {
           console.log("[sync] time budget critical, stopping body download");
           break;
         }
 
-        const fromAddr = parseAddress(headerValue(meta.raw, "From"));
-        const toAddr = parseAddress(headerValue(meta.raw, "To"));
-        const subject = decodeRfc2047(headerValue(meta.raw, "Subject"));
-        // 业务时间与 SLA / 草稿窗口一致：使用 MIME Date 头；缺失则回退为同步入库时刻
-        const messageDateHeader = headerValue(meta.raw, "Date");
         // FETCH 应答里是「RFC822.SIZE 12345」，不是 MIME 头「RFC822.SIZE:」
         const rfc822SizeMatch = meta.raw.match(/RFC822\.SIZE\s+(\d+)/i);
         const rfc822Size = rfc822SizeMatch ? parseInt(rfc822SizeMatch[1], 10) || 0 : 0;
@@ -609,6 +650,69 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
         );
         const maxBytesForFetch = attachInfo.hasAttachment ? maxBytesWithAttach : maxBytesNoAttach;
 
+        const existing = existingByMessageId.get(meta.messageId);
+        if (existing) {
+          const needsAttachmentRepair =
+            attachInfo.hasAttachment &&
+            (attachmentJsonLength(existing.attachments) === 0 || failedAttachmentEmailIds.has(existing.id));
+          if (!needsAttachmentRepair) {
+            roundHandledUid = meta.uid;
+            continue;
+          }
+
+          console.log("[sync] repairing attachments for existing email uid:", meta.uid, "email_id:", existing.id);
+          try {
+            const { raw: rawBody, isFull } = await client.fetchFullBody(
+              meta.uid,
+              rfc822Size,
+              imapFullBodyReadTimeoutMs(true, rfc822Size),
+              maxBytesForFetch,
+            );
+            const parsed = isFull && rawBody ? parseFullMime(rawBody) : null;
+            if (parsed?.attachments.length) {
+              await admin.from("email_attachments").delete().eq("email_id", existing.id);
+              const attJson = await persistEmailAttachments(
+                admin,
+                String(mb.id),
+                existing.id,
+                parsed.attachments,
+              );
+              await admin.from("emails").update({
+                attachments: attJson as unknown,
+                has_attachment: attJson.length > 0 || attachInfo.hasAttachment,
+              }).eq("id", existing.id);
+            } else {
+              await admin.from("emails").update({
+                attachments: [{
+                  count: attachInfo.count,
+                  note: isFull
+                    ? "IMAP 已标记附件，但修复时未从 MIME 中解析出二进制。"
+                    : "附件已检测到；修复时仅拉取了正文摘要，附件未同步（整封超过 MAIL_SYNC_FULL_BODY_* 上限或 FETCH 超时）。",
+                }] as unknown,
+                has_attachment: true,
+              }).eq("id", existing.id);
+            }
+          } catch (repairErr) {
+            const msg = repairErr instanceof Error ? repairErr.message : String(repairErr);
+            console.error("[repair attachments]", repairErr);
+            await admin.from("emails").update({
+              attachments: [{
+                note: "附件修复失败，请检查 Edge 日志与 Storage 策略。",
+                error: msg.slice(0, 500),
+              }] as unknown,
+              has_attachment: true,
+            }).eq("id", existing.id);
+          }
+          roundHandledUid = meta.uid;
+          continue;
+        }
+
+        const fromAddr = parseAddress(headerValue(meta.raw, "From"));
+        const toAddr = parseAddress(headerValue(meta.raw, "To"));
+        const subject = decodeRfc2047(headerValue(meta.raw, "Subject"));
+        // 业务时间与 SLA / 草稿窗口一致：使用 MIME Date 头；缺失则回退为同步入库时刻
+        const messageDateHeader = headerValue(meta.raw, "Date");
+
         let bodyText = "";
         let bodyHtml: string | null = null;
         let mimeAttachmentParts: MimeAttachmentPart[] = [];
@@ -617,7 +721,7 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
           const { raw: rawBody, isFull } = await client.fetchFullBody(
             meta.uid,
             rfc822Size,
-            5000,
+            imapFullBodyReadTimeoutMs(attachInfo.hasAttachment, rfc822Size),
             maxBytesForFetch,
           );
           fullBodyFetched = isFull;
@@ -640,7 +744,7 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
         const initialAttachments: Record<string, unknown>[] = !fullBodyFetched && attachInfo.hasAttachment
           ? [{
             count: attachInfo.count,
-            note: "附件已检测到；仅拉取了正文摘要，附件未同步（整封大于 500KB 时仅取 BODY[TEXT]）。",
+            note: "附件已检测到；仅拉取了正文摘要，附件未同步（整封超过 MAIL_SYNC_FULL_BODY_* 上限或 FETCH 超时时仅取 BODY[TEXT]）。",
           }]
           : [];
 
@@ -683,7 +787,19 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
                 has_attachment: attJson.length > 0 || attachInfo.hasAttachment,
               }).eq("id", insertedEmail.id);
             } catch (attErr) {
+              const msg = attErr instanceof Error ? attErr.message : String(attErr);
               console.error("[persist attachments]", attErr);
+              try {
+                await admin.from("emails").update({
+                  attachments: [{
+                    note: "附件已解析但写入存储/数据库失败，请检查 Edge 日志与 Storage 策略。",
+                    error: msg.slice(0, 500),
+                  }] as unknown,
+                  has_attachment: true,
+                }).eq("id", insertedEmail.id);
+              } catch (e2) {
+                console.error("[persist attachments] failed to write error note", e2);
+              }
             }
           } else if (fullBodyFetched && attachInfo.hasAttachment && mimeAttachmentParts.length === 0) {
             await admin.from("emails").update({

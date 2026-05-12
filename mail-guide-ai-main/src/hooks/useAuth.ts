@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { Session, User } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 
-export type AppRole = "admin" | "leader" | "agent";
+export type AppRole = "admin" | "leader" | "agent" | "guest";
 const FALLBACK_ADMIN_EMAILS = new Set(["369404600@qq.com", "admin@test.com"]);
 
 export function useAuth() {
@@ -10,6 +10,7 @@ export function useAuth() {
   const [user, setUser] = useState<User | null>(null);
   const [roles, setRoles] = useState<AppRole[]>([]);
   const [loading, setLoading] = useState(true);
+  const [rolesLoading, setRolesLoading] = useState(false);
 
   useEffect(() => {
     const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
@@ -17,9 +18,10 @@ export function useAuth() {
       setUser(s?.user ?? null);
       if (s?.user) {
         // 延迟到下一个 tick 避免死锁
-        setTimeout(() => fetchRoles(s.user.id), 0);
+        setTimeout(() => void fetchRoles(s.user.id), 0);
       } else {
         setRoles([]);
+        setRolesLoading(false);
       }
     });
 
@@ -27,7 +29,7 @@ export function useAuth() {
       setSession(data.session);
       setUser(data.session?.user ?? null);
       if (data.session?.user) {
-        fetchRoles(data.session.user.id).finally(() => setLoading(false));
+        void fetchRoles(data.session.user.id).finally(() => setLoading(false));
       } else {
         setLoading(false);
       }
@@ -37,22 +39,27 @@ export function useAuth() {
   }, []);
 
   async function fetchRoles(uid: string) {
-    const { data, error } = await supabase
-      .from("user_roles")
-      .select("role")
-      .eq("user_id", uid);
-    if (error) {
-      console.error("Failed to fetch user roles:", error.message);
-      setRoles([]);
-      return;
+    setRolesLoading(true);
+    try {
+      const { data, error } = await supabase.from("user_roles").select("role").eq("user_id", uid);
+      if (error) {
+        console.error("Failed to fetch user roles:", error.message);
+        setRoles([]);
+        return;
+      }
+      setRoles((data ?? []).map((r: { role: string }) => r.role as AppRole));
+    } finally {
+      setRolesLoading(false);
     }
-    setRoles((data ?? []).map((r: any) => r.role as AppRole));
   }
 
   const isFallbackAdmin = !!user?.email && FALLBACK_ADMIN_EMAILS.has(user.email.toLowerCase());
   const isAdmin = roles.includes("admin") || isFallbackAdmin;
   const isLeader = roles.includes("leader");
   const isAgent = roles.includes("agent");
+  const isGuest = roles.includes("guest");
+  /** 可访问工作台等业务功能（不含游客） */
+  const hasAppAccess = isAdmin || isLeader || isAgent;
 
-  return { session, user, roles, isAdmin, isLeader, isAgent, loading };
+  return { session, user, roles, isAdmin, isLeader, isAgent, isGuest, hasAppAccess, loading, rolesLoading };
 }

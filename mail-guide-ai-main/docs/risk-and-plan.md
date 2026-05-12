@@ -168,7 +168,6 @@ new TextDecoder(charset)       new TextDecoder(charset)  ← 完全一样
   □ Mailboxes.tsx     supabase.from('mailboxes') → api.mailboxes.*
   □ Templates.tsx     supabase.from('reply_templates') → api.templates.*
   □ Users.tsx         supabase.from('profiles') → api.users.*
-  □ Erp.tsx           supabase.from('erp_configs') → api.erp.*
   □ ProtectedRoute    supabase auth check → api /me 状态
 
 □ 删除不再需要的 Supabase 依赖

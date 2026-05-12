@@ -1,5 +1,5 @@
 // 有单号但未在库中关联（compensating）：收信满 2h 后首次内部预警邮件（去重由 ops_alerts 幂等键保证）
-// 每 30 分钟由 pg_cron 触发，仅服务角色
+// 由 pg_cron 触发：每小时第 15 分一次；仅服务角色
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { createAlertAndNotify } from "../_shared/ops-notify.ts";

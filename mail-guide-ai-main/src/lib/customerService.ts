@@ -35,7 +35,8 @@ export type AssociationStatus =
   | "not_found"
   | "compensating"
   | "recommended"
-  | "linked";
+  | "linked"
+  | "manual_unlink";
 
 export const ASSOCIATION_FILTER_OPTIONS: ReadonlyArray<{ value: AssociationStatus | "all"; label: string }> = [
   { value: "all", label: "全部关联" },
@@ -43,6 +44,7 @@ export const ASSOCIATION_FILTER_OPTIONS: ReadonlyArray<{ value: AssociationStatu
   { value: "not_found", label: "未找到" },
   { value: "not_provided", label: "未提供" },
   { value: "compensating", label: "补偿中" },
+  { value: "manual_unlink", label: "人工解除" },
 ];
 
 const ASSOCIATION_LABEL_MAP: Record<string, string> = {
@@ -52,11 +54,27 @@ const ASSOCIATION_LABEL_MAP: Record<string, string> = {
   compensating: "补偿中",
   recommended: "推荐",
   unlinked: "未关联",
+  manual_unlink: "人工解除",
 };
 
 export function associationStatusLabel(value: string | null | undefined): string {
   if (!value) return "—";
   return ASSOCIATION_LABEL_MAP[value] ?? value;
+}
+
+/** 存在 email_order_links 时一律视为已关联（库字段未回写时列表/筛选仍正确） */
+export function effectiveAssociationStatus(
+  email: {
+    association_status?: string | null;
+    email_order_links?: { id?: string }[] | null;
+  } | null | undefined,
+): string {
+  if (!email) return "unlinked";
+  const links = email.email_order_links;
+  const n = Array.isArray(links) ? links.length : 0;
+  if (n > 0) return "linked";
+  const s = String(email.association_status ?? "unlinked").trim();
+  return s || "unlinked";
 }
 
 export type SlaBucket = "within_24h" | "within_48h" | "within_72h" | "over_72h";

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { invokeGetOrderByEmail } from "@/lib/invoke-get-order-by-email";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,10 +23,12 @@ import {
 } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { EmailBody } from "@/components/EmailBody";
-import { RefreshCw, Eye, Pencil } from "lucide-react";
+import { RefreshCw, Eye } from "lucide-react";
 import { toast } from "sonner";
+import { Link } from "react-router-dom";
 
 const FETCH_LIMIT = 500;
+const RISK_LOG_CHUNK = 100;
 
 type OrderRow = Record<string, unknown>;
 type EmailRow = Record<string, unknown>;
@@ -49,19 +52,97 @@ export type UnlinkedMailRow = {
 
 export type MailOrderDisplayRow = LinkedOrderRow | UnlinkedMailRow;
 
-type AssociationMode = "all" | "linked" | "unlinked";
+type AssociationMode = "all" | "linked" | "unlinked" | "parsed_unlinked";
 type InterceptFilter = "all" | "hold" | "none";
+
+type RiskLogBrief = {
+  action: string;
+  status: string;
+  created_at: string;
+  referenced_order_no: string | null;
+  intercept_no: string;
+};
+
+/** 从 AI 分析写入的 ai_entities 取解析单号（与 process-email 写入结构一致） */
+function parsedOrderNoFromEmail(email: EmailRow | null | undefined): string {
+  if (!email) return "";
+  const ent = asRecord(email.ai_entities);
+  const raw = ent?.order_no;
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  if (raw != null && typeof raw !== "object") {
+    const s = String(raw).trim();
+    return s || "";
+  }
+  return "";
+}
+
+function normalizeOrderNo(s: string): string {
+  return s.trim().toLowerCase();
+}
+
+/**
+ * 按时间倒序：最近一条 release 成功 → 已放行；最近 hold 成功 → ERP 已拦截；
+ * 最近 hold 仍为 pending → 拦截请求处理中（与 success 区分，避免列表误显示「拦截中」）。
+ */
+function riskInterceptOutcomeFromLogs(logs: RiskLogBrief[]): "hold" | "released" | "pending_hold" | "none" {
+  const sorted = [...logs].sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+  );
+  for (const l of sorted) {
+    if (l.action === "release" && l.status === "success") return "released";
+    if (l.action === "hold" && l.status === "success") return "hold";
+    if (l.action === "hold" && l.status === "pending") return "pending_hold";
+  }
+  return "none";
+}
+
+/** 与 riskInterceptStateFromLogs 一致：pending 不算已落定状态 */
+function riskInterceptStateFromLogs(logs: RiskLogBrief[]): "hold" | "released" | "none" {
+  const o = riskInterceptOutcomeFromLogs(logs);
+  if (o === "released") return "released";
+  if (o === "hold") return "hold";
+  return "none";
+}
+
+function isActivelyIntercepted(args: {
+  shippingHold: boolean;
+  riskLogs: RiskLogBrief[];
+}): boolean {
+  if (args.shippingHold) return true;
+  const o = riskInterceptOutcomeFromLogs(args.riskLogs);
+  return o === "hold" || o === "pending_hold";
+}
+
+function orderNoMatchBadge(parsed: string, linked: string): { label: string; variant: "default" | "secondary" | "outline" } | null {
+  const p = normalizeOrderNo(parsed);
+  const l = normalizeOrderNo(linked);
+  if (!p && !l) return null;
+  if (p && l) {
+    if (p === l) return { label: "一致", variant: "secondary" };
+    return { label: "不一致", variant: "outline" };
+  }
+  if (p && !l) return { label: "仅解析", variant: "outline" };
+  return { label: "仅关联", variant: "secondary" };
+}
+
+function chunkIds<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
 
 function keywordMatchLinked(row: LinkedOrderRow, kw: string): boolean {
   const t = kw.trim().toLowerCase();
   if (!t) return true;
   const o = row.order;
   const e = row.email;
+  const parsed = parsedOrderNoFromEmail(e);
   const fields = [
     String(o?.order_no ?? ""),
     String(o?.customer_email ?? ""),
     String(e?.message_id ?? ""),
     String(e?.from_email ?? ""),
+    parsed,
   ];
   return fields.some((f) => f.toLowerCase().includes(t));
 }
@@ -69,20 +150,27 @@ function keywordMatchLinked(row: LinkedOrderRow, kw: string): boolean {
 function keywordMatchUnlinked(email: EmailRow, kw: string): boolean {
   const t = kw.trim().toLowerCase();
   if (!t) return true;
+  const parsed = parsedOrderNoFromEmail(email);
   const fields = [
     String(email.message_id ?? ""),
     String(email.from_email ?? ""),
     String(email.subject ?? ""),
     String(email.body_text ?? "").slice(0, 2000),
+    parsed,
   ];
   return fields.some((f) => f.toLowerCase().includes(t));
 }
 
-function interceptMatchLinked(row: LinkedOrderRow, f: InterceptFilter): boolean {
-  if (f === "all") return true;
-  const hold = Boolean(row.order?.shipping_hold);
-  if (f === "hold") return hold;
-  return !hold;
+function interceptMatchRow(args: {
+  kind: "linked" | "unlinked";
+  shippingHold: boolean;
+  riskLogs: RiskLogBrief[];
+  f: InterceptFilter;
+}): boolean {
+  if (args.f === "all") return true;
+  const active = isActivelyIntercepted({ shippingHold: args.shippingHold, riskLogs: args.riskLogs });
+  if (args.f === "hold") return active;
+  return !active;
 }
 
 function asRecord(v: unknown): Record<string, unknown> | null {
@@ -297,7 +385,7 @@ function InterceptHoldDetailSection({ order, holdLogs }: { order: OrderRow; hold
                       </TableCell>
                       <TableCell className="text-[10px] py-1.5 font-mono">{String(log.action ?? "—")}</TableCell>
                       <TableCell className="text-[10px] py-1.5">{String(log.reason_category ?? "—")}</TableCell>
-                      <TableCell className="text-[10px] py-1.5 break-words max-w-[200px]">
+                      <TableCell className="text-[10px] py-1.5 min-w-0 max-w-[min(55vw,28rem)] break-words break-all">
                         {String(log.reason ?? "—")}
                       </TableCell>
                       <TableCell className="text-[10px] py-1.5 break-all">{String(log.performed_by ?? "—")}</TableCell>
@@ -361,6 +449,61 @@ function InterceptHoldDetailSection({ order, holdLogs }: { order: OrderRow; hold
   );
 }
 
+type DetailRiskRow = Record<string, unknown>;
+
+function MailRiskLogsSection({ rows }: { rows: DetailRiskRow[] }) {
+  if (rows.length === 0) {
+    return (
+      <p className="text-[11px] text-muted-foreground m-0">
+        暂无该邮件的风控拦截记录（<span className="font-mono">risk_intercept_logs</span>）。凭邮件单号拦截且未关联本地订单时，记录在此而不会出现在上方「发货拦截」区块。
+      </p>
+    );
+  }
+  return (
+    <div className="rounded-md border overflow-x-auto">
+      <Table>
+        <TableHeader>
+          <TableRow className="hover:bg-transparent">
+            <TableHead className="text-[10px] h-8 whitespace-nowrap">时间</TableHead>
+            <TableHead className="text-[10px] h-8">编号</TableHead>
+            <TableHead className="text-[10px] h-8 w-[56px]">动作</TableHead>
+            <TableHead className="text-[10px] h-8 w-[72px]">状态</TableHead>
+            <TableHead className="text-[10px] h-8">引用单号</TableHead>
+            <TableHead className="text-[10px] h-8 min-w-[120px]">原因</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((log, logIdx) => (
+            <TableRow key={String(log.id ?? `r-${logIdx}`)}>
+              <TableCell className="text-[10px] py-1.5 whitespace-nowrap tabular-nums">
+                {fmtDateTime(log.created_at)}
+              </TableCell>
+              <TableCell className="text-[10px] py-1.5 font-mono">{String(log.intercept_no ?? "—")}</TableCell>
+              <TableCell className="text-[10px] py-1.5 font-mono">{String(log.action ?? "—")}</TableCell>
+              <TableCell className="text-[10px] py-1.5">{String(log.status ?? "—")}</TableCell>
+              <TableCell className="text-[10px] py-1.5 font-mono break-all max-w-[140px]">
+                {log.referenced_order_no != null && String(log.referenced_order_no).trim()
+                  ? String(log.referenced_order_no)
+                  : "—"}
+              </TableCell>
+              <TableCell className="text-[10px] py-1.5 min-w-0 max-w-[min(55vw,28rem)] break-words break-all">
+                {String(log.intercept_reason ?? "—")}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <p className="text-[10px] text-muted-foreground mt-2 m-0">
+        完整审计见{" "}
+        <Link to="/risk-logs" className="underline underline-offset-2 text-foreground">
+          风控拦截记录
+        </Link>
+        。
+      </p>
+    </div>
+  );
+}
+
 function LinkRecordDataSection({ row }: { row: LinkedOrderRow }) {
   return (
     <div>
@@ -392,18 +535,16 @@ export default function LinkedOrders() {
   const [loading, setLoading] = useState(true);
   const [linkedRows, setLinkedRows] = useState<LinkedOrderRow[]>([]);
   const [unlinkedEmails, setUnlinkedEmails] = useState<EmailRow[]>([]);
+  const [riskLogsByEmailId, setRiskLogsByEmailId] = useState<Record<string, RiskLogBrief[]>>({});
 
-  const [associationMode, setAssociationMode] = useState<AssociationMode>("linked");
+  const [associationMode, setAssociationMode] = useState<AssociationMode>("all");
   const [interceptFilter, setInterceptFilter] = useState<InterceptFilter>("all");
   const [keyword, setKeyword] = useState("");
 
   const [detailRow, setDetailRow] = useState<MailOrderDisplayRow | null>(null);
   const [holdLogs, setHoldLogs] = useState<HoldLogRow[]>([]);
-  const [orderEditOpen, setOrderEditOpen] = useState(false);
-  const [editOrder, setEditOrder] = useState<OrderRow | null>(null);
-  const [editCustomerName, setEditCustomerName] = useState("");
-  const [editOrderStatus, setEditOrderStatus] = useState("");
-  const [editSaving, setEditSaving] = useState(false);
+  const [detailRiskLogs, setDetailRiskLogs] = useState<DetailRiskRow[]>([]);
+  const [orderRefreshId, setOrderRefreshId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -450,12 +591,48 @@ export default function LinkedOrders() {
 
       const { data: emailsData, error: emErr } = await supabase
         .from("emails")
-        .select("id, message_id, from_email, from_name, subject, body_text, received_at, status, to_email")
+        .select(
+          "id, message_id, from_email, from_name, subject, body_text, received_at, status, to_email, ai_entities, association_status",
+        )
         .order("received_at", { ascending: false })
         .limit(FETCH_LIMIT);
       if (emErr) throw emErr;
       const unlinked = (emailsData ?? []).filter((em) => em.id && !linkedEmailIdSet.has(String(em.id)));
       setUnlinkedEmails(unlinked);
+
+      const emailIdSet = new Set<string>();
+      for (const r of parsed) {
+        if (r.email?.id) emailIdSet.add(String(r.email.id));
+      }
+      for (const em of unlinked) {
+        if (em.id) emailIdSet.add(String(em.id));
+      }
+      const emailIds = [...emailIdSet];
+      const byEmail: Record<string, RiskLogBrief[]> = {};
+      for (const part of chunkIds(emailIds, RISK_LOG_CHUNK)) {
+        if (part.length === 0) continue;
+        const { data: riskData, error: riskErr } = await supabase
+          .from("risk_intercept_logs")
+          .select("email_id, action, status, created_at, referenced_order_no, intercept_no")
+          .in("email_id", part);
+        if (riskErr) {
+          console.warn("risk_intercept_logs:", riskErr.message);
+          continue;
+        }
+        for (const row of riskData ?? []) {
+          const eid = row.email_id != null ? String(row.email_id) : "";
+          if (!eid) continue;
+          if (!byEmail[eid]) byEmail[eid] = [];
+          byEmail[eid].push({
+            action: String(row.action ?? ""),
+            status: String(row.status ?? ""),
+            created_at: String(row.created_at ?? ""),
+            referenced_order_no: row.referenced_order_no != null ? String(row.referenced_order_no) : null,
+            intercept_no: String(row.intercept_no ?? ""),
+          });
+        }
+      }
+      setRiskLogsByEmailId(byEmail);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
@@ -499,62 +676,129 @@ export default function LinkedOrders() {
     };
   }, [detailRow]);
 
-  const linkedFiltered = useMemo(() => {
-    return linkedRows.filter(
-      (r) => keywordMatchLinked(r, keyword) && interceptMatchLinked(r, interceptFilter),
-    );
-  }, [linkedRows, keyword, interceptFilter]);
+  useEffect(() => {
+    if (!detailRow?.email?.id) {
+      setDetailRiskLogs([]);
+      return;
+    }
+    const id = String(detailRow.email.id);
+    let cancelled = false;
+    void (async () => {
+      const { data, error } = await supabase
+        .from("risk_intercept_logs")
+        .select(
+          "id, intercept_no, action, status, created_at, referenced_order_no, intercept_reason, order_id, error_message, erp_response",
+        )
+        .eq("email_id", id)
+        .order("created_at", { ascending: false })
+        .limit(40);
+      if (cancelled) return;
+      if (error) {
+        setDetailRiskLogs([]);
+        return;
+      }
+      setDetailRiskLogs((data ?? []) as DetailRiskRow[]);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [detailRow]);
 
-  const unlinkedFiltered = useMemo(() => {
+  const linkedFiltered = useMemo(() => {
+    return linkedRows.filter((r) => {
+      if (!keywordMatchLinked(r, keyword)) return false;
+      const logs = riskLogsByEmailId[String(r.email.id)] ?? [];
+      return interceptMatchRow({
+        kind: "linked",
+        shippingHold: Boolean(r.order.shipping_hold),
+        riskLogs: logs,
+        f: interceptFilter,
+      });
+    });
+  }, [linkedRows, keyword, interceptFilter, riskLogsByEmailId]);
+
+  const unlinkedKeyword = useMemo(() => {
     return unlinkedEmails.filter((em) => keywordMatchUnlinked(em, keyword));
   }, [unlinkedEmails, keyword]);
 
+  const unlinkedAfterRiskFilter = useMemo(() => {
+    return unlinkedKeyword.filter((em) => {
+      const logs = riskLogsByEmailId[String(em.id)] ?? [];
+      return interceptMatchRow({
+        kind: "unlinked",
+        shippingHold: false,
+        riskLogs: logs,
+        f: interceptFilter,
+      });
+    });
+  }, [unlinkedKeyword, riskLogsByEmailId, interceptFilter]);
+
+  const unlinkedForDisplay = useMemo(() => {
+    if (associationMode !== "parsed_unlinked") return unlinkedAfterRiskFilter;
+    return unlinkedAfterRiskFilter.filter((em) => parsedOrderNoFromEmail(em));
+  }, [associationMode, unlinkedAfterRiskFilter]);
+
   const displayRows = useMemo((): MailOrderDisplayRow[] => {
     if (associationMode === "linked") return linkedFiltered;
-    if (associationMode === "unlinked") {
-      return unlinkedFiltered.map((email) => ({ kind: "unlinked" as const, email }));
+    if (associationMode === "unlinked" || associationMode === "parsed_unlinked") {
+      return unlinkedForDisplay.map((email) => ({ kind: "unlinked" as const, email }));
     }
-    const unlinkedAsRows: UnlinkedMailRow[] = unlinkedFiltered.map((email) => ({
+    const unlinkedAsRows: UnlinkedMailRow[] = unlinkedForDisplay.map((email) => ({
       kind: "unlinked",
       email,
     }));
     return [...linkedFiltered, ...unlinkedAsRows];
-  }, [associationMode, linkedFiltered, unlinkedFiltered]);
+  }, [associationMode, linkedFiltered, unlinkedForDisplay]);
 
   const showAssocColumn = associationMode === "all";
-  const tableColSpan = showAssocColumn ? 8 : 7;
+  const tableColSpan = showAssocColumn ? 11 : 10;
 
-  function openEditOrder(order: OrderRow) {
-    setEditOrder(order);
-    setEditCustomerName(String(order.customer_name ?? ""));
-    setEditOrderStatus(String(order.order_status ?? ""));
-    setOrderEditOpen(true);
-  }
-
-  async function saveOrderEdit() {
-    if (!editOrder?.id) return;
-    setEditSaving(true);
-    const { error } = await supabase
-      .from("orders")
-      .update({
-        customer_name: editCustomerName.trim() || null,
-        order_status: editOrderStatus.trim() || null,
-      })
-      .eq("id", String(editOrder.id));
-    setEditSaving(false);
-    if (error) {
-      const msg = error.message ?? "";
-      if (/permission|policy|rls|42501/i.test(msg)) {
-        toast.error("无权限：需要 admin / leader / agent 角色才能更新订单");
-      } else {
-        toast.error(msg);
-      }
+  async function refreshLinkedOrder(order: OrderRow) {
+    const id = String(order.id ?? "").trim();
+    const orderNo = String(order.order_no ?? "").trim();
+    if (!id) return;
+    if (!orderNo) {
+      toast.error("缺少订单号，无法更新订单信息");
       return;
     }
-    toast.success("订单信息已更新");
-    setOrderEditOpen(false);
-    setEditOrder(null);
-    void load();
+    setOrderRefreshId(id);
+    try {
+      const r = await invokeGetOrderByEmail(orderNo, String(order.customer_email ?? "").trim(), { refresh: true });
+      if (r.kind === "auth") {
+        toast.error("请先登录");
+        return;
+      }
+      if (r.kind === "bad_request") {
+        toast.error(r.message);
+        return;
+      }
+      if (r.kind === "error") {
+        toast.error(r.message);
+        return;
+      }
+      if (r.kind === "not_found") {
+        toast.message("未查到可更新订单", { description: r.description });
+        return;
+      }
+      toast.success(
+        r.source === "erp_oms"
+          ? "订单查询成功，本地订单信息已更新为最新"
+          : "未走 OMS 或本次为本地命中；已按当前数据源刷新展示（可检查 ERP_* 配置）",
+      );
+      await load();
+      const { data: fresh } = await supabase.from("orders").select("*").eq("id", id).maybeSingle();
+      if (fresh) {
+        setDetailRow((prev) => {
+          if (!prev || prev.kind !== "linked") return prev;
+          if (String(prev.order.id) !== id) return prev;
+          return { ...prev, order: fresh as OrderRow };
+        });
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "更新失败");
+    } finally {
+      setOrderRefreshId(null);
+    }
   }
 
   return (
@@ -564,10 +808,14 @@ export default function LinkedOrders() {
           <div>
             <h1 className="text-lg font-semibold">邮件订单</h1>
             <p className="text-xs text-muted-foreground mt-0.5 max-w-3xl">
-              已关联列表最多 {FETCH_LIMIT} 条；未关联邮件在「排除已有 email_order_links 的 email_id」后从最近邮件中取最多 {FETCH_LIMIT} 条。
+              已关联列表最多 {FETCH_LIMIT} 条；未关联邮件在排除已有 <span className="font-mono">email_order_links</span>{" "}
+              后从最近邮件取最多 {FETCH_LIMIT} 条。列表展示<strong>解析单号</strong>（
+              <span className="font-mono">ai_entities.order_no</span>）与<strong>关联订单号</strong>；「是否拦截」含本地{" "}
+              <span className="font-mono">shipping_hold</span> 与该邮件在{" "}
+              <span className="font-mono">risk_intercept_logs</span> 中最近的 hold/release 成功记录。
               {associationMode === "all" && (
                 <span className="block mt-1">
-                  「是否拦截」筛选仅作用于<strong>已关联</strong>行；未关联行始终展示。
+                  「全部」模式下同时列出已关联与未关联行；筛选「是否拦截」对两类行均生效。
                 </span>
               )}
             </p>
@@ -583,13 +831,14 @@ export default function LinkedOrders() {
         <div className="space-y-1">
           <label className="text-[10px] text-muted-foreground block">是否关联订单</label>
           <Select value={associationMode} onValueChange={(v) => setAssociationMode(v as AssociationMode)}>
-            <SelectTrigger className="h-8 w-[120px] text-xs">
+            <SelectTrigger className="h-8 w-[168px] text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">全部</SelectItem>
               <SelectItem value="linked">仅已关联</SelectItem>
               <SelectItem value="unlinked">仅未关联</SelectItem>
+              <SelectItem value="parsed_unlinked">有解析单号·未关联</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -598,7 +847,6 @@ export default function LinkedOrders() {
           <Select
             value={interceptFilter}
             onValueChange={(v) => setInterceptFilter(v as InterceptFilter)}
-            disabled={associationMode === "unlinked"}
           >
             <SelectTrigger className="h-8 w-[120px] text-xs">
               <SelectValue />
@@ -615,9 +863,9 @@ export default function LinkedOrders() {
           <Input
             className="h-8 text-xs"
             placeholder={
-              associationMode === "unlinked"
-                ? "Message-ID、发件邮箱、主题、正文…"
-                : "Message-ID、发件邮箱、订单号、订单邮箱…"
+              associationMode === "linked"
+                ? "Message-ID、发件邮箱、解析/关联订单号、订单邮箱…"
+                : "Message-ID、发件、主题、正文、解析单号…"
             }
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
@@ -631,13 +879,15 @@ export default function LinkedOrders() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  {showAssocColumn && <TableHead className="w-[88px] text-xs">关联订单</TableHead>}
-                  <TableHead className="text-xs">订单编号</TableHead>
+                  <TableHead className="text-xs min-w-[120px]">发件邮箱</TableHead>
+                  <TableHead className="text-xs min-w-[160px]">Message-ID</TableHead>
+                  {showAssocColumn && <TableHead className="w-[80px] text-xs">关联订单</TableHead>}
+                  <TableHead className="text-xs min-w-[100px]">解析单号</TableHead>
+                  <TableHead className="text-xs min-w-[100px]">关联订单号</TableHead>
+                  <TableHead className="w-[72px] text-xs">对比</TableHead>
                   <TableHead className="text-xs">订单邮箱</TableHead>
-                  <TableHead className="w-[72px] text-xs">是否拦截</TableHead>
-                  <TableHead className="text-xs min-w-[180px]">Message-ID</TableHead>
-                  <TableHead className="text-xs">发件邮箱</TableHead>
-                  <TableHead className="w-[152px] text-xs whitespace-nowrap">关联时间</TableHead>
+                  <TableHead className="w-[88px] text-xs">拦截</TableHead>
+                  <TableHead className="w-[140px] text-xs whitespace-nowrap">关联时间</TableHead>
                   <TableHead className="w-[140px] text-xs text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
@@ -660,14 +910,29 @@ export default function LinkedOrders() {
                       row.kind === "linked"
                         ? `l-${row.link_id}`
                         : `u-${String(row.email.id ?? idx)}`;
-                    const orderNo = row.kind === "linked" ? String(row.order.order_no ?? "—") : "—";
+                    const eid = String(row.email.id ?? "");
+                    const riskLogs = riskLogsByEmailId[eid] ?? [];
+                    const parsed = parsedOrderNoFromEmail(row.email);
+                    const linkedNo =
+                      row.kind === "linked" ? String(row.order.order_no ?? "").trim() : "";
+                    const match = orderNoMatchBadge(parsed, linkedNo);
+                    const shippingHold = row.kind === "linked" ? Boolean(row.order.shipping_hold) : false;
+                    const riskOutcome = riskInterceptOutcomeFromLogs(riskLogs);
+                    const activeIntercept = isActivelyIntercepted({ shippingHold, riskLogs });
+                    const riskState = riskInterceptStateFromLogs(riskLogs);
+                    const listInterceptPending =
+                      activeIntercept && !shippingHold && riskOutcome === "pending_hold";
                     const custEmail = row.kind === "linked" ? String(row.order.customer_email ?? "—") : "—";
-                    const hold =
-                      row.kind === "linked" ? Boolean(row.order.shipping_hold) : null;
                     const msgId = String(row.email.message_id ?? "—");
                     const fromEm = String(row.email.from_email ?? "—");
                     return (
                       <TableRow key={key}>
+                        <TableCell className="text-xs max-w-[180px] truncate" title={fromEm}>
+                          {fromEm}
+                        </TableCell>
+                        <TableCell className="text-xs font-mono break-all max-w-[200px]" title={msgId}>
+                          {msgId}
+                        </TableCell>
                         {showAssocColumn && (
                           <TableCell className="text-xs">
                             <Badge variant={row.kind === "linked" ? "default" : "secondary"} className="text-[10px]">
@@ -675,30 +940,43 @@ export default function LinkedOrders() {
                             </Badge>
                           </TableCell>
                         )}
-                        <TableCell className="text-xs font-medium">{orderNo}</TableCell>
-                        <TableCell className="text-xs max-w-[160px] truncate" title={custEmail}>
-                          {custEmail}
+                        <TableCell className="text-xs font-mono max-w-[120px] truncate" title={parsed || undefined}>
+                          {parsed || "—"}
+                        </TableCell>
+                        <TableCell className="text-xs font-mono max-w-[120px] truncate" title={linkedNo || undefined}>
+                          {linkedNo || "—"}
                         </TableCell>
                         <TableCell className="text-xs">
-                          {row.kind === "linked" ? (
-                            hold ? (
-                              <Badge variant="outline" className="text-[10px] border-warning text-warning">
-                                是
-                              </Badge>
-                            ) : (
-                              <span className="text-muted-foreground">否</span>
-                            )
+                          {match ? (
+                            <Badge variant={match.variant} className="text-[9px] px-1 py-0">
+                              {match.label}
+                            </Badge>
                           ) : (
                             <span className="text-muted-foreground">—</span>
                           )}
                         </TableCell>
-                        <TableCell className="text-xs font-mono break-all max-w-[240px]" title={msgId}>
-                          {msgId}
+                        <TableCell className="text-xs max-w-[140px] truncate" title={custEmail}>
+                          {custEmail}
                         </TableCell>
-                        <TableCell className="text-xs max-w-[180px] truncate" title={fromEm}>
-                          {fromEm}
+                        <TableCell className="text-xs">
+                          {listInterceptPending ? (
+                            <Badge variant="outline" className="text-[10px] border-warning text-warning" title="ERP 拦截请求处理中，尚未写入成功">
+                              拦截中
+                            </Badge>
+                          ) : activeIntercept ? (
+                            <Badge variant="outline" className="text-[10px] border-destructive/40 text-destructive" title="含本地 shipping_hold 或风控 hold 成功">
+                              已拦截
+                            </Badge>
+                          ) : riskState === "released" ? (
+                            <span className="text-muted-foreground text-[10px]">已放行</span>
+                          ) : (
+                            <span className="text-muted-foreground">否</span>
+                          )}
                         </TableCell>
-                        <TableCell className="text-xs text-muted-foreground whitespace-nowrap tabular-nums" title={row.kind === "linked" ? row.link_created_at : undefined}>
+                        <TableCell
+                          className="text-xs text-muted-foreground whitespace-nowrap tabular-nums"
+                          title={row.kind === "linked" ? row.link_created_at : undefined}
+                        >
                           {row.kind === "linked" ? fmtDateTime(row.link_created_at) : "—"}
                         </TableCell>
                         <TableCell className="text-right">
@@ -719,10 +997,13 @@ export default function LinkedOrders() {
                                 variant="ghost"
                                 size="sm"
                                 className="h-7 text-[11px]"
-                                onClick={() => openEditOrder(row.order)}
+                                disabled={orderRefreshId === String(row.order.id)}
+                                onClick={() => void refreshLinkedOrder(row.order)}
                               >
-                                <Pencil className="w-3 h-3 mr-1" />
-                                更新订单
+                                <RefreshCw
+                                  className={`w-3 h-3 mr-1 ${orderRefreshId === String(row.order.id) ? "animate-spin" : ""}`}
+                                />
+                                {orderRefreshId === String(row.order.id) ? "更新中…" : "更新订单"}
                               </Button>
                             )}
                           </div>
@@ -738,171 +1019,196 @@ export default function LinkedOrders() {
       </ScrollArea>
 
       <Dialog open={!!detailRow} onOpenChange={(o) => !o && setDetailRow(null)}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-5xl max-h-[92vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>详情</DialogTitle>
+            <DialogTitle>邮件与订单详情</DialogTitle>
           </DialogHeader>
-          {detailRow && (
-            <div className="space-y-4 text-sm">
-              {detailRow.kind === "linked" && (
-                <div className="space-y-4">
-                  <div>
-                    <h4 className="font-medium text-xs text-muted-foreground mb-2">订单信息</h4>
-                    <Card className="p-3 space-y-3 text-xs">
+          {detailRow &&
+            (() => {
+              const dparsed = parsedOrderNoFromEmail(detailRow.email);
+              const dlinked =
+                detailRow.kind === "linked" ? String(detailRow.order.order_no ?? "").trim() : "";
+              const dmatch = orderNoMatchBadge(dparsed, dlinked);
+              return (
+                <div className="space-y-4 text-sm">
+                  <div className="space-y-3">
                     <div className="space-y-2">
-                      <OrderDetailScalar label="订单号" value={String(detailRow.order.order_no ?? "—")} />
-                      <OrderDetailScalar label="订单邮箱" value={String(detailRow.order.customer_email ?? "—")} />
-                      <OrderDetailScalar label="客户姓名" value={String(detailRow.order.customer_name ?? "—")} />
-                      <OrderDetailScalar label="订单状态" value={String(detailRow.order.order_status ?? "—")} />
-                      <OrderDetailScalar label="物流状态" value={String(detailRow.order.shipping_status ?? "—")} />
-                      <OrderDetailScalar label="运单号" value={String(detailRow.order.tracking_no ?? "—")} />
-                      <OrderDetailScalar
-                        label="下单时间"
-                        value={fmtDateTime(detailRow.order.ordered_at)}
-                      />
-                      <OrderDetailScalar
-                        label="金额 / 币种"
-                        value={`${orderDisplayAmount(detailRow.order)} ${String(detailRow.order.currency ?? "").trim()}`.trim()}
-                      />
-                      {optionalStr(detailRow.order, "financial_status") && (
-                        <OrderDetailScalar label="财务状态" value={optionalStr(detailRow.order, "financial_status")!} />
-                      )}
-                      {optionalStr(detailRow.order, "fulfillment_status") && (
-                        <OrderDetailScalar
-                          label="履约状态"
-                          value={optionalStr(detailRow.order, "fulfillment_status")!}
-                        />
-                      )}
-                      <p className="text-[10px] text-muted-foreground m-0 pt-1 border-t border-border/60">
-                        发货拦截、暂停原因/时间/操作人及调证用 raw_data 见下方<strong>拦截详情</strong>。
-                      </p>
-                      {optionalStr(detailRow.order, "shopify_tags") && (
-                        <OrderDetailScalar label="店铺标签" value={optionalStr(detailRow.order, "shopify_tags")!} />
-                      )}
-                      <div className="grid grid-cols-[100px_1fr] gap-x-2 gap-y-1 items-start pt-1 border-t border-border/60">
-                        <span className="text-muted-foreground shrink-0 pt-0.5">商品摘要</span>
-                        <p className="text-xs break-words whitespace-pre-wrap min-w-0 m-0">
-                          {String(detailRow.order.product_summary ?? "—")}
-                        </p>
-                      </div>
-                      <div className="grid grid-cols-[100px_1fr] gap-x-2 items-start pt-1 border-t border-border/60">
-                        <span className="text-muted-foreground shrink-0 pt-0.5">收货地址</span>
-                        <ShippingAddressBlock value={orderShippingAddress(detailRow.order)} />
-                      </div>
-                      <div className="pt-1 border-t border-border/60 space-y-1.5">
-                        <div className="text-muted-foreground">订单行（line_items）</div>
-                        <OrderLineItemsTable items={orderLineItems(detailRow.order)} />
-                      </div>
-                      {(detailRow.order.created_at != null || detailRow.order.updated_at != null) && (
-                        <div className="text-[11px] text-muted-foreground space-y-0.5">
-                          {detailRow.order.created_at != null && (
-                            <div>记录创建：{fmtDateTime(detailRow.order.created_at)}</div>
-                          )}
-                          {detailRow.order.updated_at != null && (
-                            <div>记录更新：{fmtDateTime(detailRow.order.updated_at)}</div>
-                          )}
+                      <h4 className="font-medium text-xs text-muted-foreground mb-1">邮件信息</h4>
+                      <Card className="p-3 space-y-1.5 text-xs">
+                        <div>
+                          <span className="text-muted-foreground">主题：</span>
+                          {String(detailRow.email.subject ?? "—")}
                         </div>
-                      )}
-                      {detailRow.order.raw_data != null && (
-                        <details className="text-[11px]">
-                          <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
-                            原始数据（raw_data，JSON）
-                          </summary>
-                          <pre className="mt-2 max-h-56 overflow-auto rounded-md bg-muted/60 p-2 text-[10px] leading-relaxed">
-                            {(() => {
-                              try {
-                                return JSON.stringify(detailRow.order.raw_data, null, 2);
-                              } catch {
-                                return String(detailRow.order.raw_data);
-                              }
-                            })()}
-                          </pre>
-                        </details>
-                      )}
+                        <div>
+                          <span className="text-muted-foreground">发件人：</span>
+                          {String(detailRow.email.from_name ?? "")} &lt;
+                          {String(detailRow.email.from_email ?? "—")}&gt;
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">收件人：</span>
+                          {String(detailRow.email.to_email ?? "—")}
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">Message-ID：</span>
+                          <span className="font-mono break-all">{String(detailRow.email.message_id ?? "—")}</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">时间：</span>
+                          {detailRow.email.received_at
+                            ? new Date(String(detailRow.email.received_at)).toLocaleString("zh-CN")
+                            : "—"}
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">状态：</span>
+                          {String(detailRow.email.status ?? "—")}
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">关联状态：</span>
+                          {String(detailRow.email.association_status ?? "—")}
+                        </div>
+                        <div className="pt-2 border-t">
+                          <div className="text-muted-foreground mb-1">正文</div>
+                          <EmailBody
+                            content={String(detailRow.email.body_text ?? "")}
+                            className="text-xs max-h-56 overflow-y-auto"
+                          />
+                        </div>
+                      </Card>
                     </div>
-                  </Card>
+
+                    {detailRow.kind === "linked" ? (
+                      <>
+                        <div>
+                          <h4 className="font-medium text-xs text-muted-foreground mb-2">订单信息</h4>
+                          <Card className="p-3 space-y-3 text-xs">
+                            <div className="space-y-2">
+                              <OrderDetailScalar label="解析单号（AI）" value={dparsed || "—"} />
+                              <OrderDetailScalar label="关联订单号" value={String(detailRow.order.order_no ?? "—")} />
+                              {dmatch ? (
+                                <div className="flex flex-wrap items-center gap-2 text-[10px]">
+                                  <span className="text-muted-foreground">解析与关联</span>
+                                  <Badge variant={dmatch.variant} className="text-[10px]">
+                                    {dmatch.label}
+                                  </Badge>
+                                </div>
+                              ) : null}
+                              <OrderDetailScalar label="订单邮箱" value={String(detailRow.order.customer_email ?? "—")} />
+                              <OrderDetailScalar label="客户姓名" value={String(detailRow.order.customer_name ?? "—")} />
+                              <OrderDetailScalar label="订单状态" value={String(detailRow.order.order_status ?? "—")} />
+                              <OrderDetailScalar label="物流状态" value={String(detailRow.order.shipping_status ?? "—")} />
+                              <OrderDetailScalar label="运单号" value={String(detailRow.order.tracking_no ?? "—")} />
+                              <OrderDetailScalar label="下单时间" value={fmtDateTime(detailRow.order.ordered_at)} />
+                              <OrderDetailScalar
+                                label="金额 / 币种"
+                                value={`${orderDisplayAmount(detailRow.order)} ${String(detailRow.order.currency ?? "").trim()}`.trim()}
+                              />
+                              {optionalStr(detailRow.order, "financial_status") && (
+                                <OrderDetailScalar
+                                  label="财务状态"
+                                  value={optionalStr(detailRow.order, "financial_status")!}
+                                />
+                              )}
+                              {optionalStr(detailRow.order, "fulfillment_status") && (
+                                <OrderDetailScalar
+                                  label="履约状态"
+                                  value={optionalStr(detailRow.order, "fulfillment_status")!}
+                                />
+                              )}
+                              <p className="text-[10px] text-muted-foreground m-0 pt-1 border-t border-border/60">
+                                本地发货拦截见下方<strong>拦截详情</strong>；凭邮件单号 ERP 拦截见<strong>风控拦截（本邮件）</strong>。
+                              </p>
+                              {optionalStr(detailRow.order, "shopify_tags") && (
+                                <OrderDetailScalar
+                                  label="店铺标签"
+                                  value={optionalStr(detailRow.order, "shopify_tags")!}
+                                />
+                              )}
+                              <div className="grid grid-cols-[100px_1fr] gap-x-2 gap-y-1 items-start pt-1 border-t border-border/60">
+                                <span className="text-muted-foreground shrink-0 pt-0.5">商品摘要</span>
+                                <p className="text-xs break-words whitespace-pre-wrap min-w-0 m-0">
+                                  {String(detailRow.order.product_summary ?? "—")}
+                                </p>
+                              </div>
+                              <div className="grid grid-cols-[100px_1fr] gap-x-2 items-start pt-1 border-t border-border/60">
+                                <span className="text-muted-foreground shrink-0 pt-0.5">收货地址</span>
+                                <ShippingAddressBlock value={orderShippingAddress(detailRow.order)} />
+                              </div>
+                              <div className="pt-1 border-t border-border/60 space-y-1.5">
+                                <div className="text-muted-foreground">订单行（line_items）</div>
+                                <OrderLineItemsTable items={orderLineItems(detailRow.order)} />
+                              </div>
+                              {(detailRow.order.created_at != null || detailRow.order.updated_at != null) && (
+                                <div className="text-[11px] text-muted-foreground space-y-0.5">
+                                  {detailRow.order.created_at != null && (
+                                    <div>记录创建：{fmtDateTime(detailRow.order.created_at)}</div>
+                                  )}
+                                  {detailRow.order.updated_at != null && (
+                                    <div>记录更新：{fmtDateTime(detailRow.order.updated_at)}</div>
+                                  )}
+                                </div>
+                              )}
+                              {detailRow.order.raw_data != null && (
+                                <details className="text-[11px]">
+                                  <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                                    原始数据（raw_data，JSON）
+                                  </summary>
+                                  <pre className="mt-2 max-h-56 overflow-auto rounded-md bg-muted/60 p-2 text-[10px] leading-relaxed">
+                                    {(() => {
+                                      try {
+                                        return JSON.stringify(detailRow.order.raw_data, null, 2);
+                                      } catch {
+                                        return String(detailRow.order.raw_data);
+                                      }
+                                    })()}
+                                  </pre>
+                                </details>
+                              )}
+                            </div>
+                          </Card>
+                        </div>
+                        <InterceptHoldDetailSection order={detailRow.order} holdLogs={holdLogs} />
+                        <div>
+                          <h4 className="font-medium text-xs text-muted-foreground mb-2">风控拦截（本邮件）</h4>
+                          <MailRiskLogsSection rows={detailRiskLogs} />
+                        </div>
+                        <LinkRecordDataSection row={detailRow} />
+                      </>
+                    ) : (
+                      <>
+                        <div>
+                          <h4 className="font-medium text-xs text-muted-foreground mb-2">订单与解析</h4>
+                          <Card className="p-3 space-y-2 text-xs border-dashed">
+                            <OrderDetailScalar label="解析单号（AI）" value={dparsed || "—"} />
+                            <OrderDetailScalar label="关联订单号" value="—（尚未建立 email_order_links）" />
+                            {dmatch ? (
+                              <div className="flex flex-wrap items-center gap-2 text-[10px]">
+                                <span className="text-muted-foreground">解析与关联</span>
+                                <Badge variant={dmatch.variant} className="text-[10px]">
+                                  {dmatch.label}
+                                </Badge>
+                              </div>
+                            ) : null}
+                            <p className="text-[10px] text-muted-foreground m-0 pt-1">
+                              可在工作台将邮件与订单关联；若已凭邮件单号发起 ERP 拦截，记录见下方。
+                            </p>
+                            <Button variant="outline" size="sm" className="h-8 text-xs w-full mt-1" asChild>
+                              <Link to="/">打开工作台</Link>
+                            </Button>
+                          </Card>
+                        </div>
+                        <div>
+                          <h4 className="font-medium text-xs text-muted-foreground mb-2">风控拦截（本邮件）</h4>
+                          <MailRiskLogsSection rows={detailRiskLogs} />
+                        </div>
+                      </>
+                    )}
                   </div>
-                  <InterceptHoldDetailSection order={detailRow.order} holdLogs={holdLogs} />
-                  <LinkRecordDataSection row={detailRow} />
                 </div>
-              )}
-              {detailRow.kind === "unlinked" && (
-                <Card className="p-3 text-xs text-muted-foreground border-dashed">该邮件尚未关联订单</Card>
-              )}
-              <div>
-                <h4 className="font-medium text-xs text-muted-foreground mb-2">邮件信息</h4>
-                <Card className="p-3 space-y-1.5 text-xs">
-                  <div>
-                    <span className="text-muted-foreground">主题：</span>
-                    {String(detailRow.email.subject ?? "—")}
-                  </div>
-                  <div>
-                    <span className="text-muted-foreground">发件人：</span>
-                    {String(detailRow.email.from_name ?? "")} &lt;{String(detailRow.email.from_email ?? "—")}&gt;
-                  </div>
-                  <div>
-                    <span className="text-muted-foreground">收件人：</span>
-                    {String(detailRow.email.to_email ?? "—")}
-                  </div>
-                  <div>
-                    <span className="text-muted-foreground">Message-ID：</span>
-                    <span className="font-mono break-all">{String(detailRow.email.message_id ?? "—")}</span>
-                  </div>
-                  <div>
-                    <span className="text-muted-foreground">时间：</span>
-                    {detailRow.email.received_at
-                      ? new Date(String(detailRow.email.received_at)).toLocaleString("zh-CN")
-                      : "—"}
-                  </div>
-                  <div>
-                    <span className="text-muted-foreground">状态：</span>
-                    {String(detailRow.email.status ?? "—")}
-                  </div>
-                  <div className="pt-2 border-t">
-                    <div className="text-muted-foreground mb-1">正文</div>
-                    <EmailBody content={String(detailRow.email.body_text ?? "")} className="text-xs max-h-48 overflow-y-auto" />
-                  </div>
-                </Card>
-              </div>
-            </div>
-          )}
+              );
+            })()}
           <DialogFooter>
             <Button variant="outline" onClick={() => setDetailRow(null)}>
               关闭
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={orderEditOpen}
-        onOpenChange={(open) => {
-          if (!open) {
-            setOrderEditOpen(false);
-            setEditOrder(null);
-          }
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>更新订单信息 · {editOrder ? String(editOrder.order_no ?? "") : ""}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3">
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">客户姓名</label>
-              <Input value={editCustomerName} onChange={(e) => setEditCustomerName(e.target.value)} />
-            </div>
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">订单状态</label>
-              <Input value={editOrderStatus} onChange={(e) => setEditOrderStatus(e.target.value)} />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOrderEditOpen(false)}>
-              取消
-            </Button>
-            <Button onClick={() => void saveOrderEdit()} disabled={editSaving}>
-              {editSaving ? "保存中…" : "保存"}
             </Button>
           </DialogFooter>
         </DialogContent>

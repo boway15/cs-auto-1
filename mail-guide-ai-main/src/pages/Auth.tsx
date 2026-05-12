@@ -74,7 +74,7 @@ export default function AuthPage() {
     if (error) {
       toast.error(mapAuthErrorMessage(error.message));
     } else {
-      toast.success("注册成功，正在登录...");
+      toast.success("注册成功，正在进入系统。");
       navigate("/", { replace: true });
     }
   }
@@ -164,7 +164,9 @@ export default function AuthPage() {
                 <Button type="submit" className="w-full" disabled={submitting}>
                   {submitting ? "注册中..." : "注册"}
                 </Button>
-                <p className="text-xs text-muted-foreground text-center">首位注册账号将自动获得管理员权限</p>
+                <p className="text-xs text-muted-foreground text-center">
+                  若系统尚无管理员，首位注册用户将自动成为管理员。否则新账号默认为游客（无业务数据权限），需由管理员在「用户管理」中分配角色后方可使用工作台。
+                </p>
               </form>
             </TabsContent>
           </Tabs>

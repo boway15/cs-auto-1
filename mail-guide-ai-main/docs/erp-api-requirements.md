@@ -9,9 +9,10 @@
 
 为避免对接预期偏差，先说明当前仓库状态：
 
-- 前端 `Erp.tsx` 已支持配置 `base_url`、鉴权方式、`order_endpoint`、字段映射（管理端 ERP 配置与 Edge 直连 **独立**：Edge 使用 **Functions secrets / `.env.functions`** 中的 `ERP_*`）。
+- 数据库中仍保留 `erp_configs` / `orders.erp_config_id`（历史结构），**Edge 与业务代码不读取**；OMS/网关鉴权与 Base URL 仅通过 **Functions secrets / `.env.functions`** 的 `ERP_*` 配置（见 `erp-client.ts`）。
 - **`supabase/functions/get-order-by-email`**：在配置齐全时通过 **OMS `QueryOrderInfo`** 查单，并可将结果写入本地 `orders`；未配置或失败时仍回退查询本地 `orders` 表。
 - **`risk-intercept`**：在配置齐全且 `hold` 时先调 **Java 网关订单拦截**，成功后再更新本地 `shipping_hold`；结果写入 `risk_intercept_logs.erp_response`（含 `traceId` 等）。**已不再调用 Shopify**。**`release`（解除拦截）操作不向 ERP 发送请求**：解除拦截由运营人员在 ERP 系统后台直接操作；本系统 release 仅将本地 `orders.shipping_hold` 置回 `false` 以同步前端展示状态，`erp_response` 中标记 `skipped`。
+- **凭邮件单号拦截（与本地订单关联解耦）**：取消/改地址等场景下，若邮件中已解析出订单号但尚未关联到本地 `orders` 行，仍可对 ERP 发起 `hold`；此时 `risk_intercept_logs.order_id` 可为空，`referenced_order_no` 记录所用单号，**不**写入 `order_hold_logs`、**不**更新本地 `orders.shipping_hold`。
 - **凭据**：OAuth2 用户名密码、各 Base URL 仅存放在 **Supabase Functions secrets**（云端）或 **`supabase-selfhost/.env.functions`**（自建），**不入库、不进 Git**。
 
 与 [`erp-order-api.md`](./erp-order-api.md) 不一致处以对接后 ERP 书面说明为准（如 `businessCode` 枚举、拦截成功判定，见该文档 §7）。

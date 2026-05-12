@@ -184,7 +184,6 @@ mail-guide-ai-main/
 │       ├── Auth.tsx          # 登录/注册
 │       ├── Workbench.tsx     # 主工作台（邮件队列+ AI 草稿）
 │       ├── Mailboxes.tsx     # 邮箱配置
-│       ├── Erp.tsx           # ERP 配置
 │       ├── Templates.tsx     # 回复模板
 │       ├── Users.tsx         # 用户管理
 │       ├── SendLogs.tsx      # 发送日志
@@ -203,7 +202,6 @@ mail-guide-ai-main/
 | `/risk-logs` | 风控日志 | 所有已认证用户 |
 | `/alerts` | 运营告警 | 所有已认证用户 |
 | `/mailboxes` | 邮箱配置 | 仅 admin |
-| `/erp` | ERP 配置 | 仅 admin |
 | `/templates` | 回复模板 | 仅 admin |
 | `/users` | 用户管理 | 仅 admin |
 
@@ -232,9 +230,11 @@ mail-guide-ai-main/
 
 ## 定时任务
 
-通过 PostgreSQL `pg_cron` + `pg_net` 扩展实现：
-- **`auto-sync-mailbox-every-5min`**：每 5 分钟调用 `sync-mailbox` Edge Function 自动收信
-- **`auto-draft-every-30min`**：每 30 分钟调用 `schedule-draft-generation` 自动草稿（0-4h Dify / 4-24h 本地 / 24h+仅人工）
+通过 PostgreSQL `pg_cron` + `pg_net` 扩展实现（收信与草稿错峰，减轻同一时刻负载）：
+- **`auto-sync-mailbox-every-5min`**（job 名历史遗留）：每 4 分钟、自整点 0 分起调用 `sync-mailbox` 自动收信（`*/4 * * * *`）
+- **`auto-draft-every-30min`**（job 名历史遗留）：每 4 分钟、自第 2 分起调用 `schedule-draft-generation`（`2-59/4 * * * *`，与收信错开 2 分钟）
+- **`compensating-alerts-every-30min`**：有单未关联内部预警，每小时第 15 分调用 `schedule-compensating-alerts`（`15 * * * *`）
+- **`run-compensation-tasks-every-30min`**（job 名历史遗留）：订单补偿扫描，**每小时第 14 分**（`14 * * * *`），与 `next_run_at` 推迟 **1 小时** 一致
 
 ---
 

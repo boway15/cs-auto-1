@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS emails (
   is_info_complete BOOLEAN DEFAULT false,
   missing_elements JSONB DEFAULT '[]',
   association_status TEXT DEFAULT 'unlinked'
-                  CHECK (association_status IN ('unlinked','not_provided','not_found','compensating','recommended','linked')),
+                  CHECK (association_status IN ('unlinked','not_provided','not_found','compensating','recommended','linked','manual_unlink')),
   processing_status TEXT DEFAULT 'pending',
   risk_level      TEXT DEFAULT 'normal',
   sla_bucket      TEXT
@@ -215,7 +215,7 @@ CREATE TABLE IF NOT EXISTS user_roles (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id    UUID NOT NULL,
   role       TEXT NOT NULL
-             CHECK (role IN ('admin','leader','agent')),
+             CHECK (role IN ('admin','leader','agent','guest')),
   created_at TIMESTAMPTZ DEFAULT now(),
   UNIQUE(user_id, role)
 );
