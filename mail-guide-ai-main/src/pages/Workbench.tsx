@@ -1069,15 +1069,6 @@ export default function Workbench() {
                       >
                         {associationStatusLabel(effectiveAssociationStatus(email))}
                       </Badge>
-                      {(() => {
-                        const bucket = computeSlaBucket(email.received_at);
-                        if (!bucket) return null;
-                        return (
-                          <Badge variant="secondary" className="text-[10px] py-0.5 h-auto whitespace-normal break-words">
-                            {SLA_BUCKET_LABEL[bucket]}
-                          </Badge>
-                        );
-                      })()}
                     </div>
                   </div>
                 </button>
@@ -1118,11 +1109,6 @@ export default function Workbench() {
                     {new Date(selected.received_at).toLocaleString("zh-CN")}
                   </span>
                   <StatusBadge status={selected.status} />
-                  {selected.priority && selected.priority !== "normal" && (
-                    <Badge variant="outline" className="border-destructive text-destructive">
-                      {selected.priority === "urgent" ? "紧急优先" : "高优先"}
-                    </Badge>
-                  )}
                 </div>
                 <div className="mt-2 text-xs">
                   <span className="text-muted-foreground">Message-ID：</span>

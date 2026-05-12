@@ -1,5 +1,8 @@
 # 自建 Supabase：由 mail-guide-ai-main/scripts/bootstrap-supabase-docker.ps1 生成本地目录，勿提交
 supabase-selfhost/
 
-# Cursor 本地调试日志
-.cursor/debug*.log
+# Cursor（本地规则与技能，勿提交公司仓）
+.cursor/
+
+# 根部署说明（本地/环境相关，勿提交公司仓）
+DEPLOY.md
