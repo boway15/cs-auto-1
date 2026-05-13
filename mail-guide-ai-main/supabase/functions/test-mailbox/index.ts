@@ -1,40 +1,16 @@
 // 测试 IMAP 邮箱连通性：connect → login → select INBOX → logout
 // 仅做一次性轻量校验，不拉邮件，超时 20s
+import { getMailTlsCaCerts } from "../_shared/mail-tls-ca.ts";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
+
 const MAIL_LOCAL_TEST_MODE = Deno.env.get("MAIL_LOCAL_TEST_MODE") === "true";
 
-let cachedMailTlsCaCerts: string[] | undefined | null;
-
-async function getMailTlsCaCerts(): Promise<string[] | undefined> {
-  if (cachedMailTlsCaCerts !== null && cachedMailTlsCaCerts !== undefined) {
-    return cachedMailTlsCaCerts;
-  }
-
-  const certs: string[] = [];
-  const inlinePem = Deno.env.get("MAIL_TLS_CA_CERT_PEM")?.trim();
-  if (inlinePem) {
-    certs.push(inlinePem.replace(/\\n/g, "\n"));
-  }
-
-  const rawPaths = Deno.env.get("MAIL_TLS_CA_CERT_PATH") || Deno.env.get("DENO_CERT") || "";
-  const paths = rawPaths.split(/[;,]/).map((p) => p.trim()).filter(Boolean);
-  for (const path of paths) {
-    try {
-      certs.push(await Deno.readTextFile(path));
-    } catch (e) {
-      console.error(`[test-mailbox] failed to read CA cert path=${path}:`, e);
-    }
-  }
-
-  cachedMailTlsCaCerts = certs.length > 0 ? certs : null;
-  return cachedMailTlsCaCerts ?? undefined;
-}
-
 async function connectImapTls(host: string, port: number): Promise<Deno.TlsConn> {
-  const caCerts = await getMailTlsCaCerts();
+  const caCerts = await getMailTlsCaCerts("[test-mailbox] ");
   return await Deno.connectTls({
     hostname: host,
     port,

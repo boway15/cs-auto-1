@@ -1,7 +1,7 @@
 // 人工触发的草稿生成 Edge Function
 // 业务规则：
 //   - 本接口服务「人工再生成」，默认走 Dify 工作流（callDifyDraftWorkflow），
-//     传入上一版草稿 + 用户指导，实现"基于上次结果二次优化"
+//     传入用户「指导思想」（guidance），由工作流结合邮件与订单上下文生成草稿
 //   - 当 Dify 未配置 / 调用失败时：
 //       * mode === 'dify'（默认）+ GENERATE_DRAFT_FALLBACK_LOCAL=true → 回落本地，model=pipeline-local-fallback
 //       * 否则直接 502，让用户感知问题（避免悄悄退化为关键词模板）
@@ -57,6 +57,11 @@ Deno.serve(async (req) => {
     const email_id = payload?.email_id;
     const guidance: string | null = payload?.guidance ?? null;
     const mode = normalizeMode(payload?.mode);
+    const guidanceLen =
+      typeof guidance === "string" ? guidance.trim().length : 0;
+    console.log(
+      `[generate-draft] email_id=${email_id} guidance_field_present=${Object.prototype.hasOwnProperty.call(payload, "guidance")} guidance_len=${guidanceLen}`,
+    );
 
     if (!email_id) {
       return new Response(JSON.stringify({ error: "缺少 email_id" }), {
@@ -78,15 +83,6 @@ Deno.serve(async (req) => {
       .eq("email_id", email_id);
     const orders = (links ?? []).map((l: any) => l.orders).filter(Boolean);
 
-    const { data: prevDraft } = await supabase
-      .from("ai_drafts")
-      .select("draft_content")
-      .eq("email_id", email_id)
-      .order("version", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    const previousDraft = prevDraft?.draft_content ?? null;
-
     let content: string;
     let model: string;
     let usedFallback = false;
@@ -98,7 +94,6 @@ Deno.serve(async (req) => {
           email as any,
           orders,
           guidance,
-          previousDraft,
         );
         model = "dify-workflow";
       } catch (e) {
@@ -167,7 +162,6 @@ Deno.serve(async (req) => {
       metadata: {
         mode,
         model,
-        used_previous_draft: Boolean(previousDraft),
         dify_error: difyError,
       },
     });

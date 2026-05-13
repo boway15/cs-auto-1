@@ -236,6 +236,22 @@ export function erpEnvelopeBusinessOk(env: ErpEnvelope): boolean {
   return coerceInnerSuccess(d.success) === true;
 }
 
+/**
+ * 网关锁单：HTTP 200 时部分返回未带 data.success=true，但 message 表明已锁成功或重复提交等效成功。
+ * 例：「订单已存在该单操作日志:订单锁定成功」
+ */
+function erpBlockGatewayHoldMessageSuccess(env: ErpEnvelope): boolean {
+  if (!coerceOuterCodeOk(env.code)) return false;
+  if (env.success === false) return false;
+  const d = env.data;
+  if (!d || typeof d !== "object") return false;
+  const msg = String((d as Record<string, unknown>).message ?? "");
+  if (!msg.trim()) return false;
+  if (/订单锁定成功/.test(msg)) return true;
+  if (/锁定成功/.test(msg) && /已存在该单操作日志/.test(msg)) return true;
+  return false;
+}
+
 export function erpEnvelopeNoOrderMessage(env: ErpEnvelope): boolean {
   const raw = env as unknown as Record<string, unknown>;
   const msg = String(env.data?.message ?? raw.Msg ?? raw.msg ?? "");
@@ -332,6 +348,6 @@ export async function blockOrderByOrderId(orderId: string): Promise<BlockOrderRe
   });
   const rawText = await res.text();
   const envelope = parseEnvelope(rawText);
-  const ok = res.ok && erpEnvelopeBusinessOk(envelope);
+  const ok = res.ok && (erpEnvelopeBusinessOk(envelope) || erpBlockGatewayHoldMessageSuccess(envelope));
   return { ok, envelope, rawText, httpStatus: res.status };
 }

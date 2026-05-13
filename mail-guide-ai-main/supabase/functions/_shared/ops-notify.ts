@@ -10,10 +10,39 @@
 
 import { sendMail } from "./smtp.ts";
 
-const ALERT_SENDER_ADDRESS =
-  Deno.env.get("ALERT_SENDER_ADDRESS") || "caobaowei123@163.com";
-const ALERT_EMAIL_TO =
-  Deno.env.get("ALERT_EMAIL_TO") || "caobaowei@bestwo.com";
+const ENV_ALERT_SENDER_ADDRESS =
+  (Deno.env.get("ALERT_SENDER_ADDRESS") ?? "").trim() || "caobaowei123@163.com";
+const ENV_ALERT_EMAIL_TO =
+  (Deno.env.get("ALERT_EMAIL_TO") ?? "").trim() || "caobaowei@bestwo.com";
+
+const OPS_NOTIFY_CONFIG_CACHE_MS = 10_000;
+let opsNotifyConfigCache: { at: number; sender: string; recipients: string[] } | null = null;
+
+async function loadOpsNotifyMailConfig(admin: any): Promise<{ sender: string; recipients: string[] }> {
+  const now = Date.now();
+  if (opsNotifyConfigCache && now - opsNotifyConfigCache.at < OPS_NOTIFY_CONFIG_CACHE_MS) {
+    return { sender: opsNotifyConfigCache.sender, recipients: [...opsNotifyConfigCache.recipients] };
+  }
+
+  const { data: row } = await admin
+    .from("automation_settings")
+    .select("ops_alert_sender_email, ops_alert_recipient_emails")
+    .eq("singleton", "default")
+    .maybeSingle();
+
+  const sender = (row?.ops_alert_sender_email?.trim() || ENV_ALERT_SENDER_ADDRESS).trim();
+
+  const rawRecipients = (row?.ops_alert_recipient_emails?.trim() || ENV_ALERT_EMAIL_TO).trim();
+  const recipients = rawRecipients
+    .split(/[,;]/)
+    .map((s: string) => s.trim())
+    .filter(Boolean);
+
+  const resolvedRecipients = recipients.length > 0 ? recipients : [ENV_ALERT_EMAIL_TO.trim()].filter(Boolean);
+
+  opsNotifyConfigCache = { at: now, sender, recipients: resolvedRecipients };
+  return { sender, recipients: [...resolvedRecipients] };
+}
 
 export interface AlertInput {
   source: string;
@@ -111,15 +140,28 @@ export async function createAlertAndNotify(
     return { alert_id: alertId, email_sent: false, deduped: true };
   }
 
+  const { sender: alertSender, recipients: alertRecipients } = await loadOpsNotifyMailConfig(admin);
+  if (alertRecipients.length === 0) {
+    const errMsg = "运营告警收件人未配置（数据库与环境变量均为空），跳过发邮（告警仍写入 ops_alerts）";
+    console.error("[ops-notify]", errMsg);
+    if (alertId) {
+      await admin
+        .from("ops_alerts")
+        .update({ email_send_error: errMsg })
+        .eq("id", alertId);
+    }
+    return { alert_id: alertId, email_sent: false, deduped, error: errMsg };
+  }
+
   // 取告警发件邮箱配置
   const { data: mailbox } = await admin
     .from("mailboxes")
     .select("smtp_host, smtp_port, auth_user, auth_password, email_address, display_name, is_active")
-    .eq("email_address", ALERT_SENDER_ADDRESS)
+    .eq("email_address", alertSender)
     .maybeSingle();
 
   if (!mailbox || !mailbox.smtp_host || !mailbox.smtp_port || !mailbox.auth_user || !mailbox.auth_password) {
-    const errMsg = `告警发件邮箱 ${ALERT_SENDER_ADDRESS} 未在 mailboxes 中正确配置 SMTP，跳过发邮（告警仍写入 ops_alerts）`;
+    const errMsg = `告警发件邮箱 ${alertSender} 未在 mailboxes 中正确配置 SMTP，跳过发邮（告警仍写入 ops_alerts）`;
     console.error("[ops-notify]", errMsg);
     if (alertId) {
       await admin
@@ -142,7 +184,7 @@ export async function createAlertAndNotify(
         email_address: mailbox.email_address,
         display_name: mailbox.display_name ?? "mail-guide-ai 告警",
       },
-      { to: ALERT_EMAIL_TO, subject, text },
+      { to: alertRecipients, subject, text },
     );
     if (alertId) {
       await admin

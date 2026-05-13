@@ -125,7 +125,7 @@ cd d:\Docker\project\cs-main\mail-guide-ai-main\scripts\selfhosted
 
 默认将 cron 的 `net.http_post` 目标设为 **`http://kong:8000/functions/v1/...`**（与 `db`、Kong 在同一 Docker 网络内）。若数据库不在该网络，可传 `-KongInternalUrl` 为实际可达的网关地址。
 
-脚本会注册 **4 条**定时任务（均为 `Authorization: Bearer` + `vault.decrypted_secrets.service_role_key`）：
+脚本会注册 **5 条**定时任务（均为 `Authorization: Bearer` + `vault.decrypted_secrets.service_role_key`）：
 
 | jobname | schedule | Edge Function |
 |---------|----------|----------------|
@@ -133,10 +133,11 @@ cd d:\Docker\project\cs-main\mail-guide-ai-main\scripts\selfhosted
 | `auto-draft-every-30min` | `2-59/4 * * * *` | `schedule-draft-generation` |
 | `compensating-alerts-every-30min` | `15 * * * *` | `schedule-compensating-alerts` |
 | `run-compensation-tasks-every-30min` | `14 * * * *` | `run-compensation-tasks` |
+| `retry-risk-intercept-hourly-at-45` | `45 * * * *` | `retry-risk-intercept-compensation` |
 
 **注意**：不要把 Cloud 的 cron URL 留在生产自建库中，否则定时任务会打到云端。
 
-**与 migrations 的关系**：`supabase/migrations` 里部分历史文件仍含 `*.supabase.co` 的 cron URL；**自建生产以本脚本为准**——每次执行 `Apply-VaultAndCron.ps1` 会用上表四条任务覆盖同名 job，并把 vault 中的 `service_role_key` 与 `supabase-selfhost/.env` 的 `SERVICE_ROLE_KEY` 对齐。仅 `db push`、未跑脚本时，cron 可能仍指向云端，须补跑脚本。
+**与 migrations 的关系**：`supabase/migrations` 里部分历史文件仍含 `*.supabase.co` 的 cron URL；**自建生产以本脚本为准**——每次执行 `Apply-VaultAndCron.ps1` 会用上表五条任务覆盖同名 job，并把 vault 中的 `service_role_key` 与 `supabase-selfhost/.env` 的 `SERVICE_ROLE_KEY` 对齐。仅 `db push`、未跑脚本时，cron 可能仍指向云端，须补跑脚本。
 
 ## 五步：同步 Edge Functions
 
@@ -278,8 +279,8 @@ ORDER BY jobname;
 
 | 步骤 | 命令 | 成功标志 | 常见失败 |
 |------|------|----------|----------|
-| 5.1 | `cd d:\Docker\project\cs-main\mail-guide-ai-main\scripts\selfhosted` → `.\Apply-VaultAndCron.ps1` | 脚本无报错退出；**前文「七步」**中的 SQL 能查到 **4 条** job | `db` 不在 compose 网络 → 使用 `-KongInternalUrl "http://实际可达:8000"` |
-| 5.2 | Studio → SQL 或 `psql` 执行**前文「七步」**里的 **`SELECT ... FROM cron.job WHERE jobname IN (...)`** | **4 行**，且 **`command` 片段中无 `*.supabase.co`**，应为 **`http://kong:8000/...`** 或你传入的内网 Kong | 只有 3 条或 URL 仍是 Cloud → **重新执行**本脚本（老栈升级常见） |
+| 5.1 | `cd d:\Docker\project\cs-main\mail-guide-ai-main\scripts\selfhosted` → `.\Apply-VaultAndCron.ps1` | 脚本无报错退出；**前文「七步」**中的 SQL 能查到 **5 条** job | `db` 不在 compose 网络 → 使用 `-KongInternalUrl "http://实际可达:8000"` |
+| 5.2 | Studio → SQL 或 `psql` 执行**前文「七步」**里的 **`SELECT ... FROM cron.job WHERE jobname IN (...)`** | **5 行**，且 **`command` 片段中无 `*.supabase.co`**，应为 **`http://kong:8000/...`** 或你传入的内网 Kong | 只有 3 条或 URL 仍是 Cloud → **重新执行**本脚本（老栈升级常见） |
 
 ### 6. Edge Functions 源码、`.env.functions`、重建容器
 
@@ -300,7 +301,7 @@ ORDER BY jobname;
 
 ### 8. 验收最小集（与下文「验证清单」一致）
 
-1. Studio 可登录；`SELECT jobname FROM cron.job` 含 **四条** 业务 job（见「七步」列表）。
+1. Studio 可登录；`SELECT jobname FROM cron.job` 含 **五条** 业务 job（见「七步」列表）。
 2. `curl.exe` 测 Kong 上 **`/functions/v1/hello`** 为 **200**（或你环境等价）。
 3. 前端登录无报错；在 Dify 与 `.env.functions` 齐全时，**收信 / 草稿 / 补偿** 各试一条（见产品文档）。
 
@@ -452,6 +453,8 @@ cd d:\Docker\project\cs-main\mail-guide-ai-main\scripts\selfhosted
 MAIL_TLS_CA_CERT_PATH=/home/deno/functions/certs/mail-ca.pem
 ```
 
+> 注意：自建 Edge Runtime 会把用户函数编译到沙箱目录，User Worker 可能无法直接读取 `/home/deno/functions/certs/mail-ca.pem`。当前代码已在 `_shared/mail-tls-ca.ts` 内置 163/TecSign 证书链兜底；当日志出现 `parsed 2 certificate(s) from bundled 163 mail CA` 时，说明兜底已生效。上线仍建议保留 `MAIL_TLS_CA_CERT_PATH` 配置，便于其他邮箱或后续证书轮换。
+
 2. **仅本地调试（不安全）**：开启本地测试模式  
    - 在 `supabase-selfhost/.env.functions` 增加：
 
@@ -464,9 +467,14 @@ MAIL_LOCAL_TEST_MODE=true
 #### D4. 重建 functions 容器
 
 ```powershell
+cd d:\Docker\project\cs-main\mail-guide-ai-main\scripts
+.\sync-functions-to-selfhost.ps1
+
 cd d:\Docker\project\cs-main\supabase-selfhost
 docker compose up -d --force-recreate --no-deps functions
 ```
+
+> 自建 `supabase-selfhost` 不使用 `npx supabase functions deploy`；该命令仅用于 Supabase Cloud。自建环境改函数源码、`_shared` 或 `certs` 后，执行上面的同步脚本并重建 `functions` 即可。
 
 查看日志：
 
@@ -536,21 +544,21 @@ curl.exe -s -o NUL -w "HTTP %{http_code}\n" http://localhost:8000/functions/v1/h
 | Kong / Pooler 启动报 `no such file` / `carriage return` | 执行 **`mail-guide-ai-main\scripts\fix-supabase-selfhost-crlf.ps1`** 后重建 kong / supavisor。 |
 | 池化端口冲突 5432 | 使用 **`.env`** 里 **`POOLER_PORT_PUBLISHED=54322`**（或见上文「宿主机 5432 已被占用」）。 |
 | 前端 CORS / Auth | `SITE_URL`、`SUPABASE_PUBLIC_URL` 与浏览器访问地址一致；检查 Kong 日志。 |
-| 添加邮箱报 `UnknownIssuer` | 生产：配置 `MAIL_TLS_CA_CERT_PATH` 指向邮箱 CA 证书链；本地临时调试：`MAIL_LOCAL_TEST_MODE=true` 并改用 143。修改后都要重建 `functions` 容器。 |
+| 添加邮箱报 `UnknownIssuer` | 生产：配置 `MAIL_TLS_CA_CERT_PATH` 指向邮箱 CA 证书链；163/TecSign 已有代码内置兜底，日志应出现 `parsed 2 certificate(s) from bundled 163 mail CA`。本地临时调试才使用 `MAIL_LOCAL_TEST_MODE=true` 并改用 143。修改后都要同步函数并重建 `functions` 容器。 |
 
 ## 上线前邮箱专项清单（建议执行）
 
 1. 在 `supabase-selfhost/.env.functions` **关闭**本地测试模式：`MAIL_LOCAL_TEST_MODE=false`（或删除该项）。
-2. 配置邮箱 CA 证书：`MAIL_TLS_CA_CERT_PATH=/home/deno/functions/certs/mail-ca.pem`。
-3. 将邮箱配置切回安全模式：IMAP `993` + `use_ssl=true`。
-4. 重建 functions：`docker compose up -d --force-recreate --no-deps functions`。
+2. 配置邮箱 CA 证书：`MAIL_TLS_CA_CERT_PATH=/home/deno/functions/certs/mail-ca.pem`；163/TecSign 另有 `_shared/mail-tls-ca.ts` 内置兜底。
+3. 将邮箱配置切回安全模式：IMAP `993` + `use_ssl=true`；SMTP 使用 `465` 或 `587` + TLS；密码使用邮箱客户端授权码。
+4. 同步并重建 functions：先运行 `mail-guide-ai-main\scripts\sync-functions-to-selfhost.ps1`，再运行 `docker compose up -d --force-recreate --no-deps functions`。
 5. 在工作台执行一次“测试连接 + 立即同步”。
-6. 检查 `docker compose logs functions --tail 100`，确认无 `UnknownIssuer`、无 `WorkerRequestCancelled`。
+6. 检查 `docker compose logs functions --tail 100`，确认无 `UnknownIssuer`、无 `WorkerRequestCancelled`；163 可关注 `parsed 2 certificate(s) from bundled 163 mail CA`。
 
 ## 验证清单
 
 - Studio：`http://localhost:8000` 可登录；Database / Auth 可打开。
-- **Cron**：`SELECT jobname, command FROM cron.job;` 中上述 **四条** 任务（含 `run-compensation-tasks-every-30min`）的 URL 含自建 Kong 地址，无 Cloud project URL。
+- **Cron**：`SELECT jobname, command FROM cron.job;` 中上述 **五条** 任务（含 `run-compensation-tasks-every-30min`、`retry-risk-intercept-hourly-at-45`）的 URL 含自建 Kong 地址，无 Cloud project URL。
 - **Functions**：`curl -s -o NUL -w "%{http_code}" http://localhost:8000/functions/v1/hello` 为 **200**（或按日志确认无 502）。
 - **前端**：`mail-guide-ai` 使用 `VITE_SUPABASE_URL=http://localhost:8000` 与正确 `ANON_KEY` 后可登录；浏览器无 CORS 报错（必要时检查 `SITE_URL` / `ADDITIONAL_REDIRECT_URLS`）。
 - **业务**：在 Dify 与 `.env.functions` 配置齐全后，收信 / 草稿 / 告警链路各试跑一条。

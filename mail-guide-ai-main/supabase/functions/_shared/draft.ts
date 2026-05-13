@@ -1,3 +1,5 @@
+import { sanitizeDisplayName } from "./display-name.ts";
+
 // 草稿生成共享模块：本地草稿 + Dify 长草稿
 // - 本地草稿（buildLocalDraft）：流水线兜底 / 6-24h 自动 / 人工再生成均使用
 // - Dify 草稿（callDifyDraftWorkflow）：仅 1-6h 自动调度使用（见 schedule-draft-generation）
@@ -22,6 +24,17 @@ export interface EmailRow {
   from_name?: string | null;
   ai_language?: string | null;
   ai_sentiment?: string | null;
+}
+
+type DifyDraftOutputs = Record<string, unknown>;
+
+function firstNonEmptyString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed) return trimmed;
+  }
+  return null;
 }
 
 export function formatOrderInfo(orders: OrderRow[]): string {
@@ -131,7 +144,9 @@ export function buildLocalDraft(
         .join("\n")
     : tmpl.noOrder;
 
-  const name = email.from_name ?? (lang === "zh" ? "您好" : lang === "ja" || lang === "ko" ? "" : "there");
+  const cleaned = sanitizeDisplayName(email.from_name ?? "");
+  const name = cleaned ||
+    (lang === "zh" ? "您好" : lang === "ja" || lang === "ko" ? "" : "there");
   const greetLine = `${tmpl.greetPrefix}${name}${tmpl.greetSuffix}`;
 
   const summaryLine = summary ? `${tmpl.summaryLabel}${summary}\n` : "";
@@ -153,15 +168,33 @@ export async function callDifyDraftWorkflow(
   email: EmailRow,
   orders: OrderRow[],
   guidance?: string | null,
-  previousDraft?: string | null,
 ): Promise<string> {
+  void orders;
   const difyUrl = Deno.env.get("DIFY_DRAFT_URL");
   const difyKey = Deno.env.get("DIFY_DRAFT_KEY");
   if (!difyUrl || !difyKey) {
     throw new Error("Dify 草稿工作流未配置：DIFY_DRAFT_URL/DIFY_DRAFT_KEY");
   }
 
-  const orderInfo = formatOrderInfo(orders);
+  const gatewayApiKey = Deno.env.get("DIFY_GATEWAY_API_KEY")?.trim() ?? "";
+  if (!gatewayApiKey) {
+    throw new Error("DIFY_GATEWAY_API_KEY 未配置：Dify 工作流无法调用 dify-gateway（HTTP 节点需 x-api-key）");
+  }
+
+  const depthNum = Number(Deno.env.get("MAX_EMAIL_THREAD_DEPTH") ?? Deno.env.get("max_search_depth") ?? "10");
+  const maxSearchDepth = String(Number.isFinite(depthNum) && depthNum > 0 ? Math.min(Math.floor(depthNum), 50) : 10);
+
+  const guidanceTrim = (guidance ?? "").trim();
+  const inputs = {
+    email_id: email.id,
+    gateway_api_key: gatewayApiKey,
+    max_search_depth: maxSearchDepth,
+    guidance: guidanceTrim,
+  };
+  console.log(
+    `[callDifyDraftWorkflow] input_keys=${JSON.stringify(Object.keys(inputs))} email_id=${email.id} guidance_len=${guidanceTrim.length}`,
+  );
+
   const response = await fetch(difyUrl, {
     method: "POST",
     headers: {
@@ -169,15 +202,7 @@ export async function callDifyDraftWorkflow(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      inputs: {
-        subject: email.subject ?? "",
-        body_text: email.body_text ?? "",
-        from_name: email.from_name ?? email.from_email ?? "",
-        from_email: email.from_email ?? "",
-        order_info: orderInfo,
-        guidance: guidance ?? "",
-        previous_draft: previousDraft ?? "",
-      },
+      inputs,
       response_mode: "blocking",
       user: "mail-guide-ai",
     }),
@@ -187,8 +212,21 @@ export async function callDifyDraftWorkflow(
     throw new Error(`Dify 工作流错误 ${response.status}: ${t}`);
   }
   const json = await response.json();
-  const outputs = json.data?.outputs ?? json;
-  return outputs.draft_content ?? outputs.text ?? "（Dify 未返回草稿内容）";
+  const data = json.data ?? json;
+  if (data?.status === "failed" || data?.status === "stopped") {
+    const errMsg =
+      typeof data.error === "string"
+        ? data.error
+        : (data.error && JSON.stringify(data.error)) || data.message || JSON.stringify(data);
+    throw new Error(`Dify 工作流执行失败: ${errMsg}`);
+  }
+  const outputs: DifyDraftOutputs = data?.outputs ?? {};
+  return firstNonEmptyString(
+    outputs.draft_reply,
+    outputs.completion_draft_reply,
+    outputs.draft_content,
+    outputs.text,
+  ) ?? "（Dify 未返回草稿内容）";
 }
 
 /** 写入新版本草稿；返回写入版本号 */

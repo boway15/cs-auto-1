@@ -196,13 +196,20 @@ docker compose up -d --force-recreate --no-deps functions
 #### 4.5.1 邮箱 `UnknownIssuer` 快速处理
 
 ```powershell
-# 生产推荐：配置邮箱 CA 证书链（PEM）后重建 functions
-# 1) 将证书放到：d:\Docker\project\cs-main\supabase-selfhost\volumes\functions\certs\mail-ca.pem
+# 生产推荐：配置邮箱 CA 证书链（PEM）后同步并重建 functions
+# 1) 将证书放到：
+#    d:\Docker\project\cs-main\mail-guide-ai-main\supabase\functions\certs\mail-ca.pem
+#    同步脚本会复制到 supabase-selfhost\volumes\functions\certs\mail-ca.pem
 # 2) 在 supabase-selfhost\.env.functions 添加：
 #    MAIL_TLS_CA_CERT_PATH=/home/deno/functions/certs/mail-ca.pem
+cd d:\Docker\project\cs-main\mail-guide-ai-main\scripts
+.\sync-functions-to-selfhost.ps1
+
 cd d:\Docker\project\cs-main\supabase-selfhost
 docker compose up -d --force-recreate --no-deps functions
 ```
+
+> 自建 `supabase-selfhost` 不需要 `npx supabase functions deploy`；那是 Supabase Cloud 的发布命令。163/TecSign 证书链已在 `_shared/mail-tls-ca.ts` 内置兜底，日志出现 `parsed 2 certificate(s) from bundled 163 mail CA` 表示兜底生效。
 
 ```powershell
 # 仅本地调试（不安全）：开启本地测试模式并重建 functions
@@ -231,7 +238,7 @@ docker compose up -d --force-recreate --no-deps functions
 ### 自建 Supabase（Docker）
 
 - `docker compose ps`（在 `supabase-selfhost`）主要服务 healthy
-- 已在 **`scripts/selfhosted/Apply-VaultAndCron.ps1`** 执行后，Postgres 中 **4 条** cron 齐全（与 [`docs/self-hosted-supabase.md`](./self-hosted-supabase.md)「四步续」表格一致），含 **`run-compensation-tasks-every-30min`**（每 30 分钟订单补偿，与 `order_compensation_tasks.next_run_at` 步长一致）
+- 已在 **`scripts/selfhosted/Apply-VaultAndCron.ps1`** 执行后，Postgres 中 **5 条** cron 齐全（与 [`docs/self-hosted-supabase.md`](./self-hosted-supabase.md)「四步续」表格一致），含 **`run-compensation-tasks-every-30min`**（每 30 分钟订单补偿，与 `order_compensation_tasks.next_run_at` 步长一致）及 **`retry-risk-intercept-hourly-at-45`**（每小时第 45 分自动风控拦截补偿）。
 - 校验 SQL（勿把输出中的密钥贴到公共环境）：
 
 ```sql

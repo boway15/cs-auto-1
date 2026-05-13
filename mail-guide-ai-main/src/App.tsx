@@ -14,6 +14,7 @@ import SendLogs from "./pages/SendLogs";
 import LinkedOrders from "./pages/LinkedOrders";
 import RiskLogs from "./pages/RiskLogs";
 import Alerts from "./pages/Alerts";
+import HelpCenter from "./pages/HelpCenter";
 import NotFound from "./pages/NotFound.tsx";
 
 const queryClient = new QueryClient();
@@ -35,6 +36,7 @@ const App = () => (
             <Route path="/send-logs" element={<SendLogs />} />
             <Route path="/risk-logs" element={<RiskLogs />} />
             <Route path="/alerts" element={<Alerts />} />
+            <Route path="/help" element={<HelpCenter />} />
           </Route>
           <Route path="*" element={<NotFound />} />
         </Routes>

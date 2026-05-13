@@ -8,6 +8,7 @@ import {
   queryOrderInfo,
 } from "../_shared/erp-client.ts";
 import { upsertOrderFromOmsData } from "../_shared/erp-order-sync.ts";
+import { sanitizeDisplayName } from "../_shared/display-name.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -367,7 +368,7 @@ async function analyzeWithAi(email: any): Promise<{
 
 function renderTemplate(template: string, email: any, analysis: Analysis) {
   const values: Record<string, string> = {
-    from_name: email.from_name ?? email.from_email,
+    from_name: sanitizeDisplayName(email.from_name) || (email.from_email ?? ""),
     from_email: email.from_email,
     subject: email.subject ?? "",
     order_no: analysis.order_no ?? "",

@@ -1,6 +1,8 @@
 // 极简 Deno 原生 SMTP 客户端，支持 SSL(465) / STARTTLS(587/25)
 // 仅实现：EHLO / STARTTLS / AUTH LOGIN / MAIL FROM / RCPT TO / DATA / QUIT
 
+import { getMailTlsCaCerts } from "./mail-tls-ca.ts";
+
 interface Mailbox {
   smtp_host: string;
   smtp_port: number;
@@ -11,38 +13,25 @@ interface Mailbox {
 }
 
 interface SendOpts {
-  to: string;
+  /** 单个地址，或逗号/分号分隔的多个地址（与 RCPT TO 一一对应） */
+  to: string | string[];
   subject: string;
   text: string;
   inReplyTo?: string;
   references?: string;
 }
 
-const MAIL_LOCAL_TEST_MODE = Deno.env.get("MAIL_LOCAL_TEST_MODE") === "true";
-let cachedMailTlsCaCerts: string[] | undefined | null;
-
-async function getMailTlsCaCerts(): Promise<string[] | undefined> {
-  if (cachedMailTlsCaCerts !== null && cachedMailTlsCaCerts !== undefined) {
-    return cachedMailTlsCaCerts;
+function normalizeSmtpRecipients(to: string | string[]): string[] {
+  if (Array.isArray(to)) {
+    return to.map((a) => a.trim()).filter(Boolean);
   }
-
-  const certs: string[] = [];
-  const inlinePem = Deno.env.get("MAIL_TLS_CA_CERT_PEM")?.trim();
-  if (inlinePem) certs.push(inlinePem.replace(/\\n/g, "\n"));
-
-  const rawPaths = Deno.env.get("MAIL_TLS_CA_CERT_PATH") || Deno.env.get("DENO_CERT") || "";
-  const paths = rawPaths.split(/[;,]/).map((p) => p.trim()).filter(Boolean);
-  for (const path of paths) {
-    try {
-      certs.push(await Deno.readTextFile(path));
-    } catch (e) {
-      console.error(`[smtp] failed to read CA cert path=${path}:`, e);
-    }
-  }
-
-  cachedMailTlsCaCerts = certs.length > 0 ? certs : null;
-  return cachedMailTlsCaCerts ?? undefined;
+  return to
+    .split(/[,;]/)
+    .map((a) => a.trim())
+    .filter(Boolean);
 }
+
+const MAIL_LOCAL_TEST_MODE = Deno.env.get("MAIL_LOCAL_TEST_MODE") === "true";
 
 function b64(s: string) {
   return btoa(unescape(encodeURIComponent(s)));
@@ -55,12 +44,16 @@ function encodeSubject(s: string) {
 }
 
 export async function sendMail(mb: Mailbox, opts: SendOpts): Promise<string> {
+  const recipients = normalizeSmtpRecipients(opts.to);
+  if (recipients.length === 0) {
+    throw new Error("SMTP recipients empty");
+  }
   const port = Number(mb.smtp_port);
   const useSSL = MAIL_LOCAL_TEST_MODE ? false : port === 465;
   if (MAIL_LOCAL_TEST_MODE && port === 465) {
     throw new Error("本地测试模式已开启：SMTP 465 需要 TLS，请改用 25/587 或关闭 MAIL_LOCAL_TEST_MODE。");
   }
-  const caCerts = await getMailTlsCaCerts();
+  const caCerts = await getMailTlsCaCerts("[smtp] ");
 
   let conn: Deno.Conn = useSSL
     ? await Deno.connectTls({ hostname: mb.smtp_host, port, ...(caCerts ? { caCerts } : {}) })
@@ -125,16 +118,19 @@ export async function sendMail(mb: Mailbox, opts: SendOpts): Promise<string> {
 
     await write(`MAIL FROM:<${mb.email_address}>\r\n`);
     await expect("250", "MAIL FROM");
-    await write(`RCPT TO:<${opts.to}>\r\n`);
-    await expect("250", "RCPT TO");
+    for (const addr of recipients) {
+      await write(`RCPT TO:<${addr}>\r\n`);
+      await expect("250", "RCPT TO");
+    }
     await write(`DATA\r\n`);
     await expect("354", "DATA");
 
     const messageId = `<${crypto.randomUUID()}@${mb.email_address.split("@")[1] ?? "localhost"}>`;
     const fromName = mb.display_name ? `${encodeSubject(mb.display_name)} ` : "";
+    const toHeader = recipients.map((a) => `<${a}>`).join(", ");
     const headers = [
       `From: ${fromName}<${mb.email_address}>`,
-      `To: <${opts.to}>`,
+      `To: ${toHeader}`,
       `Subject: ${encodeSubject(opts.subject)}`,
       `Message-ID: ${messageId}`,
       `MIME-Version: 1.0`,

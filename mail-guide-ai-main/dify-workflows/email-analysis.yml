@@ -174,7 +174,7 @@ workflow:
                 You are an email analysis assistant for a cross-border e-commerce customer service system. Analyze the customer email and return a JSON object.
 
                 ## Output Format
-                Return ONLY a valid JSON object with NO markdown formatting, NO code blocks. Example:
+                Return ONLY one valid JSON object: no markdown, no code fences, no chain-of-thought or XML-like tags (e.g. <thinking>, <think>), and no characters before the opening "{". Example:
                 {"intent":"after_sale","business_intent":"damaged","category":"售后","order_no":"SO20240315001","is_info_complete":false,"missing_elements":["order_no","attachment"],"summary":"客户反馈收到的商品有破损，要求退款","priority":"high","risk_level":"normal","sentiment":"frustrated","language":"zh","entities":{"order_no":null,"product_name":"Wireless Mouse"}}
 
                 ## Fields
@@ -188,7 +188,7 @@ workflow:
                     "logistics"             (物流问题 - 发货/快递/丢件/未到)
                     "other"                 (其他问题 - 含一般咨询、退款、模糊不清等)
                 - category: "售后" for after_sale/refund/cancel_order/change_address/damaged/defect/description_mismatch, "咨询" for shipping_query/logistics/general/other
-                - order_no: extract order number if present (patterns like SO20240315001, ORD-12345, 6+ digit numbers), null if not found
+                - order_no: extract order number if present. Typical shape: one or more Latin letters followed by one or more digits (lengths variable); an optional single - / _ may appear between letters and digits. Also honor labeled lines (订单号 / Order No). Use null if not found.
                 - is_info_complete: for damaged/defect/description_mismatch: true only if order_no is present AND the email has at least one attachment; for order_cancel/address_change/logistics: true if order_no is present; otherwise follow rules below
                 - missing_elements: array of what's missing. Values: "order_no", "attachment" (no file attached when quality/damage/defect/mismatch context needs evidence; use "attachment" not "image"), "image" (legacy), "product" (unclear product). Empty array if complete.
                 - summary: concise Chinese summary of the customer's issue, max 200 characters
@@ -257,27 +257,51 @@ workflow:
           code: |
             def main(llm_output: str) -> dict:
                 import json
-                try:
-                    result = json.loads(llm_output)
-                except (json.JSONDecodeError, TypeError):
-                    # Try to extract JSON from markdown code block
-                    import re
-                    match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', llm_output)
-                    if match:
+                import re
+
+                if llm_output is None:
+                    raw = ""
+                elif not isinstance(llm_output, str):
+                    raw = str(llm_output)
+                else:
+                    raw = llm_output
+
+                for pat in (
+                    r"<think>.*?</think>",
+                    r"<thinking>.*?</thinking>",
+                ):
+                    raw = re.sub(pat, "", raw, flags=re.DOTALL | re.IGNORECASE)
+                raw = raw.strip()
+
+                def try_loads(s: str) -> dict:
+                    try:
+                        x = json.loads(s)
+                        return x if isinstance(x, dict) else {}
+                    except (json.JSONDecodeError, TypeError):
+                        return {}
+
+                result = try_loads(raw)
+                if not result:
+                    m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw)
+                    if m:
+                        result = try_loads(m.group(1).strip())
+
+                if not result:
+                    i = raw.find("{")
+                    if i >= 0:
                         try:
-                            result = json.loads(match.group(1))
-                        except:
+                            obj, _ = json.JSONDecoder().raw_decode(raw[i:])
+                            result = obj if isinstance(obj, dict) else {}
+                        except (json.JSONDecodeError, TypeError, ValueError):
                             result = {}
-                    else:
-                        # Try to find {...} pattern
-                        match = re.search(r'\{[\s\S]*\}', llm_output)
-                        if match:
-                            try:
-                                result = json.loads(match.group(1))
-                            except:
-                                result = {}
-                        else:
-                            result = {}
+
+                if not result:
+                    m = re.search(r"\{[\s\S]*\}", raw)
+                    if m:
+                        result = try_loads(m.group(0))
+
+                if not isinstance(result, dict):
+                    result = {}
 
                 # Default values for missing fields
                 defaults = {
@@ -292,7 +316,7 @@ workflow:
                     "risk_level": "normal",
                     "sentiment": "neutral",
                     "language": "en",
-                    "entities": {}
+                    "entities": {},
                 }
                 for k, v in defaults.items():
                     if k not in result or result[k] is None:

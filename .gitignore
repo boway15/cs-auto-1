@@ -6,3 +6,6 @@ supabase-selfhost/
 
 # 根部署说明（本地/环境相关，勿提交公司仓）
 DEPLOY.md
+
+# 根部署说明（dify环境相关，勿提交公司仓）
+dify/

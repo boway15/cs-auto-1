@@ -52,6 +52,12 @@ export interface RiskInterceptLog {
   error_message: string | null;
   operated_by: string | null;
   idempotency_key: string | null;
+  referenced_order_no: string | null;
+  auto_compensation_eligible?: boolean;
+  compensation_attempts_done?: number;
+  next_compensation_at?: string | null;
+  /** 首次进入自动补偿 retrying 的时间；补偿任务据此判断超 4h 超时 */
+  retrying_started_at?: string | null;
   created_at: string;
   updated_at: string;
 }

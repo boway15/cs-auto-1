@@ -1,16 +1,20 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/hooks/useAuth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Switch } from "@/components/ui/switch";
 import { AlertTriangle, Eye, RefreshCw, Search } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { zhCN } from "date-fns/locale";
+import { toast } from "sonner";
 
 type RiskLog = any;
 
@@ -22,11 +26,15 @@ const statusMap: Record<string, string> = {
 };
 
 export default function RiskLogs() {
+  const { isAdmin } = useAuth();
   const [logs, setLogs] = useState<RiskLog[]>([]);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("all");
   const [search, setSearch] = useState("");
   const [detail, setDetail] = useState<RiskLog | null>(null);
+  const [riskAutoInterceptEnabled, setRiskAutoInterceptEnabled] = useState(false);
+  const [riskSettingLoaded, setRiskSettingLoaded] = useState(false);
+  const [savingRiskSetting, setSavingRiskSetting] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -40,6 +48,51 @@ export default function RiskLogs() {
   }
 
   useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    if (!isAdmin) {
+      setRiskSettingLoaded(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from("automation_settings")
+        .select("risk_auto_intercept_enabled")
+        .eq("singleton", "default")
+        .maybeSingle();
+      if (cancelled) return;
+      if (error) {
+        if (!error.message.includes("column") && error.code !== "42703") {
+          console.warn("automation_settings risk_auto_intercept_enabled:", error.message);
+        }
+        setRiskAutoInterceptEnabled(false);
+      } else {
+        setRiskAutoInterceptEnabled(!!(data as { risk_auto_intercept_enabled?: boolean } | null)?.risk_auto_intercept_enabled);
+      }
+      setRiskSettingLoaded(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin]);
+
+  async function saveRiskAutoIntercept(enabled: boolean) {
+    const prev = riskAutoInterceptEnabled;
+    setRiskAutoInterceptEnabled(enabled);
+    setSavingRiskSetting(true);
+    const { error } = await supabase
+      .from("automation_settings")
+      .update({ risk_auto_intercept_enabled: enabled } as never)
+      .eq("singleton", "default");
+    setSavingRiskSetting(false);
+    if (error) {
+      setRiskAutoInterceptEnabled(prev);
+      toast.error("保存失败：" + error.message);
+      return;
+    }
+    toast.success("自动拦截设置已保存");
+  }
 
   const filtered = logs.filter((log) => {
     if (status !== "all" && log.status !== status) return false;
@@ -58,16 +111,31 @@ export default function RiskLogs() {
 
   return (
     <div className="h-screen flex flex-col p-6 overflow-hidden">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
         <div>
           <h1 className="text-xl font-semibold flex items-center gap-2">
-            <AlertTriangle className="w-5 h-5 text-warning" /> 风控拦截记录
+            <AlertTriangle className="w-5 h-5 text-warning" /> 拦截记录
           </h1>
-          <p className="text-sm text-muted-foreground">自动/人工暂停发货动作、第三方同步结果与失败告警审计</p>
+          <p className="text-sm text-muted-foreground">自动/人工暂停发货动作、第三方同步结果与失败审计</p>
         </div>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-          <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} />刷新
-        </Button>
+        <div className="flex items-center gap-2 shrink-0">
+          {isAdmin && riskSettingLoaded && (
+            <div className="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-1.5">
+              <Label htmlFor="risk-auto-intercept" className="text-xs font-medium cursor-pointer whitespace-nowrap">
+                自动拦截与补偿
+              </Label>
+              <Switch
+                id="risk-auto-intercept"
+                checked={riskAutoInterceptEnabled}
+                disabled={savingRiskSetting}
+                onCheckedChange={(v) => void saveRiskAutoIntercept(v)}
+              />
+            </div>
+          )}
+          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+            <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} />刷新
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-4 gap-3 mb-4">
@@ -125,9 +193,23 @@ export default function RiskLogs() {
                     </div>
                     <div className="text-xs text-muted-foreground">{log.orders?.customer_email ?? "—"}</div>
                   </TableCell>
-                  <TableCell><Badge variant="outline">{log.trigger_source === "auto" ? "自动" : log.trigger_source}</Badge></TableCell>
                   <TableCell>
-                    <Badge variant={log.status === "failed" ? "destructive" : log.status === "success" ? "default" : "secondary"}>
+                    <Badge
+                      variant="outline"
+                      className="font-normal text-muted-foreground bg-muted/40 border-border/70 shadow-none"
+                    >
+                      {log.trigger_source === "auto" ? "自动" : log.trigger_source === "manual" ? "人工" : log.trigger_source === "retry" ? "补偿" : log.trigger_source}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant="outline"
+                      className={
+                        log.status === "failed"
+                          ? "font-normal border-destructive/25 bg-destructive/5 text-destructive/80 shadow-none"
+                          : "font-normal text-muted-foreground bg-muted/40 border-border/70 shadow-none"
+                      }
+                    >
                       {statusMap[log.status] ?? log.status}
                     </Badge>
                   </TableCell>

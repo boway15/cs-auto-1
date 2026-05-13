@@ -107,6 +107,14 @@ type Email = any;
 type Order = any;
 type Draft = any;
 
+/** 用于邮箱筛选：兼容 `Name <a@b.com>` 与纯地址 */
+function normalizeEmailAddress(s: string | null | undefined): string {
+  const t = String(s ?? "").trim().toLowerCase();
+  if (!t) return "";
+  const angle = t.match(/<([^>]+@[^>]+)>/);
+  return (angle ? angle[1] : t).trim();
+}
+
 export default function Workbench() {
   const navigate = useNavigate();
   const [emails, setEmails] = useState<Email[]>([]);
@@ -363,10 +371,10 @@ export default function Workbench() {
   async function generateDraft() {
     if (!selectedId) return;
     setGenerating(true);
-    // 人工二次生成草稿：默认走 Dify 工作流，由后端读取上一版草稿 + 指导意见进行二次优化
+    // 人工二次生成草稿：默认走 Dify 工作流，由后端传入「指导思想」与邮件上下文生成草稿
     // Dify 调用失败时，后端按 GENERATE_DRAFT_FALLBACK_LOCAL 决定是否回落本地
     const { data, error } = await supabase.functions.invoke("generate-draft", {
-      body: { email_id: selectedId, guidance: guidance || undefined },
+      body: { email_id: selectedId, guidance: guidance.trim() },
     });
     setGenerating(false);
     if (error) {
@@ -381,7 +389,8 @@ export default function Workbench() {
     if (model === "dify-workflow") {
       toast.success("草稿已生成（Dify 工作流）");
     } else if (model === "pipeline-local-fallback") {
-      toast.warning("Dify 调用失败，已回落本地兜底草稿");
+      const hint = data?.dify_error ? `：${String(data.dify_error).slice(0, 240)}` : "";
+      toast.warning(`Dify 调用失败，已回落本地兜底草稿${hint}`);
     } else {
       toast.success("草稿已生成（本地）");
     }
@@ -882,7 +891,14 @@ export default function Workbench() {
         return false;
       }
     }
-    if (mailboxFilter !== "all" && e.mailbox_id !== mailboxFilter) return false;
+    if (mailboxFilter !== "all") {
+      const selMb = mailboxes.find((m) => m.id === mailboxFilter);
+      const selAddr = selMb ? normalizeEmailAddress(selMb.email_address) : "";
+      const matchesMailbox =
+        e.mailbox_id === mailboxFilter ||
+        (!!selAddr && normalizeEmailAddress(e.to_email) === selAddr);
+      if (!matchesMailbox) return false;
+    }
     if (categoryFilter !== "all" && e.category !== categoryFilter) return false;
     if (associationFilter !== "all" && effectiveAssociationStatus(e) !== associationFilter) return false;
     if (intentFilter !== "all" && e.business_intent !== intentFilter) return false;

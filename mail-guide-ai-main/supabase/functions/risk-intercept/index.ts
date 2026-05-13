@@ -1,6 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { createAlertAndNotify } from "../_shared/ops-notify.ts";
 import { blockOrderByOrderId, isErpHttpConfigured } from "../_shared/erp-client.ts";
+import { assertAutoRiskInterceptAllowed } from "../_shared/auto-risk-intercept-policy.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -107,6 +108,123 @@ function buildRiskTimelineDetail(params: {
   return lines.join("\n").trim().slice(0, 8000);
 }
 
+/** 失败落库：人工立即 failed；auto 首次失败进入 retrying+补偿队列；retry 失败递增补偿次数，满 3 次 failed */
+async function persistRiskInterceptFailure(admin: any, opts: {
+  log: { id: string; retry_count?: number | null; compensation_attempts_done?: number | null; retrying_started_at?: string | null };
+  trigger_source: string;
+  email_id: string | null;
+  order_id: string | null;
+  orderNo: string;
+  action: "hold" | "release";
+  intercept_reason: string | null | undefined;
+  reason_category: string | null | undefined;
+  message: string;
+  shopifyResponse: unknown;
+  erpResponse: Record<string, unknown> | null;
+  actor: { userId: string | null };
+  emailProvidedOnly: boolean;
+}) {
+  const ts = String(opts.trigger_source);
+  const prevRetry = Number(opts.log.retry_count ?? 0);
+  const nextRetry = prevRetry + 1;
+  const patch: Record<string, unknown> = {
+    retry_count: nextRetry,
+    shopify_response: opts.shopifyResponse,
+    erp_response: opts.erpResponse,
+    error_message: opts.message,
+  };
+
+  let finalStatus: "failed" | "retrying";
+  if (ts === "manual") {
+    patch.status = "failed";
+    patch.auto_compensation_eligible = false;
+    patch.next_compensation_at = null;
+    patch.retrying_started_at = null;
+    finalStatus = "failed";
+  } else if (ts === "auto") {
+    patch.status = "retrying";
+    patch.auto_compensation_eligible = true;
+    patch.compensation_attempts_done = 0;
+    patch.next_compensation_at = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    patch.retrying_started_at = (opts.log as { retrying_started_at?: string | null }).retrying_started_at ??
+      new Date().toISOString();
+    finalStatus = "retrying";
+  } else if (ts === "retry") {
+    const done = Number(opts.log.compensation_attempts_done ?? 0) + 1;
+    const exhausted = done >= 3;
+    patch.compensation_attempts_done = done;
+    patch.status = exhausted ? "failed" : "retrying";
+    patch.auto_compensation_eligible = !exhausted;
+    patch.next_compensation_at = exhausted ? null : new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    if (exhausted) patch.retrying_started_at = null;
+    finalStatus = exhausted ? "failed" : "retrying";
+  } else {
+    patch.status = "retrying";
+    patch.auto_compensation_eligible = true;
+    patch.compensation_attempts_done = 0;
+    patch.next_compensation_at = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    patch.retrying_started_at = (opts.log as { retrying_started_at?: string | null }).retrying_started_at ??
+      new Date().toISOString();
+    finalStatus = "retrying";
+  }
+
+  await admin.from("risk_intercept_logs").update(patch).eq("id", opts.log.id);
+
+  if (finalStatus === "failed") {
+    await createAlertAndNotify(admin, {
+      source: "risk-intercept",
+      kind: "failed",
+      title: opts.emailProvidedOnly ? "风控拦截失败（邮件单号）" : "风控拦截失败",
+      message: opts.message,
+      related_email_id: opts.email_id,
+      related_order_id: opts.order_id,
+      severity: "critical",
+      metadata: { log_id: opts.log.id, retry_count: nextRetry, trigger_source: ts },
+    });
+    if (opts.email_id) await admin.from("emails").update({ priority: "urgent" }).eq("id", opts.email_id);
+  }
+
+  if (opts.email_id) {
+    const isManual = ts === "manual";
+    const failTitle = opts.action === "hold"
+      ? (isManual ? "人工暂停发货（失败）" : opts.emailProvidedOnly ? "风控拦截（失败，邮件单号）" : "风控拦截（失败）")
+      : (isManual ? "人工解除暂停发货（失败）" : "风控解除（失败）");
+    const timelineDetail = buildRiskTimelineDetail({
+      orderNo: opts.orderNo,
+      action: opts.action,
+      intercept_reason: opts.intercept_reason,
+      reason_category: opts.reason_category,
+      erpResponse: opts.erpResponse,
+      trigger_source: ts,
+      outcomeNote: `失败原因：${opts.message}`,
+      emailProvidedOnly: opts.emailProvidedOnly,
+    });
+    try {
+      await admin.from("email_processing_events").insert({
+        email_id: opts.email_id,
+        event_type: "risk_intercept_failed",
+        actor_type: opts.actor.userId ? "user" : "system",
+        actor_id: opts.actor.userId,
+        title: failTitle,
+        detail: timelineDetail || `失败原因：${opts.message}`,
+        metadata: {
+          order_id: opts.order_id,
+          order_no: opts.orderNo,
+          action: opts.action,
+          trigger_source: ts,
+          erp_response: opts.erpResponse,
+          error_message: opts.message,
+          log_id: opts.log.id,
+          status: finalStatus,
+          email_provided_only: opts.emailProvidedOnly,
+        },
+      });
+    } catch (e) {
+      console.error("risk-intercept: failure timeline insert failed:", e);
+    }
+  }
+}
+
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -158,6 +276,22 @@ async function runInterceptLinkedOrder(payload: any, actor: { userId: string | n
 
   const refNo = String(order.order_no ?? "").trim() || null;
 
+  const mergeComp = trigger_source === "manual"
+    ? {
+      auto_compensation_eligible: false,
+      compensation_attempts_done: 0,
+      next_compensation_at: null as string | null,
+      retrying_started_at: null as string | null,
+    }
+    : existing
+    ? {
+      auto_compensation_eligible: (existing as Record<string, unknown>).auto_compensation_eligible,
+      compensation_attempts_done: Number((existing as Record<string, unknown>).compensation_attempts_done ?? 0),
+      next_compensation_at: (existing as Record<string, unknown>).next_compensation_at ?? null,
+      retrying_started_at: (existing as Record<string, unknown>).retrying_started_at ?? null,
+    }
+    : {};
+
   const { data: log, error: logErr } = await admin
     .from("risk_intercept_logs")
     .upsert({
@@ -173,6 +307,7 @@ async function runInterceptLinkedOrder(payload: any, actor: { userId: string | n
       retry_count: existing ? existing.retry_count + 1 : 0,
       operated_by: actor.userId,
       idempotency_key: idempotencyKey,
+      ...mergeComp,
     }, { onConflict: "idempotency_key" })
     .select()
     .single();
@@ -213,6 +348,9 @@ async function runInterceptLinkedOrder(payload: any, actor: { userId: string | n
       erp_response: erpResponse ?? { erp: "skipped", reason: "none" },
       error_message: null,
       referenced_order_no: refNo,
+      auto_compensation_eligible: false,
+      next_compensation_at: null,
+      retrying_started_at: null,
     }).eq("id", log.id);
     await admin.from("order_hold_logs").insert({
       order_id,
@@ -270,69 +408,21 @@ async function runInterceptLinkedOrder(payload: any, actor: { userId: string | n
     return { ...log, status: "success", shopify_response: shopifyResponse, erp_response: erpResponse };
   } catch (error) {
     const message = serializeUnknown(error);
-    const retryCount = (log.retry_count ?? 0) + 1;
-    const finalStatus = retryCount <= 1 ? "retrying" : "failed";
-    await admin.from("risk_intercept_logs").update({
-      status: finalStatus,
-      retry_count: retryCount,
-      shopify_response: shopifyResponse,
-      erp_response: erpResponse,
-      error_message: message,
-    }).eq("id", log.id);
-    if (finalStatus === "failed") {
-      await createAlertAndNotify(admin, {
-        source: "risk-intercept",
-        kind: "failed",
-        title: "风控拦截失败",
-        message,
-        related_email_id: email_id ?? null,
-        related_order_id: order_id,
-        severity: "critical",
-        metadata: { log_id: log.id, retry_count: retryCount },
-      });
-      if (email_id) await admin.from("emails").update({ priority: "urgent" }).eq("id", email_id);
-    }
-    if (email_id) {
-      const orderNo = String(order.order_no ?? "");
-      const isManual = trigger_source === "manual";
-      const failTitle =
-        action === "hold"
-          ? (isManual ? "人工暂停发货（失败）" : "风控拦截（失败）")
-          : (isManual ? "人工解除暂停发货（失败）" : "风控解除（失败）");
-      const timelineDetail = buildRiskTimelineDetail({
-        orderNo,
-        action,
-        intercept_reason,
-        reason_category,
-        erpResponse: erpResponse ?? null,
-        trigger_source,
-        outcomeNote: `失败原因：${message}`,
-        emailProvidedOnly: false,
-      });
-      try {
-        await admin.from("email_processing_events").insert({
-          email_id,
-          event_type: "risk_intercept_failed",
-          actor_type: actor.userId ? "user" : "system",
-          actor_id: actor.userId,
-          title: failTitle,
-          detail: timelineDetail || `失败原因：${message}`,
-          metadata: {
-            order_id,
-            order_no: orderNo,
-            action,
-            trigger_source,
-            erp_response: erpResponse,
-            error_message: message,
-            log_id: log.id,
-            status: finalStatus,
-            email_provided_only: false,
-          },
-        });
-      } catch (e) {
-        console.error("risk-intercept: failure timeline insert failed:", e);
-      }
-    }
+    await persistRiskInterceptFailure(admin, {
+      log,
+      trigger_source,
+      email_id: email_id ?? null,
+      order_id,
+      orderNo: String(order.order_no ?? ""),
+      action,
+      intercept_reason,
+      reason_category,
+      message,
+      shopifyResponse,
+      erpResponse,
+      actor,
+      emailProvidedOnly: false,
+    });
     throw error;
   }
 }
@@ -469,6 +559,21 @@ async function runInterceptEmailProvidedOrderNo(payload: any, actor: { userId: s
       retry_count: existing ? existing.retry_count + 1 : 0,
       operated_by: actor.userId,
       idempotency_key: idempotencyKey,
+      ...(trigger_source === "manual"
+        ? {
+          auto_compensation_eligible: false,
+          compensation_attempts_done: 0,
+          next_compensation_at: null,
+          retrying_started_at: null,
+        }
+        : existing
+        ? {
+          auto_compensation_eligible: (existing as Record<string, unknown>).auto_compensation_eligible,
+          compensation_attempts_done: Number((existing as Record<string, unknown>).compensation_attempts_done ?? 0),
+          next_compensation_at: (existing as Record<string, unknown>).next_compensation_at ?? null,
+          retrying_started_at: (existing as Record<string, unknown>).retrying_started_at ?? null,
+        }
+        : {}),
     }, { onConflict: "idempotency_key" })
     .select()
     .single();
@@ -497,6 +602,9 @@ async function runInterceptEmailProvidedOrderNo(payload: any, actor: { userId: s
       erp_response: erpResponse ?? { erp: "skipped", reason: "none" },
       error_message: null,
       referenced_order_no: order_no,
+      auto_compensation_eligible: false,
+      next_compensation_at: null,
+      retrying_started_at: null,
     }).eq("id", log.id);
 
     await admin.from("emails").update({
@@ -559,64 +667,21 @@ async function runInterceptEmailProvidedOrderNo(payload: any, actor: { userId: s
     };
   } catch (error) {
     const message = serializeUnknown(error);
-    const retryCount = (log.retry_count ?? 0) + 1;
-    const finalStatus = retryCount <= 1 ? "retrying" : "failed";
-    await admin.from("risk_intercept_logs").update({
-      status: finalStatus,
-      retry_count: retryCount,
-      shopify_response: shopifyResponse,
-      erp_response: erpResponse,
-      error_message: message,
-    }).eq("id", log.id);
-    if (finalStatus === "failed") {
-      await createAlertAndNotify(admin, {
-        source: "risk-intercept",
-        kind: "failed",
-        title: "风控拦截失败（邮件单号）",
-        message,
-        related_email_id: email_id,
-        related_order_id: null,
-        severity: "critical",
-        metadata: { log_id: log.id, retry_count: retryCount, referenced_order_no: order_no },
-      });
-      await admin.from("emails").update({ priority: "urgent" }).eq("id", email_id);
-    }
-    const isManual = trigger_source === "manual";
-    const failTitle = isManual ? "人工暂停发货（失败，邮件单号）" : "风控拦截（失败，邮件单号）";
-    const timelineDetail = buildRiskTimelineDetail({
+    await persistRiskInterceptFailure(admin, {
+      log,
+      trigger_source,
+      email_id,
+      order_id: null,
       orderNo: order_no,
       action: "hold",
       intercept_reason,
       reason_category,
-      erpResponse: erpResponse ?? null,
-      trigger_source,
-      outcomeNote: `失败原因：${message}`,
+      message,
+      shopifyResponse,
+      erpResponse,
+      actor,
       emailProvidedOnly: true,
     });
-    try {
-      await admin.from("email_processing_events").insert({
-        email_id,
-        event_type: "risk_intercept_failed",
-        actor_type: actor.userId ? "user" : "system",
-        actor_id: actor.userId,
-        title: failTitle,
-        detail: timelineDetail || `失败原因：${message}`,
-        metadata: {
-          order_id: null,
-          order_no,
-          referenced_order_no: order_no,
-          action: "hold",
-          trigger_source,
-          erp_response: erpResponse,
-          error_message: message,
-          log_id: log.id,
-          status: finalStatus,
-          email_provided_only: true,
-        },
-      });
-    } catch (e) {
-      console.error("risk-intercept: failure timeline insert failed:", e);
-    }
     throw error;
   }
 }
@@ -654,6 +719,28 @@ Deno.serve(async (req) => {
   try {
     const actor = await getActor(req, admin);
     const payload = await req.json();
+    const trigger_source = String(payload.trigger_source ?? "manual");
+
+    if (trigger_source === "retry" && !actor.isService) {
+      return new Response(JSON.stringify({ error: "补偿调用仅允许服务密钥" }), {
+        status: 403,
+        headers: corsJsonHeaders,
+      });
+    }
+
+    const emailIdRaw = payload.email_id != null ? String(payload.email_id).trim() : "";
+    const eligibleEmailId = emailIdRaw && isUuid(emailIdRaw) ? emailIdRaw : null;
+
+    if (trigger_source === "auto" || trigger_source === "retry") {
+      const pol = await assertAutoRiskInterceptAllowed(admin, eligibleEmailId);
+      if (!pol.ok) {
+        return new Response(JSON.stringify({ ok: true, skipped: true, reason: pol.reason }), {
+          status: 200,
+          headers: corsJsonHeaders,
+        });
+      }
+    }
+
     const result = await runIntercept(payload, actor, admin);
     return new Response(JSON.stringify({ ok: true, result }), {
       headers: corsJsonHeaders,

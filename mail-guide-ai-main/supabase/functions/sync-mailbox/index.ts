@@ -11,6 +11,8 @@ import {
   parseFullMime,
   type MimeAttachmentPart,
 } from "../_shared/mime-parse.ts";
+import { getMailTlsCaCerts } from "../_shared/mail-tls-ca.ts";
+import { sanitizeDisplayName } from "../_shared/display-name.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -34,35 +36,8 @@ function parseEnvPositiveInt(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-let cachedMailTlsCaCerts: string[] | undefined | null;
-
-async function getMailTlsCaCerts(): Promise<string[] | undefined> {
-  if (cachedMailTlsCaCerts !== null && cachedMailTlsCaCerts !== undefined) {
-    return cachedMailTlsCaCerts;
-  }
-
-  const certs: string[] = [];
-  const inlinePem = Deno.env.get("MAIL_TLS_CA_CERT_PEM")?.trim();
-  if (inlinePem) {
-    certs.push(inlinePem.replace(/\\n/g, "\n"));
-  }
-
-  const rawPaths = Deno.env.get("MAIL_TLS_CA_CERT_PATH") || Deno.env.get("DENO_CERT") || "";
-  const paths = rawPaths.split(/[;,]/).map((p) => p.trim()).filter(Boolean);
-  for (const path of paths) {
-    try {
-      certs.push(await Deno.readTextFile(path));
-    } catch (e) {
-      console.error(`[sync-mailbox] failed to read CA cert path=${path}:`, e);
-    }
-  }
-
-  cachedMailTlsCaCerts = certs.length > 0 ? certs : null;
-  return cachedMailTlsCaCerts ?? undefined;
-}
-
 async function connectImapTls(host: string, port: number, signal: AbortSignal): Promise<Deno.TlsConn> {
-  const caCerts = await getMailTlsCaCerts();
+  const caCerts = await getMailTlsCaCerts("[sync-mailbox] ");
   return await Deno.connectTls({
     hostname: host,
     port,
@@ -362,7 +337,10 @@ function decodeRfc2047(encoded: string | null): string | null {
 function parseAddress(value: string | null): { name: string | null; address: string | null } {
   if (!value) return { name: null, address: null };
   const angle = value.match(/^(.*?)<([^>]+)>/);
-  if (angle) return { name: angle[1].replace(/^"|"$/g, "").trim() || null, address: angle[2].trim() };
+  if (angle) {
+    const name = sanitizeDisplayName(angle[1]) || null;
+    return { name, address: angle[2].trim() };
+  }
   const plain = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] ?? value.trim();
   return { name: null, address: plain };
 }

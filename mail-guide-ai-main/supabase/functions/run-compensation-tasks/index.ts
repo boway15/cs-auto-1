@@ -6,6 +6,7 @@ import {
   queryOrderInfo,
 } from "../_shared/erp-client.ts";
 import { upsertOrderFromOmsData } from "../_shared/erp-order-sync.ts";
+import { assertAutoRiskInterceptAllowed } from "../_shared/auto-risk-intercept-policy.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -109,32 +110,43 @@ Deno.serve(async (req) => {
           emailRow?.business_intent === "order_cancel" ||
           emailRow?.business_intent === "address_change";
         if (mustIntercept) {
-          try {
-            const interceptResp = await fetch(`${SUPABASE_URL}/functions/v1/risk-intercept`, {
-              method: "POST",
-              headers: { Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" },
-              body: JSON.stringify({
-                email_id: task.email_id,
-                order_id: order.id,
-                action: "hold",
-                intercept_reason: "补偿任务关联成功后自动拦截",
-                reason_category: emailRow.business_intent,
-                trigger_source: "auto",
-              }),
+          const pol = await assertAutoRiskInterceptAllowed(admin, task.email_id);
+          if (!pol.ok) {
+            await admin.from("email_processing_events").insert({
+              email_id: task.email_id,
+              event_type: "risk_intercept_skipped_policy",
+              title: "补偿关联后自动拦截已跳过（策略）",
+              detail: pol.reason,
+              metadata: { order_id: order.id, reason: pol.reason },
             });
-            if (!interceptResp.ok) {
-              const errText = await interceptResp.text();
-              console.error("compensation auto-intercept failed:", errText);
-              await admin.from("email_processing_events").insert({
-                email_id: task.email_id,
-                event_type: "risk_intercept_failed",
-                title: "补偿关联后自动拦截失败",
-                detail: errText,
-                metadata: { order_id: order.id },
+          } else {
+            try {
+              const interceptResp = await fetch(`${SUPABASE_URL}/functions/v1/risk-intercept`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  email_id: task.email_id,
+                  order_id: order.id,
+                  action: "hold",
+                  intercept_reason: "补偿任务关联成功后自动拦截",
+                  reason_category: emailRow.business_intent,
+                  trigger_source: "auto",
+                }),
               });
+              if (!interceptResp.ok) {
+                const errText = await interceptResp.text();
+                console.error("compensation auto-intercept failed:", errText);
+                await admin.from("email_processing_events").insert({
+                  email_id: task.email_id,
+                  event_type: "risk_intercept_failed",
+                  title: "补偿关联后自动拦截失败",
+                  detail: errText,
+                  metadata: { order_id: order.id },
+                });
+              }
+            } catch (e) {
+              console.error("compensation auto-intercept error:", e);
             }
-          } catch (e) {
-            console.error("compensation auto-intercept error:", e);
           }
         }
 

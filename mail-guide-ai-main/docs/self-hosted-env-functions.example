@@ -6,6 +6,9 @@
 # --- Dify（与云端 npx supabase functions secrets set 对应）---
 # DIFY_ANALYZE_*：必须对应 Dify 应用「独立站智能客服-邮件智能分析」→ API 访问 → Workflow 密钥（app-xxxx），切勿填成草稿应用的 Key
 DIFY_GATEWAY_API_KEY=
+# 供 Dify 草稿工作流 HTTP 节点回调自建 Supabase Edge 网关。
+# Windows Docker 下通常用 host.docker.internal；生产请改为可被 Dify API 容器访问的 HTTPS/Kong 地址。
+DIFY_GATEWAY_URL=http://host.docker.internal:8000/functions/v1/dify-gateway
 DIFY_ANALYZE_URL=
 DIFY_ANALYZE_KEY=
 # DIFY_DRAFT_*：对应「独立站智能客服-邮件草稿生成」等工作流的密钥，与 ANALYZE 不可混用
@@ -21,6 +24,13 @@ LOVABLE_API_KEY=
 # sync-mailbox：完整 RFC822 体积上限（字节）。含附件邮件常 >500KB，过小会导致从不拉 MIME、附件无法入库。
 # MAIL_SYNC_FULL_BODY_MAX_BYTES=5000000
 # MAIL_SYNC_FULL_BODY_WITH_ATTACH_MAX_BYTES=25000000
+
+# 邮箱 IMAP/SMTP TLS：遇到 UnknownIssuer 时配置邮箱 CA 证书链。
+# 自建 Edge Runtime 的 User Worker 可能读不到挂载证书文件，代码已内置 163/TecSign 证书链兜底；
+# 其他邮箱或后续证书轮换时，仍建议把 PEM 放到 supabase/functions/certs/mail-ca.pem 并同步到自建环境。
+# MAIL_TLS_CA_CERT_PATH=/home/deno/functions/certs/mail-ca.pem
+# MAIL_TLS_CA_CERT_PEM=
+# MAIL_LOCAL_TEST_MODE=false
 
 # get-email-context 等
 # API_KEY=

@@ -20,7 +20,8 @@
 | Shopify | **不继续**：`risk-intercept` **不调用** Shopify API，仅更新本地 `orders` hold；与 ERP 的拦截以 `docs/erp-api-requirements.md` 为准。 |
 | 订单补偿任务 | **最多重试 10 次**；**每 30 分钟**调度一次重试（`next_run_at` 步长 30 分钟）。 |
 | 运营告警页文案 | 告警 `resolved` 状态对用户展示为 **「已处理」**（与邮件 `replied` 语义区分）。 |
-|| 订单解除拦截 | **由 ERP 端操作**，本系统不向 ERP 发送 release 指令。isk-intercept release 仅将本地 orders.shipping_hold 置回 alse 以同步前端展示状态，不调用任何外部接口。运营人员须在 ERP 后台手动解除拦截。 |
+| 订单解除拦截 | **由 ERP 端操作**，本系统不向 ERP 发送 release 指令。`risk-intercept` release 仅将本地 `orders.shipping_hold` 置回 `false` 以同步前端展示状态，不调用任何外部接口。运营人员须在 ERP 后台手动解除拦截。 |
+| **自动风控拦截** | 总开关由前端 **拦截记录**页（管理员）配置 `automation_settings.risk_auto_intercept_enabled`；准入、补偿与人工例外见 **§6.4**；上线运维与 cron 另见仓库根目录 [`docs/production-go-live.md`](../../docs/production-go-live.md) **§5.5**。 |
 | **发布环境** | **生产为自建 Supabase（Docker）**；**业务逻辑仍在 Supabase Edge Functions（Deno）** 中运行，与 Cloud 项目共用同一套 `mail-guide-ai-main/supabase/functions/` 源码，仅部署与网关 URL 不同。cron URL 须指向自建 Kong 的 `/functions/v1/...`，**不得**固定写 `*.supabase.co`（详见 `docs/self-hosted-supabase.md`）。 |
 
 ---
@@ -137,6 +138,45 @@
 
 按现有分类、优先级、SLA 桶等继续处理；自动回复仅在产品定义的分支内启用。
 
+### 6.4 自动风控拦截（开关、准入、补偿与人工例外）
+
+> **目的**：新绑定邮箱、同步大量历史邮件时，降低**批量误拦截**；与 `risk-intercept`、`process-email`、`risk_intercept_logs` 及定时任务实现**逐项对齐**。运维侧一页说明见仓库根目录 [`docs/production-go-live.md`](../../docs/production-go-live.md) **§5.5**。
+
+#### 6.4.1 总开关（仅约束自动）
+
+| 项 | 约定 |
+|----|------|
+| **开** | 允许在邮件处理链路中执行**自动拦截**，失败时可进入**自动补偿**调度。 |
+| **关** | **不**执行自动拦截，**不**继续执行自动补偿。 |
+| **人工** | **不受开关约束**：工作台人工暂停/恢复发货（调用 `risk-intercept`）**始终可用**。 |
+
+（开关配置形态以实现为准，例如 automation 配置表或 Functions secrets；需与 §0 其它开关的运维方式协调。）
+
+#### 6.4.2 自动尝试节奏与调度
+
+| 项 | 约定 |
+|----|------|
+| **收信** | 开关为开且满足 **6.4.3** 时，对同一封邮件在 `process-email` 链路中**最多自动尝试 1 次**拦截。 |
+| **补偿** | 若该次未成功（进入待补偿/重试类状态），再**最多 3 次**自动补偿；**同一 `risk_intercept_logs`（或等价记录）两次补偿之间间隔不少于 1 小时**（由 `next_compensation_at` 或等价字段控制）。 |
+| **终态** | **收信 1 次 + 补偿 3 次**仍不成功 → **拦截失败**（与 `risk_intercept_logs.status` 等对齐）。 |
+| **成功** | 任意一次成功 → 成功终态，不再排补偿。 |
+| **Cron** | 补偿扫描在**每小时的第 45 分钟**执行（如 09:45、10:45）；每轮只处理「已到点」且未用尽次数的记录。 |
+
+#### 6.4.3 自动拦截准入（不满足则不拦、不排补偿）
+
+1. **未关联本地订单**且**工作流判定未提供订单号** → **不自动拦截**（与 §6.1「未提供订单号不调用拦截」一致方向；未关联但**已**提供单号时，可按实现走凭邮件单号等路径）。  
+2. **发件时间**：以邮件头发送时间为准，相对**当前执行时刻**已超过 **24 小时** → **不自动拦截**、**不**进入自动补偿。  
+   - **发件时间不可解析**：须在实现中约定一种**保守**策略（建议倾向不自动拦截），并在迁移/代码注释中写死。
+
+#### 6.4.4 人工不受限
+
+- **开关**、**24 小时发件时间**均**不**限制人工在工作台发起的拦截/解除。
+
+#### 6.4.5 开关关闭时的终态
+
+- 开关关闭后：**不再**跑满剩余自动补偿。  
+- 对已进入待补偿/重试中的自动拦截记录，须在合理时限内将终态更新为**拦截失败**（或等价），并建议用元数据区分「用尽失败」与「策略关停」，便于审计。
+
 ---
 
 ## 7. 内部预警（有单号未关联）
@@ -182,7 +222,8 @@
 6. **草稿管线**：消费 `ai_language` / `ai_sentiment`。  
 7. **Dify DSL**：`email-analysis.yml` 输出与后端字段对齐。  
 8. **补偿任务**：`max_retries` 默认 **10**，重试间隔 **30 分钟**（迁移 `20260510120000_compensation_ten_retries_thirty_min.sql` + Edge）。  
-9. **风控**：**不调用 Shopify**；ERP 直连按 `erp-api-requirements.md` 迭代。
+9. **风控**：**不调用 Shopify**；ERP 直连按 `erp-api-requirements.md` 迭代。  
+10. **自动风控拦截**：§6.4 开关、准入（无单号且未关联 / 超 24h 发件时间）、收信 1 次 + 补偿 3 次、每小时 `:45` cron、开关关终态；人工始终可拦。
 
 ---
 
@@ -203,25 +244,27 @@
 - [ ] 告警页 **resolved** 展示为 **已处理**。  
 - [ ] **自建**环境 cron URL 指向自建网关，无错误 `*.supabase.co`。
 - [ ] release 操作：仅本地解锁（orders.shipping_hold = false），ERP 侧由运营在 ERP 后台手动操作，不校验 ERP 响应。
+- [ ] **自动风控拦截（§6.4）**：开关关 → 无自动拦、无补偿；开关开 → 无单号且未关联 / 发件超 24h **不**自动拦；收信失败后最多 3 次补偿、间隔 ≥1h；用尽失败终态；补偿 cron 为**每小时 `:45`**；开关关闭后进行中记录收敛为拦截失败；**人工**不受开关与 24h 限制。
 
 ---
 
 ## 12. 文档维护
 
-- **关联文档**：`docs/erp-order-api.md`（订单/ERP）、`docs/self-hosted-supabase.md`（自建发布）、`dify-workflows/README.md`（Dify 部署与密钥）。  
-- 规则变更时请同步更新 **§0～§9** 与验收表。
+- **关联文档**：`docs/erp-order-api.md`（订单/ERP）、`docs/self-hosted-supabase.md`（自建发布）、`dify-workflows/README.md`（Dify 部署与密钥）、仓库根目录 **`docs/production-go-live.md` §5.5**（自动风控拦截运维与上线核对）。  
+- 规则变更时请同步更新 **§0～§6.4、§7～§9** 与验收表。
 
 ---
 
-*版本：2026-05-10 合并产品确认与文档冲突修订。*
+*版本：2026-05-10 合并产品确认与文档冲突修订；2026-05-13 增补 §6.4 自动风控拦截与根目录 `docs/production-go-live.md` §5.5 交叉引用。*
 
 ---
 
 ## 13. 实现说明（仓库）
 
-- **迁移**：`20260509120000_emails_ai_language_sentiment.sql`、`20260509120100_cron_schedule_compensating_alerts.sql`、`20260509120200_idx_emails_compensating_received.sql`、**`20260510120000_compensation_ten_retries_thirty_min.sql`**
-- **Edge**：`process-email`、`schedule-compensating-alerts`（2h～72h 窗口）、`run-compensation-tasks`（30min 步长、10 次）、`risk-intercept`（不调 Shopify）、`_shared/draft.ts`、`generate-draft` / `schedule-draft-generation`
+- **迁移**：`20260509120000_emails_ai_language_sentiment.sql`、`20260509120100_cron_schedule_compensating_alerts.sql`、`20260509120200_idx_emails_compensating_received.sql`、**`20260510120000_compensation_ten_retries_thirty_min.sql`**、**`20260513120000_risk_auto_intercept_compensation.sql`**
+- **Edge**：`process-email`、`schedule-compensating-alerts`（2h～72h 窗口）、`run-compensation-tasks`（30min 步长、10 次）、`risk-intercept`（不调 Shopify）、**`retry-risk-intercept-compensation`**、`_shared/auto-risk-intercept-policy.ts`、**`RiskLogs`（自动拦截开关）**、`_shared/draft.ts`、`generate-draft` / `schedule-draft-generation`
 - **模板**：可在 `reply_templates` 中增加 `trigger_type = risk_missing_order_no`（可选）
 - **Secrets**：`AUTO_REPLY_*`、`DIFY_*`、`ALERT_*` 使用 **Supabase Functions secrets**（自建对应 `supabase-selfhost/.env.functions`）
 - **上线核对**：[`scripts/verify-customer-automation.sql`](../scripts/verify-customer-automation.sql)（若存在）在 SQL Editor 中执行
-- **自建 cron（权威）**：执行 [`scripts/selfhosted/Apply-VaultAndCron.ps1`](../scripts/selfhosted/Apply-VaultAndCron.ps1) 写入 **4 条** `pg_cron`（含 **`run-compensation-tasks-every-30min`**）。`supabase/migrations` 内若仍有 `*.supabase.co` 的 cron 片段，**以该脚本覆盖结果为准**；详见 `docs/self-hosted-supabase.md`「四步续」。
+- **自建 cron（权威）**：执行 [`scripts/selfhosted/Apply-VaultAndCron.ps1`](../scripts/selfhosted/Apply-VaultAndCron.ps1) 写入 **5 条** `pg_cron`（含 **`run-compensation-tasks-every-30min`**、**`retry-risk-intercept-hourly-at-45`**）。`supabase/migrations` 内若仍有 `*.supabase.co` 的 cron 片段，**以该脚本覆盖结果为准**；详见 `docs/self-hosted-supabase.md`「四步续」。
+- **自动风控拦截**：`process-email`（准入与收信 1 次）、`risk-intercept`（幂等与状态机）、补偿 Edge + **§6.4** 字段（如 `next_compensation_at`、补偿剩余次数）；与 [`docs/production-go-live.md`](../../docs/production-go-live.md) **§5.5** 同步验收。

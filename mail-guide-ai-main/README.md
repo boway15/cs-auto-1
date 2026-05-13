@@ -1,6 +1,6 @@
 # mail-guide-ai（当前运行现状）
 
-跨境电商客服邮件工作台，核心链路为：收信同步 -> AI 分析 -> 订单关联/推荐 -> 草稿生成 -> 人工发送 -> 风控记录。
+跨境电商客服邮件工作台，核心链路为：收信同步 -> AI 分析 -> 订单关联/推荐 -> 草稿生成 -> 人工发送 -> 拦截记录。
 
 ## 当前已落地架构
 
@@ -19,6 +19,7 @@
 - `dify-workflows/`：Dify DSL 与对接
 - `docs/startup-commands.md`：命令速查
 - `docs/self-hosted-supabase.md`：自建 Supabase 全流程与排障
+- `docs/customer-service-automation-spec.md`：客服自动化与分流口径；**§6.4 自动风控拦截**（与仓库根目录 `docs/production-go-live.md` **§5.5** 对照）
 
 ## 快速开始
 
@@ -67,11 +68,14 @@ npx supabase link --project-ref elchuqvftkhszbkwgfjp
    - 若报 `UnknownIssuer`，通过 `.env.functions` 配置：
      - `MAIL_TLS_CA_CERT_PATH`
      - 或 `MAIL_TLS_CA_CERT_PEM`
+   - 自建环境中，163/TecSign 证书链已在 `_shared/mail-tls-ca.ts` 内置兜底；日志出现 `parsed 2 certificate(s) from bundled 163 mail CA` 表示已生效。
 
 2. 本地测试模式（仅调试，不安全）
    - `.env.functions` 设置 `MAIL_LOCAL_TEST_MODE=true`
    - 会强制明文连接（建议 IMAP 143，SMTP 25/587）
    - 不要用于生产
+
+自建 `supabase-selfhost` 修改函数、`_shared` 或 `certs` 后，执行 `scripts/sync-functions-to-selfhost.ps1` 并重建 `functions` 容器；不需要 `npx supabase functions deploy`（该命令仅用于 Supabase Cloud）。
 
 以上说明与步骤见：
 

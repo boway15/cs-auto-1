@@ -138,4 +138,5 @@ npx supabase functions deploy get-order-by-email --no-verify-jwt
 - **Dify 打不开**：确认 `docker-compose.cs.yml` 已启动，并访问 `8090` 不是 `8081`
 - **Edge Function 调 Dify 超时**：检查 ngrok 是否在线，URL 是否与 secrets 一致
 - **草稿生成失败**：确认 `DIFY_DRAFT_*` 或 `LOVABLE_API_KEY` 至少有一套可用
+- **Dify「获取邮件上下文」曾报 `url is required` / `InvalidURLError`**：`NewEmailDraft` 已改为由 Edge `callDifyDraftWorkflow` **随请求传入** `gateway_url`、`gateway_api_key`、`max_search_depth`（开始变量），不再依赖 Dify 应用环境变量。请重新导入 DSL；并确保 Functions 已配置 **`DIFY_GATEWAY_API_KEY`**，且 **`DIFY_GATEWAY_URL` 或 `SUPABASE_URL`** 至少其一可用（未显式配置 URL 时将自动拼装 `{SUPABASE_URL}/functions/v1/dify-gateway`）。
 - **dify-gateway 返回未授权**：确认 `DIFY_GATEWAY_API_KEY` 已设置且请求带 `x-api-key`

@@ -1,14 +1,27 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Search, RefreshCw, BellRing } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Search, RefreshCw, BellRing, Settings } from "lucide-react";
 import { toast } from "sonner";
+
+/** 发件人选「未在库中指定」时写库为 NULL，发信端读环境变量 ALERT_SENDER_ADDRESS */
+const OPS_ALERT_SENDER_USE_ENV = "__use_env__";
 
 type AlertRow = {
   id: string;
@@ -40,11 +53,102 @@ const STATUS_CLS: Record<string, string> = {
 };
 
 export default function Alerts() {
+  const { isAdmin } = useAuth();
   const [rows, setRows] = useState<AlertRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [severity, setSeverity] = useState<string>("all");
   const [status, setStatus] = useState<string>("open");
+
+  const [configOpen, setConfigOpen] = useState(false);
+  const [configLoading, setConfigLoading] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [mailboxOptions, setMailboxOptions] = useState<{ email_address: string; display_name: string | null }[]>([]);
+  const [senderSelect, setSenderSelect] = useState<string>(OPS_ALERT_SENDER_USE_ENV);
+  const [recipientsInput, setRecipientsInput] = useState("");
+  /** null = 尚未拉取；对象内 null 表示库中为 NULL（走环境变量） */
+  const [opsSummary, setOpsSummary] = useState<{ sender: string | null; recipients: string | null } | null>(null);
+
+  async function loadOpsAlertSummary() {
+    if (!isAdmin) return;
+    const { data, error } = await supabase
+      .from("automation_settings")
+      .select("ops_alert_sender_email, ops_alert_recipient_emails")
+      .eq("singleton", "default")
+      .maybeSingle();
+    if (error) {
+      if (error.message.includes("column") || error.code === "42703") {
+        setOpsSummary(null);
+        return;
+      }
+      console.warn("load ops alert summary:", error.message);
+      setOpsSummary(null);
+      return;
+    }
+    setOpsSummary({
+      sender: data?.ops_alert_sender_email ?? null,
+      recipients: data?.ops_alert_recipient_emails ?? null,
+    });
+  }
+
+  async function openConfigDialog() {
+    setConfigOpen(true);
+    setConfigLoading(true);
+    try {
+      const [settingsRes, mailRes] = await Promise.all([
+        supabase
+          .from("automation_settings")
+          .select("ops_alert_sender_email, ops_alert_recipient_emails")
+          .eq("singleton", "default")
+          .maybeSingle(),
+        supabase.from("mailboxes").select("email_address, display_name").order("created_at", { ascending: false }),
+      ]);
+      if (settingsRes.error) {
+        toast.error("读取配置失败：" + settingsRes.error.message);
+        setConfigOpen(false);
+        return;
+      }
+      if (mailRes.error) {
+        toast.error("读取邮箱列表失败：" + mailRes.error.message);
+      }
+      setMailboxOptions((mailRes.data ?? []) as { email_address: string; display_name: string | null }[]);
+      const s = settingsRes.data;
+      setSenderSelect(s?.ops_alert_sender_email?.trim() ? s.ops_alert_sender_email.trim() : OPS_ALERT_SENDER_USE_ENV);
+      setRecipientsInput(s?.ops_alert_recipient_emails ?? "");
+    } finally {
+      setConfigLoading(false);
+    }
+  }
+
+  async function saveOpsAlertConfig() {
+    const senderEmail = senderSelect === OPS_ALERT_SENDER_USE_ENV ? null : senderSelect.trim();
+    if (senderEmail) {
+      const ok = mailboxOptions.some((m) => m.email_address === senderEmail);
+      if (!ok) {
+        toast.error("发件邮箱须为已绑定的邮箱，请从下拉中选择");
+        return;
+      }
+    }
+    const recRaw = recipientsInput.trim();
+    const recipientsDb = recRaw.length > 0 ? recipientsInput : null;
+
+    setSavingConfig(true);
+    const { error } = await supabase
+      .from("automation_settings")
+      .update({
+        ops_alert_sender_email: senderEmail,
+        ops_alert_recipient_emails: recipientsDb,
+      } as never)
+      .eq("singleton", "default");
+    setSavingConfig(false);
+    if (error) {
+      toast.error("保存失败：" + error.message);
+      return;
+    }
+    toast.success("告警通知配置已保存（Edge 约数秒内生效）");
+    setConfigOpen(false);
+    void loadOpsAlertSummary();
+  }
 
   async function load() {
     setLoading(true);
@@ -64,6 +168,10 @@ export default function Alerts() {
   useEffect(() => {
     load();
   }, []);
+
+  useEffect(() => {
+    void loadOpsAlertSummary();
+  }, [isAdmin]);
 
   async function updateStatus(row: AlertRow, targetStatus: "acknowledged" | "resolved") {
     if (row.status === targetStatus) return;
@@ -98,14 +206,96 @@ export default function Alerts() {
 
   return (
     <div className="h-screen flex flex-col">
-      <div className="border-b p-3 flex items-center gap-2">
-        <BellRing className="w-4 h-4" />
-        <div className="font-semibold text-sm flex-1">运营告警</div>
-        <Button size="sm" variant="outline" onClick={load} disabled={loading}>
-          <RefreshCw className={`w-3.5 h-3.5 mr-1 ${loading ? "animate-spin" : ""}`} />
-          刷新
-        </Button>
+      <div className="border-b p-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          <BellRing className="w-4 h-4 shrink-0" />
+          <div className="min-w-0">
+            <div className="font-semibold text-sm">运营告警</div>
+            {isAdmin && opsSummary !== null && (
+              <div className="text-[11px] text-muted-foreground mt-0.5 line-clamp-2">
+                通知发件：
+                {opsSummary.sender ? (
+                  <span className="text-foreground/80">{opsSummary.sender}</span>
+                ) : (
+                  "未指定（环境变量 ALERT_SENDER_ADDRESS）"
+                )}
+                {" · "}
+                收件：
+                {opsSummary.recipients ? (
+                  <span className="text-foreground/80">{opsSummary.recipients}</span>
+                ) : (
+                  "未指定（环境变量 ALERT_EMAIL_TO）"
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {isAdmin && (
+            <Button size="sm" variant="secondary" onClick={() => void openConfigDialog()}>
+              <Settings className="w-3.5 h-3.5 mr-1" />
+              告警通知配置
+            </Button>
+          )}
+          <Button size="sm" variant="outline" onClick={load} disabled={loading}>
+            <RefreshCw className={`w-3.5 h-3.5 mr-1 ${loading ? "animate-spin" : ""}`} />
+            刷新
+          </Button>
+        </div>
       </div>
+
+      <Dialog open={configOpen} onOpenChange={setConfigOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>运营告警通知</DialogTitle>
+            <DialogDescription>
+              发件须为「邮箱配置」中已绑定且填写 SMTP 的账号；收件可填多个，英文逗号或分号分隔。留空发件或收件表示使用服务器环境变量（ALERT_SENDER_ADDRESS / ALERT_EMAIL_TO）。
+            </DialogDescription>
+          </DialogHeader>
+          {configLoading ? (
+            <div className="text-sm text-muted-foreground py-6 text-center">加载中…</div>
+          ) : (
+            <div className="space-y-4 py-1">
+              <div className="space-y-2">
+                <Label>发件邮箱</Label>
+                <Select value={senderSelect} onValueChange={setSenderSelect}>
+                  <SelectTrigger className="h-9">
+                    <SelectValue placeholder="选择发件邮箱" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={OPS_ALERT_SENDER_USE_ENV}>未指定（环境变量 ALERT_SENDER_ADDRESS）</SelectItem>
+                    {mailboxOptions.map((m) => (
+                      <SelectItem key={m.email_address} value={m.email_address}>
+                        {m.display_name ? `${m.display_name} · ` : ""}
+                        {m.email_address}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="ops-alert-recipients">收件邮箱</Label>
+                <Input
+                  id="ops-alert-recipients"
+                  placeholder="a@x.com, b@y.com"
+                  value={recipientsInput}
+                  onChange={(e) => setRecipientsInput(e.target.value)}
+                  className="h-9"
+                />
+                <p className="text-[11px] text-muted-foreground">多个地址请用英文逗号或分号分隔；留空则使用 ALERT_EMAIL_TO。</p>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setConfigOpen(false)}>
+              取消
+            </Button>
+            <Button type="button" onClick={() => void saveOpsAlertConfig()} disabled={configLoading || savingConfig}>
+              {savingConfig ? "保存中…" : "保存"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <div className="border-b p-3 flex flex-wrap items-center gap-2">
         <div className="relative w-72">
           <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />

@@ -1,6 +1,6 @@
 # cs-main 生产上线准备与运维说明
 
-本文档描述 **mail-guide-ai + 自建 Supabase（`supabase-selfhost`）+ Dify** 整体上线准备、上线后运维要点，以及 **邮箱 CA 链 PEM** 的后续事宜。  
+本文档描述 **mail-guide-ai + 自建 Supabase（`supabase-selfhost`）+ Dify** 整体上线准备、上线后运维要点，以及 **邮箱 TLS / 自定义 CA**（第六节：何时需要 PEM、如何与当前函数实现配合）。**自动风控拦截**的产品规则与运维约定见 **第五节 5.5**（与代码实现迭代同步）。  
 **不替代**下列原文档，细节命令与排错仍以原文为准：
 
 | 文档 | 路径 |
@@ -20,7 +20,7 @@
 - **部署拓扑**：**两台机器** —— **机 1** 运行 `supabase-selfhost`（及建议同区域部署的前端或反代）；**机 2 为已有 Dify 服务器**（环境与域名由现网运维维护）。本仓库 `dify/docker/docker-compose.cs.yml` 等仅作本地/参考栈，**生产 Dify 不要求在本仓库所在机器重新起一套**。
 - **Dify 访问**：现网 **固定域名 + HTTPS**（按现网证书策略）；**不使用 ngrok**。上线时在本仓库 **导入工作流 DSL / 对齐应用配置** 即可（见 **3.1**）。
 - **ERP**：生产正式环境；密钥仅写入 `supabase-selfhost/.env.functions`（或等价 secrets），**勿提交 Git**。
-- **邮箱**：同时使用 **网易** 与 **Gmail 企业邮箱**；首轮上线可不强制已配置自定义 CA PEM（见 **第六节 后续事宜**）。
+- **邮箱**：同时使用 **网易** 与 **Gmail 企业邮箱**。`imap.163.com` 所用 **TecSign** 链已在函数 `_shared/mail-tls-ca.ts` 内置兜底，首轮上线 **不强制** 单独准备 PEM；Gmail 等公共 CA 一般亦无需 PEM。若遇 **`UnknownIssuer`**、企业代理根、或非 163 的私有 CA，仍按 **第六节** 处理。
 - **停机与备份**：可接受 **约 4 小时以内** 计划内停机；备份保留 **不少于 30 天**。
 
 ---
@@ -84,7 +84,7 @@ cd <仓库根>\mail-guide-ai-main\scripts\selfhosted
 .\Apply-VaultAndCron.ps1
 ```
 
-- 确认 `cron.job` 中存在 **4 条**业务任务，且 **`command` 中不得出现 `*.supabase.co`**（应指向本栈 Kong，如 `http://kong:8000/functions/v1/...`）。  
+- 确认 `cron.job` 中存在 **5 条**业务任务，且 **`command` 中不得出现 `*.supabase.co`**（应指向本栈 Kong，如 `http://kong:8000/functions/v1/...`）。  
 - 验证 SQL 见 [`startup-commands.md`](../mail-guide-ai-main/docs/startup-commands.md)「五、验证清单」。
 
 ### 3.5 Edge Functions 与 `.env.functions`
@@ -113,10 +113,10 @@ cd <仓库根>\mail-guide-ai-main\scripts\selfhosted
 ### 3.8 上线前最小验收
 
 - Studio / Kong 可访问；`curl` 或等价请求 `/functions/v1/hello` 正常。  
-- SQL：`cron.job` 四条齐全且 URL 正确；`vault.secrets` 含 `service_role_key`。  
+- SQL：`cron.job` 五条齐全且 URL 正确；`vault.secrets` 含 `service_role_key`。  
 - 前端：注册/登录、工作台打开无 CORS/跳转错误。  
 - **Gmail**：在机 1 网络条件下完成「添加邮箱 → 测试连接 → 同步」抽样。  
-- **网易**：同样抽样；若报 `UnknownIssuer`，记录域名与端口，转入 **第六节**。
+- **网易**：同样抽样；若仍报 `UnknownIssuer`（例如证书链轮换后内置兜底未更新），记录域名与端口，转入 **第六节**。
 
 ---
 
@@ -151,54 +151,136 @@ cd <仓库根>\mail-guide-ai-main\scripts\selfhosted
 
 - 大邮件同步体积上限见 [`DEPLOY.md`](../DEPLOY.md)「一」末尾与 `self-hosted-env-functions.example` 中 `MAIL_SYNC_FULL_BODY_*` 说明。
 
+### 5.5 自动风控拦截（产品规则与运维约定）
+
+本节描述 **自动** 风控拦截与补偿的**目标行为**，用于新账号绑定邮箱、同步大量历史邮件时**降低批量误拦截**风险；实现以 `risk-intercept`、`process-email`、定时任务及配置开关为准，**与代码迭代同步修订**。
+
+#### 5.5.1 背景与目标
+
+- **风险**：新绑定邮箱后若一次性同步大量旧邮件，自动拦截可能对无关历史邮件**批量误拦**。
+- **目标**：通过**可关闭的自动拦截**、**严格的准入条件**、**有限次数的补偿重试**与**发件时间窗口**，将自动动作限制在「新、可识别、仍有时效」的邮件上；紧急处置仍依赖**人工**。
+
+#### 5.5.2 总开关（仅约束自动）
+
+| 项 | 约定 |
+|----|------|
+| **开** | 允许在邮件处理链路中执行**自动拦截**，并在失败时进入**自动补偿**调度。 |
+| **关** | **不**执行自动拦截，**不**继续执行自动补偿；避免环境或策略原因下的误操作扩大。 |
+| **人工** | **不受开关约束**：工作台人工「暂停发货 / 恢复发货」等拦截类操作**始终可用**（见 5.5.5）。 |
+
+#### 5.5.3 自动拦截与补偿节奏
+
+| 项 | 约定 |
+|----|------|
+| **收信触发** | 在开关为**开**且满足 **5.5.4** 准入条件时，对同一封邮件的自动拦截在收信处理链路中**最多尝试 1 次**。 |
+| **补偿** | 若该次自动拦截**未成功**（需进入待补偿/重试类状态），则再执行**最多 3 次**自动补偿；**同一记录两次补偿尝试之间间隔不少于 1 小时**（按「上次尝试时间 + 1 小时」等字段控制，避免同一小时内重复打 ERP）。 |
+| **终态** | **收信 1 次 + 补偿 3 次**仍不成功 → 记为**拦截失败**（与 `risk_intercept_logs` 等业务终态对齐，具体字段名以实现为准）。 |
+| **成功** | 任意一次（收信或第 1～3 次补偿）成功 → 成功终态，**不再**排后续补偿。 |
+| **超长「重试中」** | 每次**补偿任务**执行时，若记录仍处于自动补偿的「重试中」状态且**自进入该状态起已超过 4 小时**，则记为**拦截失败**（错误信息中带 `[policy:retrying_timeout_4h]`），避免队列永久卡住。计时以 `retrying_started_at` 为准，缺失时回退 **`created_at`**（不得用 `updated_at`：补偿失败落库会刷新该行 `updated_at`，否则 4 小时条件永远不成立）。 |
+
+**调度（cron）**：补偿任务在**每小时的第 45 分钟**执行一轮（例如 **09:45、10:45、11:45**），与业务时区一致；每轮仅处理「已到下次执行时间」且仍未成功、未用尽次数的记录。
+
+#### 5.5.4 自动拦截准入（须同时考虑）
+
+以下不满足时，**不进行自动拦截**，且**不进入自动补偿队列**（与开关状态无关，属准入逻辑）：
+
+1. **未关联本地订单**且**工作流判定邮件未提供订单号** → **不自动拦截**（避免无单号历史邮件被批量处理）。  
+   - 未关联但工作流**已提供**订单号时，仍可按产品允许走「凭邮件单号」等自动路径（若实现支持）。
+
+2. **发件时间**：以邮件头中的发送时间为准，若相对**当前执行时刻**已超过 **24 小时**，则**不自动拦截**、不参与自动补偿。  
+   - **发件时间不可解析**时，建议按**保守策略**处理（例如视为超窗或视为不满足自动拦截条件），并在需求/实现说明中写死一种，避免误拦。
+
+#### 5.5.5 人工不受限范围
+
+- **开关**：人工拦截**不受**自动拦截总开关限制。  
+- **24 小时**：人工在工作台发起的拦截/解除**不受**「发件时间超过 24 小时」限制。
+
+#### 5.5.6 开关关闭时的终态（进行中记录）
+
+- 开关由开改为关后：**不再继续**跑满剩余自动补偿次数。  
+- 对**已因自动拦截进入待补偿/重试中**的记录，须在合理时限内将**自动链路**相关终态更新为**拦截失败**（或等价失败态），并建议通过**错误原因/元数据**区分「自然用尽失败」与「策略关停（开关关闭）终止」，便于审计与客服解释。
+
+#### 5.5.7 运维与上线核对（实现落地后）
+
+- 确认**开关**在 **拦截记录**页由管理员配置（`automation_settings.risk_auto_intercept_enabled`）、默认值及权限。
+- 确认 **pg_cron / 自建 cron** 中补偿任务为**每小时 `:45`** 触发，且任务 URL 指向本栈 Kong（与 **3.4** 一致，不得误用 `*.supabase.co`）。  
+- 新账号绑定后抽样：大量**无单号且未关联**、或**发件时间早于 24 小时**的邮件应**无自动拦截调用**；人工仍可对指定邮件操作拦截。
+
 ---
 
-## 六、后续事宜：邮箱 CA 链 PEM
+## 六、邮箱 TLS 与自定义 CA（与当前实现一致）
 
-首轮上线 **不强制** 已具备 PEM；若 **网易**、**企业 TLS 代理** 或极少数场景下出现 **`invalid peer certificate: UnknownIssuer`**，按下述处理。
+Edge Functions 里 IMAP/SMTP 使用 Deno 原生 `connectTls` / STARTTLS，通过 `_shared/mail-tls-ca.ts` 组装 **`caCerts`（额外信任的 PEM 段）**。逻辑顺序为：
 
-### 6.1 如何获取 PEM
+1. `MAIL_TLS_CA_CERT_PEM`（内联 PEM，可选）  
+2. `MAIL_TLS_CA_CERT_PATH` 或 `DENO_CERT` 指向的文件（可选；**User Worker 沙箱内读宿主机挂载路径可能失败**，见下）  
+3. 依次尝试读取默认路径 `../certs/mail-ca.pem`（相对 `_shared`）与绝对路径 `/home/deno/functions/certs/mail-ca.pem`  
+4. 仍无可用材料时，使用代码内 **`BUNDLED_163_MAIL_CA_PEM`**（当前为 **163 `imap.163.com` / TecSign** 叶子 + 根）
+
+因此：**首轮上线不必为 163 单独准备 PEM**；若日志出现 `parsed 2 certificate(s) from bundled 163 mail CA`，说明 163 兜底已参与校验。其他邮箱、代理或私有 CA 仍可按本节补链。
+
+### 6.1 何时需要额外 PEM（决策）
+
+| 场景 | 是否通常要配 `MAIL_TLS_CA_CERT_*` / `certs/mail-ca.pem` |
+|------|--------------------------------------------------------|
+| **Gmail**（`imap.gmail.com` / `smtp.gmail.com`） | **否**，公共 PKI 一般足够；出口 **TLS 解密代理** 导致 `UnknownIssuer` 时 **是**（用代理根或 IT 提供的链） |
+| **163 个人邮**（`*.163.com` TecSign） | **否**（内置兜底）；网易 **更换证书链** 后若仍 `UnknownIssuer`，**是**（更新内置常量或 PEM，见 6.4） |
+| **企业邮 / 自建 IMAP / 其他 CA** | **视情况**，出现 `UnknownIssuer` 即按 6.2 准备 PEM |
+| **仅开发联调** | 可临时 `MAIL_LOCAL_TEST_MODE=true`（明文 IMAP，**禁止生产**） |
+
+### 6.2 如何获取 PEM（需要时）
 
 1. **向服务商或 IT 索取（推荐）**  
-   索取邮件服务器 **完整 TLS 证书链**（或签发/替换证书的 **企业根/中间 CA**），格式为 **PEM**（可含多段 `-----BEGIN CERTIFICATE-----` …）。
+   索取 **完整 TLS 链** 或签发该服务器证书的 **根/中间 CA**，格式为 **PEM**（可含多段 `-----BEGIN CERTIFICATE-----` …）。
 
 2. **使用 OpenSSL 抓取链**  
-   在与生产 **出站一致** 的机器上执行（将主机与端口改为实际 IMAP/SMTP）：  
+   在与生产 **出站一致** 的环境执行（主机与端口改为实际 IMAP/SMTP）：  
    ```bash
    openssl s_client -connect imap.example.com:993 -showcerts </dev/null 2>/dev/null
    ```  
-   将输出中的多段证书合并为一个 `.pem` 文件（含服务器证书与中间 CA；若运行时仍报错再补根或咨询 IT）。
+   将输出中的多段证书合并为一个 `.pem`（通常含服务器证书 + 中间 CA；仍报错再补根或咨询 IT）。  
+   Windows 若无本地 `openssl`，可用仓库内已用过的方式：在 **能访问目标邮箱** 的机器上导出链，或临时用 **Docker + Alpine + openssl** 拉取后再保存为 PEM。
 
-3. **经 HTTPS/TLS 解密代理**  
-   使用浏览器或 IT 提供的 **代理根证书** 导出为 PEM，与对端链合并需谨慎：仅合并 **信任且必要** 的 CA，避免过大信任面。
+3. **经 TLS 解密代理**  
+   仅合并 **代理根 / 企业信任锚** 与 **邮箱链** 中 **必要** 的 PEM，避免盲目扩大信任面。
 
 4. **禁止用于生产的权宜之计**  
-   `MAIL_LOCAL_TEST_MODE=true` 仅用于本地调试，**生产环境不得依赖**。
+   `MAIL_LOCAL_TEST_MODE=true` 仅用于本地调试，**生产不得依赖**。
 
-### 6.2 获取后的处理步骤
+### 6.3 放入仓库并同步到自建（推荐路径）
 
-1. 将 PEM 文件保存到自建栈挂载目录，例如：  
-   `supabase-selfhost/volumes/functions/certs/mail-ca.pem`  
-   （与 [`self-hosted-supabase.md`](../mail-guide-ai-main/docs/self-hosted-supabase.md)「D3.1」一致。）
+**推荐把 PEM 放进源码树**，由 `sync-functions-to-selfhost.ps1` 一并复制到 `supabase-selfhost/volumes/functions/`，避免只改挂载卷而漏同步：
 
-2. 在 **`supabase-selfhost/.env.functions`** 中增加：  
+1. 保存为：  
+   `mail-guide-ai-main/supabase/functions/certs/mail-ca.pem`  
+   （与 [`self-hosted-supabase.md`](../mail-guide-ai-main/docs/self-hosted-supabase.md)「D3.1」、[`DEPLOY.md`](../DEPLOY.md) 描述一致；同步后出现在 `supabase-selfhost/volumes/functions/certs/mail-ca.pem`。）
+
+2. 在 **`supabase-selfhost/.env.functions`** 中保留（推荐）：  
    `MAIL_TLS_CA_CERT_PATH=/home/deno/functions/certs/mail-ca.pem`  
-   （若项目同时支持 `MAIL_TLS_CA_CERT_PEM` 内联，可按 `README` / example 选用其一。）
+   或使用 `MAIL_TLS_CA_CERT_PEM` 内联（见 `self-hosted-env-functions.example`）。  
+   说明：部分环境下 User Worker **读不到**上述路径文件时，函数仍会尝试 **内置 163 链** 或其它已加载的 PEM；保留环境变量有利于 **非 163** 邮箱与后续轮换。
 
 3. **确认生产关闭调试模式**：`MAIL_LOCAL_TEST_MODE` 未启用或为 `false`。
 
-4. **重建 `functions` 容器**：  
+4. **同步并重建 `functions`**（自建 **不需要** `npx supabase functions deploy`）：  
    ```powershell
+   cd <仓库根>\mail-guide-ai-main\scripts
+   .\sync-functions-to-selfhost.ps1
+
    cd <仓库根>\supabase-selfhost
    docker compose up -d --force-recreate --no-deps functions
    ```
 
-5. **验证**：工作台「测试连接」与「立即同步」；`docker compose logs functions --tail 100` 无 `UnknownIssuer`。
+### 6.4 验证、日志与 163 兜底维护
 
-### 6.3 建议节奏
+1. 工作台执行 **「测试连接」** 与 **「立即同步」**。  
+2. `docker compose logs functions --tail 100`：应无持续 `UnknownIssuer`。  
+3. **163**：若见 `parsed 2 certificate(s) from bundled 163 mail CA`，说明内置兜底在起作用。  
+4. **证书轮换后**：若 163 更换链导致再次 `UnknownIssuer`，需更新 **`mail-guide-ai-main/supabase/functions/_shared/mail-tls-ca.ts`** 中的 `BUNDLED_163_MAIL_CA_PEM`，并/或更新 **`certs/mail-ca.pem`**，再执行 **6.3 第 4 步**。
 
-- **Gmail**：多数情况默认信任库即可；若仍失败再按本节补链或排查代理。  
-- **网易**：出现问题再针对该主机名拉链、配置 **单独 PEM**，避免将无关 CA 堆入同一文件，便于轮换与审计。
+### 6.5 与「仅重建容器」的关系
+
+仅修改 `supabase-selfhost/volumes/functions/` 下文件而不跑 **`sync-functions-to-selfhost.ps1`**，容易与 `mail-guide-ai-main/supabase/functions/` **漂移**；生产变更应以 **源码树 + 同步脚本** 为准，与 [`DEPLOY.md`](../DEPLOY.md)「一」一致。
 
 ---
 
@@ -210,12 +292,13 @@ cd <仓库根>\mail-guide-ai-main\scripts\selfhosted
 | 2 | 机 1 出站：Gmail IMAP/SMTP + 网易 + 现网 Dify HTTPS | ☐ |
 | 3 | `supabase-selfhost` 启动健康，`.env` 对外 URL 正确 | ☐ |
 | 4 | `db push` 完成且已去掉 db 临时宿主机端口 | ☐ |
-| 5 | `Apply-VaultAndCron.ps1` 已执行，cron 4 条且无 `*.supabase.co` | ☐ |
+| 5 | `Apply-VaultAndCron.ps1` 已执行，cron 5 条且无 `*.supabase.co` | ☐ |
 | 6 | Functions 已同步，`.env.functions` 含 Dify + 正式 ERP | ☐ |
 | 7 | 前端 `VITE_*` 指向生产 Kong，已重新 build 并部署 | ☐ |
 | 8 | 抽样：Gmail/网易 测试连接与同步 | ☐ |
 | 9 | Postgres（及 Dify 库）备份策略 ≥30 天 + 演练记录 | ☐ |
-| 10 | 若出现 TLS 报错：按 **第六节** 配置 CA PEM 并重建 functions | ☐ |
+| 10 | 若出现 TLS 报错：按 **第六节** 决策是否补 PEM；163 可先查日志是否已 `bundled 163 mail CA`，再决定是否更新内置链或 `certs/mail-ca.pem` 并同步重建 functions | ☐ |
+| 11 | **自动风控拦截**（见 **5.5**）：开关默认值与权限、补偿 cron（每小时 `:45`）、抽样验证无单号/超 24h 邮件不误拦；关停后进行中记录终态策略已确认 | ☐ |
 
 ---
 

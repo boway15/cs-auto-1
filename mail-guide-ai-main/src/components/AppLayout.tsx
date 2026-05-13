@@ -21,6 +21,7 @@ import {
   PanelLeftClose,
   PanelLeft,
   Link2,
+  CircleHelp,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
@@ -29,8 +30,9 @@ const navItems = [
   { to: "/", label: "工作台", icon: Inbox, end: true },
   { to: "/linked-orders", label: "邮件订单", icon: Link2 },
   { to: "/send-logs", label: "发送日志", icon: Send },
-  { to: "/risk-logs", label: "风控记录", icon: ShieldAlert },
+  { to: "/risk-logs", label: "拦截记录", icon: ShieldAlert },
   { to: "/alerts", label: "运营告警", icon: BellRing },
+  { to: "/help", label: "帮助中心", icon: CircleHelp },
   { to: "/mailboxes", label: "邮箱配置", icon: Mail, adminOnly: true },
   // Shopify 入口暂时关闭，订单主链路走 ERP。
   // { to: "/shops", label: "Shopify 店铺", icon: Store, adminOnly: true },

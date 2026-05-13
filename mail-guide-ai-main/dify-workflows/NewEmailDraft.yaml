@@ -16,31 +16,7 @@ kind: app
 version: 0.6.0
 workflow:
   conversation_variables: []
-  environment_variables:
-  - description: ''
-    id: gateway_url
-    name: DIFY_GATEWAY_URL
-    selector:
-    - env
-    - DIFY_GATEWAY_URL
-    value: ''
-    value_type: string
-  - description: ''
-    id: gateway_api_key
-    name: DIFY_GATEWAY_API_KEY
-    selector:
-    - env
-    - DIFY_GATEWAY_API_KEY
-    value: ''
-    value_type: string
-  - description: ''
-    id: max_search_depth
-    name: max_search_depth
-    selector:
-    - env
-    - max_search_depth
-    value: 10
-    value_type: number
+  environment_variables: []
   features:
     file_upload:
       allowed_file_extensions:
@@ -107,10 +83,23 @@ workflow:
         isInIteration: false
         isInLoop: false
         sourceType: http-request
-        targetType: if-else
-      id: edge-fetch-judge
+        targetType: code
+      id: edge-fetch-normalize
       selected: false
       source: fetch_email_context
+      sourceHandle: source
+      target: normalize_email_context
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: code
+        targetType: if-else
+      id: edge-normalize-judge
+      selected: false
+      source: normalize_email_context
       sourceHandle: source
       target: judge_has_order_no
       targetHandle: target
@@ -133,10 +122,23 @@ workflow:
         isInIteration: false
         isInLoop: false
         sourceType: http-request
-        targetType: llm
-      id: edge-order-draft
+        targetType: code
+      id: edge-order-normalize
       selected: false
       source: fetch_order_info
+      sourceHandle: source
+      target: normalize_order_info
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: code
+        targetType: llm
+      id: edge-normalize-order-draft
+      selected: false
+      source: normalize_order_info
       sourceHandle: source
       target: generate_reply_draft
       targetHandle: target
@@ -220,6 +222,24 @@ workflow:
           required: true
           type: text-input
           variable: email_id
+        - label: gateway_api_key
+          max_length: 256
+          options: []
+          required: true
+          type: text-input
+          variable: gateway_api_key
+        - label: max_search_depth
+          max_length: 8
+          options: []
+          required: false
+          type: text-input
+          variable: max_search_depth
+        - label: guidance
+          max_length: 8000
+          options: []
+          required: false
+          type: paragraph
+          variable: guidance
       height: 138
       id: start
       position:
@@ -241,9 +261,9 @@ workflow:
           type: none
         desc: 一次获取当前邮件、线程历史邮件并提取订单号
         error_strategy: fail-branch
-        headers: "x-api-key:{{#env.DIFY_GATEWAY_API_KEY#}}"
+        headers: "x-api-key:{{#start.gateway_api_key#}}"
         method: get
-        params: "action:get_email_context\nemail_id:{{#start.email_id#}}\ndepth:{{#env.max_search_depth#}}"
+        params: "action:get_email_context\nemail_id:{{#start.email_id#}}\ndepth:{{#start.max_search_depth#}}"
         retry_config:
           max_retries: 3
           retry_enabled: true
@@ -256,7 +276,7 @@ workflow:
           max_write_timeout: 30
         title: 获取邮件上下文
         type: http-request
-        url: '{{#env.DIFY_GATEWAY_URL#}}'
+        url: http://host.docker.internal:8000/functions/v1/dify-gateway
         variables: []
       height: 190
       id: fetch_email_context
@@ -272,6 +292,118 @@ workflow:
       type: custom
       width: 242
     - data:
+        code: |
+          import json
+
+          def as_dict(value):
+              if isinstance(value, dict):
+                  return value
+              if isinstance(value, str) and value.strip():
+                  try:
+                      parsed = json.loads(value)
+                      return parsed if isinstance(parsed, dict) else {}
+                  except Exception:
+                      return {}
+              return {}
+
+          def as_text(value):
+              if value is None:
+                  return ""
+              if isinstance(value, str):
+                  return value
+              try:
+                  return json.dumps(value, ensure_ascii=False)
+              except Exception:
+                  return str(value)
+
+          def main(body=None, error_message: str = "", error_type: str = "") -> dict:
+              raw = as_dict(body)
+              data = as_dict(raw.get("data")) if "data" in raw else raw
+              email = as_dict(data.get("email"))
+              return {
+                  "ok": bool(raw.get("success", not bool(error_message))),
+                  "error_message": error_message or as_text(raw.get("message")),
+                  "error_type": error_type or as_text(raw.get("code")),
+                  "email_id": as_text(email.get("email_id")),
+                  "email_subject": as_text(email.get("subject")),
+                  "email_body": as_text(email.get("body")),
+                  "email_attachments": as_text(email.get("attachments")),
+                  "from_address": as_text(email.get("from_address")),
+                  "from_name": as_text(email.get("from_name")),
+                  "extracted_order_no": as_text(data.get("extracted_order_no")),
+                  "order_source": as_text(data.get("order_source")),
+                  "search_depth": as_text(data.get("search_depth")),
+              }
+        code_language: python3
+        desc: 将邮件上下文 HTTP 输出归一化为扁平字段，避免失败分支缺少 body.data 时下游变量报错
+        error_strategy: fail-branch
+        outputs:
+          ok:
+            children: null
+            type: boolean
+          error_message:
+            children: null
+            type: string
+          error_type:
+            children: null
+            type: string
+          email_id:
+            children: null
+            type: string
+          email_subject:
+            children: null
+            type: string
+          email_body:
+            children: null
+            type: string
+          email_attachments:
+            children: null
+            type: string
+          from_address:
+            children: null
+            type: string
+          from_name:
+            children: null
+            type: string
+          extracted_order_no:
+            children: null
+            type: string
+          order_source:
+            children: null
+            type: string
+          search_depth:
+            children: null
+            type: string
+        selected: false
+        title: 归一化邮件上下文
+        type: code
+        variables:
+        - value_selector:
+          - fetch_email_context
+          - body
+          variable: body
+        - value_selector:
+          - fetch_email_context
+          - error_message
+          variable: error_message
+        - value_selector:
+          - fetch_email_context
+          - error_type
+          variable: error_type
+      height: 116
+      id: normalize_email_context
+      position:
+        x: 520
+        y: 300
+      positionAbsolute:
+        x: 520
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
         cases:
         - case_id: 'true'
           conditions:
@@ -279,9 +411,7 @@ workflow:
             id: de30907f-d5cb-4230-ad1c-12ec4a16bcef
             varType: string
             variable_selector:
-            - fetch_email_context
-            - body
-            - data
+            - normalize_email_context
             - extracted_order_no
           id: 'true'
           logical_operator: and
@@ -310,9 +440,9 @@ workflow:
           type: none
         desc: 通过订单号和邮箱查询 ERP 订单
         error_strategy: fail-branch
-        headers: "x-api-key:{{#env.DIFY_GATEWAY_API_KEY#}}"
+        headers: "x-api-key:{{#start.gateway_api_key#}}"
         method: get
-        params: "action:get_order_by_email\norder_no:{{#fetch_email_context.body.data.extracted_order_no#}}\nemail:{{#fetch_email_context.body.data.email.from_address#}}"
+        params: "action:get_order_by_email\norder_no:{{#normalize_email_context.extracted_order_no#}}\nemail:{{#normalize_email_context.from_address#}}"
         retry_config:
           max_retries: 3
           retry_enabled: true
@@ -325,7 +455,7 @@ workflow:
           max_write_timeout: 30
         title: 查询订单信息
         type: http-request
-        url: '{{#env.DIFY_GATEWAY_URL#}}'
+        url: http://host.docker.internal:8000/functions/v1/dify-gateway
         variables: []
       height: 190
       id: fetch_order_info
@@ -341,6 +471,119 @@ workflow:
       type: custom
       width: 242
     - data:
+        code: |
+          import json
+
+          def as_dict(value):
+              if isinstance(value, dict):
+                  return value
+              if isinstance(value, str) and value.strip():
+                  try:
+                      parsed = json.loads(value)
+                      return parsed if isinstance(parsed, dict) else {}
+                  except Exception:
+                      return {}
+              return {}
+
+          def as_text(value):
+              if value is None:
+                  return ""
+              if isinstance(value, str):
+                  return value
+              return str(value)
+
+          def main(body=None, error_message: str = "", error_type: str = "") -> dict:
+              raw = as_dict(body)
+              data = as_dict(raw.get("data")) if "data" in raw else raw
+              order = as_dict(data.get("order"))
+              return {
+                  "found": bool(data.get("found")),
+                  "error_message": error_message or as_text(raw.get("message")),
+                  "error_type": error_type or as_text(raw.get("code")),
+                  "order_no": as_text(order.get("order_no")),
+                  "customer_name": as_text(order.get("customer_name")),
+                  "product_name": as_text(order.get("product_name")),
+                  "status": as_text(order.get("status")),
+                  "currency": as_text(order.get("currency")),
+                  "amount": as_text(order.get("amount")),
+                  "placed_at": as_text(order.get("placed_at")),
+                  "tracking_url": as_text(order.get("tracking_url")),
+                  "shipping_status": as_text(order.get("shipping_status")),
+                  "tracking_no": as_text(order.get("tracking_no")),
+              }
+        code_language: python3
+        desc: 将订单查询 HTTP 输出归一化为扁平字段，避免未命中或失败分支缺少 body.data.order
+        error_strategy: fail-branch
+        outputs:
+          found:
+            children: null
+            type: boolean
+          error_message:
+            children: null
+            type: string
+          error_type:
+            children: null
+            type: string
+          order_no:
+            children: null
+            type: string
+          customer_name:
+            children: null
+            type: string
+          product_name:
+            children: null
+            type: string
+          status:
+            children: null
+            type: string
+          currency:
+            children: null
+            type: string
+          amount:
+            children: null
+            type: string
+          placed_at:
+            children: null
+            type: string
+          tracking_url:
+            children: null
+            type: string
+          shipping_status:
+            children: null
+            type: string
+          tracking_no:
+            children: null
+            type: string
+        selected: false
+        title: 归一化订单信息
+        type: code
+        variables:
+        - value_selector:
+          - fetch_order_info
+          - body
+          variable: body
+        - value_selector:
+          - fetch_order_info
+          - error_message
+          variable: error_message
+        - value_selector:
+          - fetch_order_info
+          - error_type
+          variable: error_type
+      height: 116
+      id: normalize_order_info
+      position:
+        x: 980
+        y: 200
+      positionAbsolute:
+        x: 980
+        y: 200
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
         context:
           enabled: false
           variable_selector: []
@@ -348,17 +591,17 @@ workflow:
         model:
           completion_params:
             max_tokens: 800
-            temperature: 0.7
+            temperature: 0.55
           mode: chat
           name: deepseek-v4-flash
           provider: langgenius/deepseek/deepseek
         prompt_template:
         - id: 229eb9b8-2d37-49a6-9975-6daddca8cee9
           role: system
-          text: "你是一个专业的跨境电商客服专家。根据客户对话和订单信息，生成一封回复草稿。\n\n【订单信息】\n订单号: {{#fetch_order_info.body.data.order.order_no#}}\n客户姓名: {{#fetch_order_info.body.data.order.customer_name#}}\n商品: {{#fetch_order_info.body.data.order.product_name#}}\n订单状态: {{#fetch_order_info.body.data.order.status#}}\n金额: {{#fetch_order_info.body.data.order.currency#}} {{#fetch_order_info.body.data.order.amount#}}\n下单时间: {{#fetch_order_info.body.data.order.placed_at#}}\n物流追踪: {{#fetch_order_info.body.data.order.tracking_url#}}\n\n【客户最新邮件】\n主题: {{#fetch_email_context.body.data.email.subject#}}\n正文: {{#fetch_email_context.body.data.email.body#}}\n附件: {{#fetch_email_context.body.data.email.attachments#}}\n发件人: {{#fetch_email_context.body.data.email.from_address#}}\n\n【订单号来源说明】\n该订单号发现自: {% if fetch_email_context.body.data.order_source == \"thread_email\" %}历史邮件{% else %}客户最新邮件{% endif %}\n\n【任务要求】\n1. 先分析客户邮件中的核心意图（退货/退款/破损/物流查询/咨询/投诉等）\n2. 评估紧急程度（高/中/低）\n3. 识别当前缺少哪些关键信息（如缺少清晰破损图片等）\n4. 根据意图类型生成回复策略：\n   - 破损: 致歉 + 提出解决方案（补发/退款/补偿）\n   - 物流查询: 提供追踪链接和当前状态\n   - 退货退款: 说明政策和操作步骤\n   - 咨询: 准确回答\n5. 语气温暖专业，使用客户邮件的语言回复\n6. 不要编造任何信息，有不确定的明确标注\n7. 输出格式如下：\n\n[意图分析]\n意图: xxx\n紧急程度: xxx\n缺失信息: xxx\n\n[回复草稿]\n（直接可供发送的完整邮件正文）"
+          text: "You are a professional customer-support expert for the **U.S. e-commerce market**. Using **order facts** and the **customer's email**, write a **ready-to-send** reply draft.\n\n## Voice and style\n- Formal business tone; clear greeting and closing; no slang, emojis, or overly casual language.\n- Clear structure: address the main issue first, then facts and next steps. Order numbers, dates, tracking links, and any requests to the customer must be explicit.\n- Polite and respectful; thank or apologize when fitting; never blame the customer.\n- Do not invent policies, amounts, stock, or logistics you cannot verify; state uncertainty and next verification steps.\n\n## Language (detect, then write)\nIn **[Intent Analysis]** include a line: `reply_language: en` or `reply_language: zh` (ISO 639-1, lowercase).\nInfer primary language from **subject + body**. **Default to English** for the U.S. market when mixed or ambiguous; use Chinese only when the email is clearly Chinese-dominant.\nThe entire **[Reply Draft]** (greeting, body, closing, sign-off) must match `reply_language`, except order numbers, SKUs, URLs, brand names, and proper nouns.\n\n## Send-ready rules (no templates)\n**[Reply Draft]** must contain **no** placeholders such as [Your name], [Company name], [Email], [客服署名], \"fill in here\", \"e.g.\" fake signatures, or example phone/email lines. Do not admit the text is a draft or template.\n\n## Sign-off\n- If `reply_language` is **en**: end with \"Best regards,\" then a new line \"Customer Service Team\".\n- If `reply_language` is **zh**: end with \"此致\" then a new line \"客服团队\" (do not invent a company legal name or personal name; no fake email/URL; to continue the thread say only that the customer may reply to this email).\n\n## Human guidance (`guidance` start variable)\nIf `guidance` is **non-empty** after trimming, treat it as operator instructions (same importance as facts and send-ready rules):\n- In **[Intent Analysis]** add one line: `guidance_applied: …` describing how you followed it.\n- **[Reply Draft]** must reflect it (tone, stance, steps, concessions). If it conflicts with known order facts or obvious compliance limits, follow facts/compliance and explain the trade-off in `guidance_applied`.\n\n## Decision priority\nIf `guidance` states a clear outcome (e.g. **approve order cancellation**, approve refund, approve reship, deny refund), state that outcome **plainly in the opening section** of **[Reply Draft]**; do not hide it behind long generic requests for screenshots unless truly necessary. Ask only **minimal** extra information and tie each ask to completing the promised action.\n\n### guidance (blank = ignore this whole subsection)\n{{#start.guidance#}}\n\n## Order information\nOrder number: {{#normalize_order_info.order_no#}}\nCustomer name: {{#normalize_order_info.customer_name#}}\nProduct: {{#normalize_order_info.product_name#}}\nOrder status: {{#normalize_order_info.status#}}\nAmount: {{#normalize_order_info.currency#}} {{#normalize_order_info.amount#}}\nPlaced at: {{#normalize_order_info.placed_at#}}\nTracking: {{#normalize_order_info.tracking_url#}}\n\n## Customer's latest email\nSubject: {{#normalize_email_context.email_subject#}}\nBody: {{#normalize_email_context.email_body#}}\nAttachments: {{#normalize_email_context.email_attachments#}}\nFrom: {{#normalize_email_context.from_address#}}\n\n## Order number provenance\nThe order number was extracted from: {% if normalize_email_context.order_source == \"thread_email\" %}a prior email in the thread{% else %}the customer's latest email{% endif %}\n\n## Tasks\n0. If `guidance` is non-empty and states a clear decision (e.g. approve cancellation), **that wins** over generic \"please explain more first\"; implement it in the body unless facts forbid it—then say so briefly.\n1. Infer core intent (return/refund/damage/shipping/inquiry/complaint, etc.).\n2. Rate urgency (high/medium/low).\n3. Note any critical missing facts (e.g. no damage photo).\n4. Choose a response strategy by intent (damage → apology + remedy options; shipping → tracking and status; return/refund → policy and steps; inquiry → accurate answer).\n5. **[Reply Draft]** must follow the voice rules and be copy-paste sendable.\n6. Do not fabricate facts; mark unknowns clearly.\n\n## Output format (use these exact English section labels)\n[Intent Analysis]\nintent: ...\nreply_language: en or zh\nurgency: ...\nmissing_info: ...\nguidance_applied: ...  (required when guidance is non-empty; otherwise write \"none\")\n\n[Reply Draft]\n(full sendable email body)"
         - id: 9754f4f2-648a-46e5-8fdb-446349c30928
           role: user
-          text: '{{#sys.query#}}'
+          text: "Using the order context and the customer's email in the system message, produce **[Intent Analysis]** and **[Reply Draft]**. If the start variable `guidance` is non-empty, you MUST apply it in both sections."
         selected: false
         title: 生成订单关联回复
         type: llm
@@ -379,12 +622,72 @@ workflow:
       type: custom
       width: 242
     - data:
-        code: "import re\n\ndef main(text: str) -> dict:\n    intent_match = re.search(\n\
-          \        r'\\[意图分析\\](.*?)(?=\\[回复草稿\\]|$)',\n        text,\n        re.DOTALL\n\
-          \    )\n    draft_match = re.search(\n        r'\\[回复草稿\\](.*?)$',\n        text,\n\
-          \        re.DOTALL\n    )\n\n    return {\n        \"intent_analysis\": intent_match.group(1).strip()\
-          \ if intent_match else \"\",\n        \"draft_reply\": draft_match.group(1).strip()\
-          \ if draft_match else text.strip(),\n    }"
+        code: |
+          import re
+
+          THINK_PATTERNS = (
+              r"<think>.*?</think>",
+              r"<thinking>.*?</thinking>",
+          )
+
+          def strip_thinking_blocks(s: str) -> str:
+              for pat in THINK_PATTERNS:
+                  s = re.sub(pat, "", s, flags=re.DOTALL | re.IGNORECASE)
+              return s.strip()
+
+          DRAFT_PH_PATTERNS = (
+              r"\[您的姓名\]",
+              r"\[您的职位\]",
+              r"\[公司名称\]",
+              r"\[联系邮箱\]",
+              r"\[Company\s+Name\]",
+              r"\[Your\s+Name\]",
+              r"\[Phone\]",
+              r"\[Email\]",
+              r"\[客服署名\]",
+              r"（请在此处[^）]{1,200}）",
+              r"___+待填_+___",
+              r"（待补充）",
+          )
+
+          def sanitize_draft_placeholders(s: str) -> str:
+              t = s or ""
+              for pat in DRAFT_PH_PATTERNS:
+                  t = re.sub(pat, "", t, flags=re.IGNORECASE)
+              t = re.sub(r"\n*\[客服署名\][\s\S]*$", "", t)
+              t = re.sub(r"\n*（请在此处[^）]{1,200}）[\s\S]*$", "", t)
+              t = re.sub(r"(?m)^\s*例如[:：].+$", "", t)
+              t = re.sub(r"[ \t]+\n", "\n", t)
+              t = re.sub(r"\n{3,}", "\n\n", t)
+              lines = [ln for ln in t.splitlines()]
+              while lines and re.match(
+                  r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,48}\s*$",
+                  lines[-1].strip(),
+              ):
+                  lines.pop()
+              while lines and not lines[-1].strip():
+                  lines.pop()
+              t = "\n".join(lines)
+              return t.strip()
+
+          def main(text: str) -> dict:
+              text = strip_thinking_blocks(text or "")
+              intent_match = re.search(
+                  r'(?:\[Intent Analysis\]|\[意图分析\])(.*?)(?=(?:\[Reply Draft\]|\[回复草稿\])|$)',
+                  text,
+                  re.DOTALL | re.IGNORECASE
+              )
+              draft_match = re.search(
+                  r'(?:\[Reply Draft\]|\[回复草稿\])(.*?)$',
+                  text,
+                  re.DOTALL | re.IGNORECASE
+              )
+              draft_raw = draft_match.group(1).strip() if draft_match else text.strip()
+
+              return {
+                  "intent_analysis": intent_match.group(1).strip() if intent_match else "",
+                  "draft_reply": sanitize_draft_placeholders(draft_raw),
+              }
         code_language: python3
         desc: 将 LLM 输出拆分为结构化意图和草稿字段
         error_strategy: fail-branch
@@ -424,17 +727,17 @@ workflow:
         model:
           completion_params:
             max_tokens: 500
-            temperature: 0.7
+            temperature: 0.55
           mode: chat
           name: deepseek-v4-flash
           provider: langgenius/deepseek/deepseek
         prompt_template:
         - id: dfa30afa-a778-4fa4-a7b6-57e0509307d8
           role: system
-          text: "你是跨境电商客服助手。客户发来邮件但系统无法找到任何关联订单号。\n\n【重要前提】\n- 已检查该客户会话线程中最近 {{#env.max_search_depth#}} 封邮件，均未发现有效订单号\n- 客户最新邮件也没有包含附件中的订单信息\n\n【客户最新邮件】\n主题: {{#fetch_email_context.body.data.email.subject#}}\n正文: {{#fetch_email_context.body.data.email.body#}}\n发件人: {{#fetch_email_context.body.data.email.from_address#}}\n\n【任务】\n1. 推测客户的可能意图（物流/退货/破损/咨询等）\n2. 生成一封引导客户补充信息的回复邮件：\n   - 先表达理解和共情\n   - 礼貌地说明需要订单号才能快速定位问题\n   - 如果涉及商品质量问题，引导提供清晰图片\n   - 提供备选方案：如果找不到订单号，可以提供下单邮箱和收件人姓名\n3. 语气温暖专业，不要让客户感到被拒绝\n\n输出格式：\n[意图分析]\n可能意图: xxx\n缺失关键信息: 订单号\n\n[回复草稿]\n（引导补全信息的邮件正文）"
+          text: "You are a customer-support assistant. The customer emailed us but **no valid order number** was found in the last {{#start.max_search_depth#}} thread emails or the latest message. Write a **ready-to-send** email that politely asks for the minimum information needed to locate the order.\n\n## Voice and style\n- Formal business tone; empathetic; never make the customer feel rejected.\n- Clearly state what you checked and the limitation; list what you need (order number, purchase email, recipient name, etc.) in bullets if helpful.\n- Do not invent order/policy details you do not have; promise prompt follow-up once you receive the info.\n\n## Language (detect, then write)\nIn **[Intent Analysis]** include `reply_language: en` or `reply_language: zh`. **Default to English** for the U.S. market when mixed or ambiguous; Chinese only if clearly Chinese-dominant. **[Reply Draft]** must match `reply_language` (except proper nouns).\n\n## Send-ready rules (no templates)\nSame as the order branch: no placeholders, no fake signature coaching lines, no invented contact details.\n\n## Sign-off\n- English: \"Best regards,\" + newline + \"Customer Service Team\"\n- Chinese: \"此致\" + newline + \"客服团队\"\n\n## Human guidance (`guidance`)\nIf `guidance` is non-empty, add `guidance_applied: …` in **[Intent Analysis]** and follow it in **[Reply Draft]** unless it conflicts with what you can truthfully say about the missing order; explain conflicts briefly.\n\n## Decision priority\nIf `guidance` states a clear stance (e.g. agree to cancel, promise expedited handling, insist on order number), reflect it directly in **[Reply Draft]**; do not dilute with unrelated boilerplate.\n\n### guidance (blank = ignore)\n{{#start.guidance#}}\n\n## Facts you may state\n- We searched up to {{#start.max_search_depth#}} emails in this thread and found **no** usable order number.\n- The latest email does not include order details from attachments (if any).\n\n## Customer's latest email\nSubject: {{#normalize_email_context.email_subject#}}\nBody: {{#normalize_email_context.email_body#}}\nFrom: {{#normalize_email_context.from_address#}}\n\n## Tasks\n1. Infer likely intent (shipping/return/damage/inquiry/complaint, etc.).\n2. In **[Reply Draft]**: acknowledge, empathize, then ask for order number or equivalent identifiers; for quality issues, ask for clear photos if appropriate; offer purchase email / recipient name as alternate verification.\n3. Keep tone warm but professional.\n\n## Output format (exact English labels)\n[Intent Analysis]\nlikely_intent: ...\nreply_language: en or zh\nmissing_critical: order_number\nguidance_applied: ...  (or \"none\")\n\n[Reply Draft]\n(full sendable email body)"
         - id: 07059f70-9cdb-4750-90f3-7ceebdf5fb8c
           role: user
-          text: '{{#sys.query#}}'
+          text: "Using the customer's latest email in the system message, produce **[Intent Analysis]** and **[Reply Draft]** asking for missing information. If `guidance` is non-empty, you MUST apply it in both sections."
         selected: false
         title: 生成信息补全回复
         type: llm
@@ -455,12 +758,72 @@ workflow:
       type: custom
       width: 242
     - data:
-        code: "import re\n\ndef main(text: str) -> dict:\n    intent_match = re.search(\n\
-          \        r'\\[意图分析\\](.*?)(?=\\[回复草稿\\]|$)',\n        text,\n        re.DOTALL\n\
-          \    )\n    draft_match = re.search(\n        r'\\[回复草稿\\](.*?)$',\n        text,\n\
-          \        re.DOTALL\n    )\n\n    return {\n        \"intent_analysis\": intent_match.group(1).strip()\
-          \ if intent_match else \"\",\n        \"draft_reply\": draft_match.group(1).strip()\
-          \ if draft_match else text.strip(),\n    }"
+        code: |
+          import re
+
+          THINK_PATTERNS = (
+              r"<think>.*?</think>",
+              r"<thinking>.*?</thinking>",
+          )
+
+          def strip_thinking_blocks(s: str) -> str:
+              for pat in THINK_PATTERNS:
+                  s = re.sub(pat, "", s, flags=re.DOTALL | re.IGNORECASE)
+              return s.strip()
+
+          DRAFT_PH_PATTERNS = (
+              r"\[您的姓名\]",
+              r"\[您的职位\]",
+              r"\[公司名称\]",
+              r"\[联系邮箱\]",
+              r"\[Company\s+Name\]",
+              r"\[Your\s+Name\]",
+              r"\[Phone\]",
+              r"\[Email\]",
+              r"\[客服署名\]",
+              r"（请在此处[^）]{1,200}）",
+              r"___+待填_+___",
+              r"（待补充）",
+          )
+
+          def sanitize_draft_placeholders(s: str) -> str:
+              t = s or ""
+              for pat in DRAFT_PH_PATTERNS:
+                  t = re.sub(pat, "", t, flags=re.IGNORECASE)
+              t = re.sub(r"\n*\[客服署名\][\s\S]*$", "", t)
+              t = re.sub(r"\n*（请在此处[^）]{1,200}）[\s\S]*$", "", t)
+              t = re.sub(r"(?m)^\s*例如[:：].+$", "", t)
+              t = re.sub(r"[ \t]+\n", "\n", t)
+              t = re.sub(r"\n{3,}", "\n\n", t)
+              lines = [ln for ln in t.splitlines()]
+              while lines and re.match(
+                  r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,48}\s*$",
+                  lines[-1].strip(),
+              ):
+                  lines.pop()
+              while lines and not lines[-1].strip():
+                  lines.pop()
+              t = "\n".join(lines)
+              return t.strip()
+
+          def main(text: str) -> dict:
+              text = strip_thinking_blocks(text or "")
+              intent_match = re.search(
+                  r'(?:\[Intent Analysis\]|\[意图分析\])(.*?)(?=(?:\[Reply Draft\]|\[回复草稿\])|$)',
+                  text,
+                  re.DOTALL | re.IGNORECASE
+              )
+              draft_match = re.search(
+                  r'(?:\[Reply Draft\]|\[回复草稿\])(.*?)$',
+                  text,
+                  re.DOTALL | re.IGNORECASE
+              )
+              draft_raw = draft_match.group(1).strip() if draft_match else text.strip()
+
+              return {
+                  "intent_analysis": intent_match.group(1).strip() if intent_match else "",
+                  "draft_reply": sanitize_draft_placeholders(draft_raw),
+              }
         code_language: python3
         desc: 将 LLM 输出拆分为结构化意图和草稿字段
         error_strategy: fail-branch
@@ -497,34 +860,23 @@ workflow:
         outputs:
         - variable: email_id
           value_selector:
-          - fetch_email_context
-          - body
-          - data
-          - email
+          - normalize_email_context
           - email_id
         - variable: order_no
           value_selector:
-          - fetch_email_context
-          - body
-          - data
+          - normalize_email_context
           - extracted_order_no
         - variable: order_found
           value_selector:
-          - fetch_order_info
-          - body
-          - data
+          - normalize_order_info
           - found
         - variable: search_depth
           value_selector:
-          - fetch_email_context
-          - body
-          - data
+          - normalize_email_context
           - search_depth
         - variable: order_source
           value_selector:
-          - fetch_email_context
-          - body
-          - data
+          - normalize_email_context
           - order_source
         - variable: intent_analysis
           value_selector:
@@ -533,6 +885,14 @@ workflow:
         - variable: draft_reply
           value_selector:
           - parse_reply_output
+          - draft_reply
+        - variable: completion_intent_analysis
+          value_selector:
+          - parse_completion_output
+          - intent_analysis
+        - variable: completion_draft_reply
+          value_selector:
+          - parse_completion_output
           - draft_reply
         selected: false
         title: 结束

@@ -597,6 +597,8 @@ export type Database = {
       risk_intercept_logs: {
         Row: {
           action: string
+          auto_compensation_eligible: boolean
+          compensation_attempts_done: number
           created_at: string
           email_id: string | null
           erp_response: Json | null
@@ -605,11 +607,13 @@ export type Database = {
           idempotency_key: string | null
           intercept_no: string
           intercept_reason: string | null
+          next_compensation_at: string | null
           operated_by: string | null
           order_id: string | null
           reason_category: string | null
           referenced_order_no: string | null
           retry_count: number
+          retrying_started_at: string | null
           shopify_response: Json | null
           status: string
           trigger_source: string
@@ -617,6 +621,8 @@ export type Database = {
         }
         Insert: {
           action?: string
+          auto_compensation_eligible?: boolean
+          compensation_attempts_done?: number
           created_at?: string
           email_id?: string | null
           erp_response?: Json | null
@@ -625,11 +631,13 @@ export type Database = {
           idempotency_key?: string | null
           intercept_no?: string
           intercept_reason?: string | null
+          next_compensation_at?: string | null
           operated_by?: string | null
           order_id?: string | null
           reason_category?: string | null
           referenced_order_no?: string | null
           retry_count?: number
+          retrying_started_at?: string | null
           shopify_response?: Json | null
           status?: string
           trigger_source?: string
@@ -637,6 +645,8 @@ export type Database = {
         }
         Update: {
           action?: string
+          auto_compensation_eligible?: boolean
+          compensation_attempts_done?: number
           created_at?: string
           email_id?: string | null
           erp_response?: Json | null
@@ -645,11 +655,13 @@ export type Database = {
           idempotency_key?: string | null
           intercept_no?: string
           intercept_reason?: string | null
+          next_compensation_at?: string | null
           operated_by?: string | null
           order_id?: string | null
           reason_category?: string | null
           referenced_order_no?: string | null
           retry_count?: number
+          retrying_started_at?: string | null
           shopify_response?: Json | null
           status?: string
           trigger_source?: string
@@ -702,16 +714,25 @@ export type Database = {
       automation_settings: {
         Row: {
           auto_reply_first_contact_days: number
+          ops_alert_recipient_emails: string | null
+          ops_alert_sender_email: string | null
+          risk_auto_intercept_enabled: boolean
           singleton: string
           updated_at: string
         }
         Insert: {
           auto_reply_first_contact_days?: number
+          ops_alert_recipient_emails?: string | null
+          ops_alert_sender_email?: string | null
+          risk_auto_intercept_enabled?: boolean
           singleton?: string
           updated_at?: string
         }
         Update: {
           auto_reply_first_contact_days?: number
+          ops_alert_recipient_emails?: string | null
+          ops_alert_sender_email?: string | null
+          risk_auto_intercept_enabled?: boolean
           singleton?: string
           updated_at?: string
         }
