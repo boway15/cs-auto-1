@@ -5,6 +5,7 @@
 
 | 文档 | 路径 |
 |------|------|
+| 新服务器 Docker **运维拉栈**（跑通前端 + 自建 Supabase；**不含**本仓 Dify 栈与本文内 `db push`） | [`docs/docker-deploy-new-server.md`](docker-deploy-new-server.md) |
 | 全栈命令速查 | 仓库根目录 [`DEPLOY.md`](../DEPLOY.md) |
 | 启动顺序与 Cloud/自建命令 | [`mail-guide-ai-main/docs/startup-commands.md`](../mail-guide-ai-main/docs/startup-commands.md) |
 | 自建 Supabase 全流程与清单 | [`mail-guide-ai-main/docs/self-hosted-supabase.md`](../mail-guide-ai-main/docs/self-hosted-supabase.md) |
