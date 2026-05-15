@@ -1,124 +1,141 @@
-# 运维手册：中间件、自建 Supabase 与全栈部署流程（CentOS / Linux）
+# 运维手册：mail-guide-ai + 自建 Supabase（CentOS / Linux）
 
 **读者**：生产/验收环境运维  
-**本期范围**：**不包含 Dify 的安装与部署**；手册仅覆盖 **自建 Supabase** + **mail-guide-ai 前端** 及与之直接相关的运维步骤。  
-**路径约定**：`REPO_ROOT` = 本仓库在服务器上的绝对路径（示例：`/opt/cs-main`）。下文命令均在 Linux / Bash 下执行，除非另行说明。
+**路径**：`REPO_ROOT` = 仓库在服务器上的绝对路径（示例 `/opt/cs-main`）。命令均在 **Bash** 下执行。  
+**本期范围**：**自建 Supabase** + **mail-guide-ai 前端**。**不含 Dify 容器安装**（现网 Dify 的 URL/Key 写入 `.env.functions` 即可）。
 
-**不替代**：更细的排错、迁移与分工仍以下列文档为准，本手册做**汇总与照抄顺序**：
-
-| 文档 | 说明 |
-|------|------|
-| [`docker-deploy-new-server.md`](./docker-deploy-new-server.md) | 新服务器拉栈、**三附 CentOS 与 ps1 对照** |
-| [`production-go-live.md`](./production-go-live.md) | 生产上线准备、网络、验收、备份 |
-| [`../DEPLOY.md`](../DEPLOY.md) | 常用命令速查（文中多为 Windows 路径，Linux 请改 `$REPO_ROOT/...`） |
-| [`../mail-guide-ai-main/docs/self-hosted-supabase.md`](../mail-guide-ai-main/docs/self-hosted-supabase.md) | 自建 Supabase 全流程、端口、`db push`、Functions |
-| [`../mail-guide-ai-main/docs/startup-commands.md`](../mail-guide-ai-main/docs/startup-commands.md) | 启动顺序与验证 SQL |
+**首次上线推荐顺序**：**第二节（Supabase）→ 第四节（脚本与验收）→ 第三节（前端）**。前端依赖 Kong 地址与 `ANON_KEY`，库表与 Functions 须先就绪。
 
 ---
 
-## 一、架构与中间件一览
+## 一、项目说明与中间件架构
 
-### 1.1 本期部署拓扑
+### 1.1 项目做什么
 
-| 范围 | 内容 |
+**mail-guide-ai** 是跨境电商客服邮件工作台，主要链路：
+
+```text
+收信同步 → AI 分析（Dify）→ 订单关联 → 草稿生成 → 人工发送 → 风控/补偿
+```
+
+运维在本手册中负责：**把数据层（Postgres）、业务 API（Edge Functions）、管理台（Studio）、工作台前端** 在 CentOS 上以 Docker 稳定跑起来。业务规则与 SQL 由研发维护在仓库 `mail-guide-ai-main/supabase/` 下，运维按本文执行发布即可。
+
+### 1.2 仓库里与运维相关的目录
+
+| 路径 | 作用 |
 |------|------|
-| **本机 / 本仓库** | **自建 Supabase**（`supabase-selfhost`）+ **mail-guide-ai 前端**（Docker） |
+| `mail-guide-ai-main/` | 前端源码；`supabase/migrations`（表结构）；`supabase/functions`（Edge Functions 源码） |
+| `supabase-selfhost/` | 官方 Supabase Docker 自建栈（compose、`.env`、数据卷、`volumes/functions`） |
+| `mail-guide-ai-main/scripts/linux/` | 运维脚本（生成栈、同步函数、修正 cron 等） |
 
-业务 API 在 **Supabase Edge Functions**（容器 `functions`，Deno），**无**单独 Java/Node 业务后端进程。
+### 1.3 整体架构（运维视角）
 
-### 1.2 机 1：`supabase-selfhost` 栈内中间件（容器）
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│  用户浏览器                                                       │
+│    ├─ mail-guide-ai 工作台  (mail-guide-ai 容器, 默认 :8080)      │
+│    └─ Supabase Studio       (经 Kong, 默认 :8000)                │
+└────────────────────────────┬────────────────────────────────────┘
+                             │ HTTPS/HTTP
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  supabase-selfhost (Docker Compose)                              │
+│                                                                  │
+│  kong ──────► auth / rest / realtime / storage / functions       │
+│    │                              │                              │
+│    │                              └── Edge Functions (Deno)      │
+│    │                                   收信/发信/ERP/Dify 网关等    │
+│    ▼                                                             │
+│  db (PostgreSQL)  ◄── migrations 建表 + RLS                      │
+│       ▲                                                          │
+│       └── pg_cron + pg_net ──定时──► Kong /functions/v1/...      │
+└────────────────────────────┬────────────────────────────────────┘
+                             │ 出站（防火墙须放行）
+                             ▼
+              外部：邮箱 IMAP/SMTP、ERP、Dify（现网，非本手册部署）
+```
 
-以下服务来自官方 `docker-compose.yml`（服务名以实际 compose 为准）：
+**说明**：没有单独的 Java/Node 业务后端进程；**业务 API 全部在 Edge Functions 容器**（`functions`）中，经 **Kong** 对外提供 `/functions/v1/<函数名>`。
 
-| 组件 | 作用简述 |
-|------|----------|
-| **kong** | API 网关；对外 REST、Auth、Storage、Realtime、Functions、Studio 等多经此入口 |
-| **db** | PostgreSQL |
-| **supavisor** | 连接池（会话/事务模式）；注意宿主机端口可能与本机已有 5432 冲突 |
-| **auth** | GoTrue，用户注册/登录/JWT |
-| **rest** | PostgREST |
-| **realtime** | Realtime |
-| **storage** | 对象存储 API |
-| **imgproxy** | 图片处理 |
-| **meta** | pgmeta（Studio 用） |
-| **functions** | Edge Functions 运行时（业务逻辑） |
-| **studio** | Supabase Studio 管理界面 |
-| **vector** | 向量相关（若模板启用） |
-| **analytics** | Logflare 等分析组件 |
+### 1.4 `supabase-selfhost` 栈内中间件
 
-### 1.3 机 1：mail-guide-ai 前端
-
-| 组件 | 说明 |
+| 组件 | 作用 |
 |------|------|
-| **mail-guide-ai 容器** | 多阶段构建：**Node `npm run build`（Vite）** → **Nginx** 托管静态文件；默认 **`8080:80`**（以 `mail-guide-ai-main/docker-compose.yml` 为准） |
+| **kong** | API 网关；REST、Auth、Storage、Realtime、**Functions**、Studio 均经此入口 |
+| **db** | PostgreSQL，存放业务表与 `cron.job` |
+| **auth** | 用户注册/登录/JWT（工作台账号） |
+| **rest** | PostgREST，供前端读写表 |
+| **realtime** | 实时订阅 |
+| **storage** | 对象存储 |
+| **functions** | Edge Functions 运行时（加载 `volumes/functions`） |
+| **studio** | 数据库/Auth 管理界面 |
+| **supavisor** | 连接池；宿主机 **5432** 冲突时改 `POOLER_PORT_PUBLISHED` |
+| **meta** | Studio 用的库元数据 |
+| **imgproxy / vector / analytics** | 按官方模板启用（图片、向量、日志等） |
 
-### 1.4 外部依赖（非本机容器）
+### 1.5 mail-guide-ai 前端容器
 
-- **ERP**、**邮箱（IMAP/SMTP）** 等：由 `functions` 容器**出站**访问；防火墙与安全组需放行（详见 `production-go-live.md`）。
+| 项 | 说明 |
+|----|------|
+| 构建 | Node 编译 Vite 静态资源 → Nginx 托管 |
+| 默认端口 | **`8080:80`**（见 `mail-guide-ai-main/docker-compose.yml`） |
+| 配置 | `mail-guide-ai-main/.env` 中 `VITE_SUPABASE_*` 指向 Kong 与 `ANON_KEY` |
+
+### 1.6 自建与 Supabase Cloud 的命令区别
+
+| 要做的事 | 自建 Docker（本手册） | 不要用 |
+|----------|----------------------|--------|
+| 数据库表 / 迁移 | `npx supabase db push --db-url ...` | — |
+| 发布 Edge Functions | `sync-functions-to-selfhost.sh` + 重建 `functions` | `npx supabase functions deploy` |
 
 ---
 
-## 二、`supabase-selfhost` 目录如何生成
+## 二、创建并部署自建 Supabase
 
-**来源**：非手抄，由脚本从 Supabase 官方仓库 **sparse clone `docker/`** 复制到 **`$REPO_ROOT/supabase-selfhost/`**。
-
-**首次生成（Linux）**：
+### 2.0 每次操作前
 
 ```bash
-export REPO_ROOT=/opt/cs-main
-cd "$REPO_ROOT"
-git pull
+export REPO_ROOT=/opt/cs-main          # 改成实际路径
 
 chmod +x "$REPO_ROOT/mail-guide-ai-main/scripts/linux/"*.sh \
          "$REPO_ROOT/mail-guide-ai-main/scripts/linux/selfhosted/"*.sh
 
+cd "$REPO_ROOT" && git pull
+```
+
+**前置**：已安装 Docker Engine、Compose V2（`docker compose`）；`db push` 阶段需要本机 **Node 20+**。
+
+### 2.1 生成 `supabase-selfhost` 目录（仅首次）
+
+脚本从 Supabase 官方仓库拉取 `docker/` 模板到 `$REPO_ROOT/supabase-selfhost/`：
+
+```bash
 "$REPO_ROOT/mail-guide-ai-main/scripts/linux/bootstrap-supabase-docker.sh"
 ```
 
-- 若已存在 `supabase-selfhost/docker-compose.yml`，脚本会提示 **Already exists** 并退出；**重装**须先备份 `.env` 与数据卷，**删除整个 `supabase-selfhost`** 后再执行。
+- 已存在 `supabase-selfhost/docker-compose.yml` → **跳过**。
+- **重装**：先备份 `.env` 与 `volumes/`，删除整个 `supabase-selfhost` 后再执行。
 
-**生成后目录内应有**：`docker-compose.yml`、`utils/`（含 `generate-keys.sh`）、`volumes/`、`dev/` 等与官方 Docker 自建模板一致的内容。
-
----
-
-## 三、运维主流程（建议顺序）
-
-以下与 [`docker-deploy-new-server.md`](./docker-deploy-new-server.md) **§四 / 三附** 对齐，命令统一为 **Bash**。
-
-### 步骤 0：代码
-
-```bash
-cd "$REPO_ROOT"
-git pull
-```
-
-### 步骤 1：生成 `supabase-selfhost`（仅首次）
-
-见 **第二节**。已存在则跳过。
-
-### 步骤 2：配置 `supabase-selfhost/.env` 与密钥
+### 2.2 配置 `.env` 与密钥
 
 ```bash
 cd "$REPO_ROOT/supabase-selfhost"
-cp -n .env.example .env   # 若 .env 已存在请勿覆盖
+cp -n .env.example .env    # .env 已存在时不要覆盖
 sh ./utils/generate-keys.sh
-# 若官方模板要求非对称密钥，再执行：
-# sh ./utils/add-new-auth-keys.sh
 ```
 
-用编辑器核对 `.env`（**错一项易导致登录跳转失败**），至少包括：
+必核对项（错一项易导致登录或跳转失败）：
 
 | 变量 | 说明 |
 |------|------|
-| `SUPABASE_PUBLIC_URL` | 用户与前端访问 **Kong** 的对外基址（生产多为 HTTPS 反代后 URL） |
-| `API_EXTERNAL_URL` | 一般与 `SUPABASE_PUBLIC_URL` **相同** |
-| `SITE_URL` | 用户浏览器打开 **mail-guide-ai 工作台** 的基址（须与实际上线 URL 一致） |
-| `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` | **Studio** 登录；**密码勿纯数字** |
-| `POSTGRES_PASSWORD` 等 | 按官方模板与内控要求设置 |
+| `SUPABASE_PUBLIC_URL` | 对外访问 **Kong** 的基址 |
+| `API_EXTERNAL_URL` | 与 `SUPABASE_PUBLIC_URL` **相同** |
+| `SITE_URL` | 用户打开 **mail-guide-ai 工作台** 的地址（与第三节前端一致） |
+| `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` | **Studio** 登录；密码**不能纯数字** |
+| `POSTGRES_PASSWORD` | 第四节 `db push` 使用；请妥善保存 |
+| `ANON_KEY` / `SERVICE_ROLE_KEY` | 第四节脚本与前端配置会用到 |
 
-HTTPS 反代：见官方 [Self-Hosted Proxy HTTPS](https://supabase.com/docs/guides/self-hosting/self-hosted-proxy-https)。
-
-### 步骤 3：启动 Supabase 全栈
+### 2.3 启动全栈
 
 ```bash
 cd "$REPO_ROOT/supabase-selfhost"
@@ -127,10 +144,9 @@ docker compose up -d
 docker compose ps
 ```
 
-**常见排错**：
+`db`、`kong` 等应为 **Up**（**healthy** 更佳）。
 
-- **5432 被占用**：勿改容器内 `POSTGRES_PORT`；按 `self-hosted-supabase.md` 使用 **`POOLER_PORT_PUBLISHED`** 并改 `supavisor` 的 `ports` 映射。
-- **Kong / Pooler CRLF**（从 Windows 拷贝文件到 Linux 时也可能出现）：
+**Kong / Pooler 起不来**（日志含 `carriage return`）：
 
 ```bash
 "$REPO_ROOT/mail-guide-ai-main/scripts/linux/fix-supabase-selfhost-crlf.sh"
@@ -138,111 +154,210 @@ cd "$REPO_ROOT/supabase-selfhost"
 docker compose up -d --force-recreate kong supavisor
 ```
 
-### 步骤 4：数据库结构与 Vault / 定时任务
+**宿主机 5432 被占用**：`.env` 设 `POOLER_PORT_PUBLISHED=54322`，并按 [`mail-guide-ai-main/docs/self-hosted-supabase.md`](../mail-guide-ai-main/docs/self-hosted-supabase.md) 改 `supavisor` 端口映射；**不要**改容器内 `POSTGRES_PORT`。
 
-- **库结构**：由研发/DBA 使用 `mail-guide-ai-main/supabase/migrations` 执行 **`npx supabase db push`**（常需临时暴露 `db` 端口，**迁移后删除映射**）。细节见 `self-hosted-supabase.md`「四步」。
-- **Vault + pg_cron（必做）**：对齐 `service_role_key`，定时任务指向 **本栈 Kong**（如 `http://kong:8000/functions/v1/...`），不得残留 `*.supabase.co`。
+### 2.4 验收（本节做完应满足）
 
-```bash
-"$REPO_ROOT/mail-guide-ai-main/scripts/linux/selfhosted/apply-vault-and-cron.sh"
+- 浏览器打开 `SUPABASE_PUBLIC_URL`（如 `http://<IP>:8000`）可进 **Studio**，用 `DASHBOARD_*` 登录。
+
+---
+
+## 三、部署 mail-guide-ai 前端
+
+> 须在第二节 Kong 已启动、且已从 `supabase-selfhost/.env` 拿到 **`ANON_KEY`** 后执行。完整业务还依赖第四节库表与 Functions。
+
+### 3.1 配置环境变量
+
+编辑 `$REPO_ROOT/mail-guide-ai-main/.env`（可复制 `.env.selfhosted.example`）：
+
+```env
+VITE_SUPABASE_URL=<与 SUPABASE_PUBLIC_URL 一致>
+VITE_SUPABASE_PUBLISHABLE_KEY=<supabase-selfhost/.env 中的 ANON_KEY>
+VITE_SUPABASE_PROJECT_ID=self-hosted
 ```
 
-验证 SQL 见 `startup-commands.md`「验证清单」。
+`SITE_URL`（第二节 `.env`）须与用户实际打开前端的地址一致。
 
-### 步骤 5：Edge Functions 与密钥
-
-**5a**（仅首次，会修改 `supabase-selfhost/docker-compose.yml`，为 `functions` 挂载 `env_file`）：
+### 3.2 构建并启动
 
 ```bash
-"$REPO_ROOT/mail-guide-ai-main/scripts/linux/selfhosted/ensure-functions-env-in-compose.sh"
-```
-
-**5b** 复制并填写 **`supabase-selfhost/.env.functions`**：
-
-- 将 [`../mail-guide-ai-main/docs/self-hosted-env-functions.example`](../mail-guide-ai-main/docs/self-hosted-env-functions.example) 复制为 **`$REPO_ROOT/supabase-selfhost/.env.functions`**。
-- **本期**：按**项目交付清单**填写本期必需的变量（如 **`ERP_*`**、邮箱相关、以及 Edge 运行所需的其他项）。示例文件中若含有**本期不启用的 AI 工作流类变量**，以研发书面说明为准：可留空、占位或整段暂不配置，**勿提交 Git**。
-- 需要运维本机生成的强随机密钥时，可用：
-
-```bash
-openssl rand -base64 32
-```
-
-**5c** 同步函数并重建 `functions`：
-
-```bash
-"$REPO_ROOT/mail-guide-ai-main/scripts/linux/sync-functions-to-selfhost.sh"
-cd "$REPO_ROOT/supabase-selfhost"
-docker compose up -d --force-recreate --no-deps functions
-```
-
-> 自建栈发布函数：**同步目录 + 重建容器**即可；**不需要** `npx supabase functions deploy`（该命令面向 Supabase Cloud）。
-
-### 步骤 6：mail-guide-ai 前端
-
-```bash
-# 配置 mail-guide-ai-main/.env（可参考 .env.selfhosted.example）
-# VITE_SUPABASE_URL = Kong 对外基址
-# VITE_SUPABASE_PUBLISHABLE_KEY = supabase-selfhost/.env 中的 ANON_KEY（或当前 publishable key）
-
 cd "$REPO_ROOT/mail-guide-ai-main"
 docker compose build
 docker compose up -d
 ```
 
-默认浏览器访问 **`http://<主机>:8080`**（以 compose 端口为准）。**修改任意 `VITE_*` 后必须重新 `docker compose build`**。
+默认访问：**`http://<主机>:8080`**。
 
-### 步骤 7：验收与上线核对
+### 3.3 注意
 
-按 [`docker-deploy-new-server.md`](./docker-deploy-new-server.md) **§六** 与 [`production-go-live.md`](./production-go-live.md) **§3.8** 执行；**本期**以 **Studio/Kong、Functions、`cron.job`、`vault`、前端注册登录、邮件/ERP 等与交付范围一致** 的项为准（全文若含 AI 工作流验收，本期不部署时可跳过或与研发单独约定）。
+- 修改任意 **`VITE_*`** 后必须重新 **`docker compose build`** 再 `up -d`。
+- 工作台用户使用 **Supabase Auth** 注册/登录（**不是** Studio 的 `DASHBOARD_*`）；首个注册用户为 **admin**。
 
----
+### 3.4 验收（本节做完应满足）
 
-## 四、登录说明（运维须分清）
-
-### 4.1 Supabase Studio（管理台）
-
-| 项 | 说明 |
-|----|------|
-| **URL** | `SUPABASE_PUBLIC_URL`（如 `http://IP:8000` 或 HTTPS 反代根地址） |
-| **账号** | `.env` 中 **`DASHBOARD_USERNAME`** |
-| **密码** | `.env` 中 **`DASHBOARD_PASSWORD`**（须强密码，**不能纯数字**） |
-
-### 4.2 mail-guide-ai 工作台（业务用户）
-
-| 项 | 说明 |
-|----|------|
-| **URL** | 与 **`.env` 的 `SITE_URL`** 一致的前端地址（如 `https://app.example.com`） |
-| **认证** | Supabase **Auth**（非 Studio 的 `DASHBOARD_*`） |
-| **前端配置** | `mail-guide-ai-main/.env`：`VITE_SUPABASE_URL`、`VITE_SUPABASE_PUBLISHABLE_KEY`（来自自建 `.env` 的 **`ANON_KEY`** 等） |
-
-**首个注册用户**在当前实现中为 **admin**，之后新用户默认 **agent**（见 `production-go-live.md` 第四节）。
+- 浏览器打开工作台可看到登录页；第四节全部完成后可完成注册/登录。
 
 ---
 
-## 五、日常变更速查
+## 四、部署后必跑脚本（库表、定时任务、Edge Functions）
 
-| 变更类型 | 操作 |
-|----------|------|
-| 仅 Edge Functions 源码 | `sync-functions-to-selfhost.sh` → `docker compose up -d --force-recreate --no-deps functions` |
-| 仅 `.env.functions` | 编辑后同上重建 `functions` |
-| 仅 `supabase-selfhost/.env`（非 functions 段） | 视变量影响重启相关服务或整栈 `docker compose up -d` |
-| 前端 `VITE_*` | `mail-guide-ai-main` 下 **`docker compose build`** 再 `up -d` |
-| 数据库迁移 | 临时端口 + `npx supabase db push`（见 `self-hosted-supabase.md`） |
+> **第二节 Supabase 已 `up -d` 之后**按下列顺序执行。本节完成后，**数据表、RLS、Vault、pg_cron、全部业务 Edge Functions** 才构成完整可运行架构。
 
----
+### 4.1 数据库迁移（全部表结构）
 
-## 六、脚本与 Windows 对照
+**步骤 1**：在 `$REPO_ROOT/supabase-selfhost/docker-compose.yml` 的 **`db:`** 服务下**临时**增加：
 
-运维在 **Linux** 上使用 **`mail-guide-ai-main/scripts/linux/`** 下脚本，与 Windows 下 `*.ps1` 一一对应；完整对照表见 [`docker-deploy-new-server.md`](./docker-deploy-new-server.md) **「三附」**。
-
-**ERP 取生产 Token（可选）**：
-
-```bash
-export ERP_USERNAME='...'
-export ERP_PASSWORD='...'
-"$REPO_ROOT/mail-guide-ai-main/scripts/linux/erp-fetch-prod-token.sh"
+```yaml
+    ports:
+      - "54323:5432"
 ```
 
+```bash
+cd "$REPO_ROOT/supabase-selfhost"
+docker compose up -d db
+```
+
+**步骤 2**：应用 `mail-guide-ai-main/supabase/migrations/` 下全部 SQL：
+
+```bash
+cd "$REPO_ROOT/mail-guide-ai-main"
+export PGSSLMODE=disable
+npx supabase db push \
+  --db-url "postgresql://postgres:<POSTGRES_PASSWORD>@127.0.0.1:54323/postgres"
+```
+
+将 `<POSTGRES_PASSWORD>` 换为第二节 `.env` 中的值；密码含特殊字符需 URL 编码。
+
+**步骤 3**：**删除**临时 `ports: "54323:5432"`，避免 Postgres 长期暴露：
+
+```bash
+cd "$REPO_ROOT/supabase-selfhost"
+docker compose up -d db
+```
+
+### 4.2 Vault + pg_cron（必做，紧接 4.1）
+
+仅执行 `db push` 时，定时任务 URL 可能仍指向云端；须改成本栈 Kong：
+
+```bash
+"$REPO_ROOT/mail-guide-ai-main/scripts/linux/selfhosted/apply-vault-and-cron.sh"
+```
+
+脚本会：写入 vault 中的 `service_role_key`；注册 **5 条** 定时任务，调用栈内 `http://kong:8000/functions/v1/...`。
+
+| 定时任务名 | 调用的 Edge Function |
+|------------|----------------------|
+| `auto-sync-mailbox-every-5min` | `sync-mailbox` |
+| `auto-draft-every-30min` | `schedule-draft-generation` |
+| `compensating-alerts-every-30min` | `schedule-compensating-alerts` |
+| `run-compensation-tasks-every-30min` | `run-compensation-tasks` |
+| `retry-risk-intercept-hourly-at-45` | `retry-risk-intercept-compensation` |
+
+### 4.3 Edge Functions 环境（仅首次）
+
+```bash
+"$REPO_ROOT/mail-guide-ai-main/scripts/linux/selfhosted/ensure-functions-env-in-compose.sh"
+```
+
+为 `functions` 服务挂载 **`supabase-selfhost/.env.functions`**。若无该文件，从  
+`mail-guide-ai-main/docs/self-hosted-env-functions.example` 复制，并按交付清单填写，例如：
+
+- **`ERP_*`**：订单/网关接口
+- **邮箱相关**：IMAP/SMTP 等
+- **`DIFY_*`**：现网 Dify 工作流 URL 与 Key（本期不部署 Dify 容器时仍须填现网值）
+
+勿将 `.env.functions` 提交 Git。
+
+### 4.4 同步并发布全部 Edge Functions
+
+```bash
+"$REPO_ROOT/mail-guide-ai-main/scripts/linux/sync-functions-to-selfhost.sh"
+cd "$REPO_ROOT/supabase-selfhost"
+docker compose up -d --force-recreate --no-deps functions
+docker compose logs functions --tail 50
+```
+
+同步脚本会把 `mail-guide-ai-main/supabase/functions/` 下业务目录复制到 `supabase-selfhost/volumes/functions/`，主要包括：
+
+`sync-mailbox`、`process-email`、`generate-draft`、`send-reply`、`test-mailbox`、`dify-gateway`、`risk-intercept`、`schedule-draft-generation`、`schedule-compensating-alerts`、`run-compensation-tasks`、`retry-risk-intercept-compensation`、`get-order-by-email`、`get-email-context`、`close-email`、`delete-mailbox`、`cleanup-emails` 及共享模块 `_shared/`。
+
+官方模板自带的 **`hello`**、**`main`** 入口目录保留，勿删。
+
+### 4.5 全架构验收（第四节做完必做）
+
+**（1）Functions 经 Kong 可达**
+
+```bash
+curl -s -o /dev/null -w "HTTP %{http_code}\n" \
+  "http://127.0.0.1:8000/functions/v1/hello"
+```
+
+预期 **HTTP 200**（端口以实际 `SUPABASE_PUBLIC_URL` 为准）。
+
+**（2）定时任务指向自建，非云端**
+
+在 Studio → SQL：
+
+```sql
+SELECT jobname, schedule, LEFT(command, 100) AS cmd
+FROM cron.job
+WHERE jobname IN (
+  'auto-sync-mailbox-every-5min',
+  'auto-draft-every-30min',
+  'compensating-alerts-every-30min',
+  'run-compensation-tasks-every-30min',
+  'retry-risk-intercept-hourly-at-45'
+)
+ORDER BY jobname;
+```
+
+预期 **5 行**；`cmd` 中**不得**出现 `*.supabase.co`。
+
+**（3）业务冒烟**
+
+- Studio 可登录，Database 中可见业务表。
+- 第三节工作台可注册/登录。
+- 按交付范围测试：邮箱连接、收信、ERP（若本期包含）。
+
+网络、HTTPS 反代、备份见 [`production-go-live.md`](./production-go-live.md)。
+
 ---
 
-**文档版本**：与仓库当前结构同步；**本期不含 Dify 部署**。若官方 Supabase Docker 模板或 compose 服务名变更，以官方文档及本仓库 `self-hosted-supabase.md` 更新为准。
+## 五、日常发版（栈已在跑）
+
+先执行 **§2.0** `git pull`，再按变更类型选做：
+
+| 变更 | 操作 |
+|------|------|
+| 仅有新 SQL 迁移 | 重复 **§4.1**，再执行 **§4.2** |
+| 仅有 Functions 代码 | **§4.4** 前两行（sync + 重建 `functions`） |
+| 仅改 `.env.functions` | `cd supabase-selfhost` → `docker compose up -d --force-recreate --no-deps functions` |
+| 仅改前端 `VITE_*` | **§3.2** 重新 `build` + `up -d` |
+| 研发未说明类型 | 按顺序：**§4.1 → §4.2 → §4.4 → §3.2**（无对应变更可跳过） |
+
+---
+
+## 六、登录地址速查
+
+| 用途 | URL | 账号 |
+|------|-----|------|
+| **Supabase Studio** | `SUPABASE_PUBLIC_URL` | `.env` 的 `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` |
+| **mail-guide-ai 工作台** | 与 `SITE_URL` 一致 | Auth 注册用户 |
+
+---
+
+## 七、常见排错
+
+| 现象 | 处理 |
+|------|------|
+| `db push` 连不上 | 确认 §4.1 已临时映射 `54323:5432` 且 `db` 容器 Up |
+| 有表但定时任务不跑 | 补跑 **§4.2** `apply-vault-and-cron.sh` |
+| Functions 502 | `docker compose logs functions --tail 100`；检查 `.env.functions` |
+| Kong 启动失败 + CRLF | **§2.3** `fix-supabase-selfhost-crlf.sh` |
+| 宿主机 5432 冲突 | `POOLER_PORT_PUBLISHED=54322`，见 `self-hosted-supabase.md` |
+
+更细排错：[`mail-guide-ai-main/docs/self-hosted-supabase.md`](../mail-guide-ai-main/docs/self-hosted-supabase.md)。
+
+---
+
+**文档版本**：与仓库同步；**不含 Dify 容器部署**。
