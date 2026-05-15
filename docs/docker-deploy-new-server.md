@@ -25,6 +25,7 @@
 |------|--------|------------------|
 | **Postgres 里已有业务库结构**（表、RLS、扩展等） | 研发 / DBA / 发布流水线 | 确认 **1.0 上线前** 库已就绪：例如 **备份恢复**、**逻辑导入**、或已挂载含数据的 **Docker 卷**。若是 **全新空库**，须先按 [`self-hosted-supabase.md`](../mail-guide-ai-main/docs/self-hosted-supabase.md)「四步：数据库迁移」执行，**不在本文步骤内**。 |
 | **现网 Dify 的 Workflow URL + API Key** | 研发 / AI 负责人 | 写入 **`supabase-selfhost/.env.functions`**（变量名见 [`self-hosted-env-functions.example`](../mail-guide-ai-main/docs/self-hosted-env-functions.example)） |
+| **`DIFY_GATEWAY_API_KEY`（应用层网关密钥）** | **运维本机随机生成**（非 Dify 下发） | 写入 **`supabase-selfhost/.env.functions`**，生成命令见 **§四 步骤 5b**；验收见 **§六 6.2、6.3**（含 **`gateway_api_key`** 链路） |
 | **ERP、邮箱等密钥** | 研发 / 业务 | 同上，写入 **`.env.functions`**，**勿提交 Git** |
 | **`ANON_KEY`（给前端的 publishable key）** | 运维在生成 `.env` 后从 **`supabase-selfhost/.env`** 复制给前端配置 | 填入 **`mail-guide-ai-main/.env`** 的 `VITE_SUPABASE_PUBLISHABLE_KEY` |
 
@@ -66,7 +67,7 @@ chmod +x *.sh selfhosted/*.sh
 | 步骤 3 排错（CRLF） | `mail-guide-ai-main/scripts/linux/fix-supabase-selfhost-crlf.sh`，再 `docker compose up -d --force-recreate kong supavisor` |
 | 步骤 4 | `mail-guide-ai-main/scripts/linux/selfhosted/apply-vault-and-cron.sh` |
 | 步骤 5a | `mail-guide-ai-main/scripts/linux/selfhosted/ensure-functions-env-in-compose.sh` |
-| 步骤 5b | 仍手动复制 [`self-hosted-env-functions.example`](../mail-guide-ai-main/docs/self-hosted-env-functions.example) → `supabase-selfhost/.env.functions` |
+| 步骤 5b | 仍手动复制 [`self-hosted-env-functions.example`](../mail-guide-ai-main/docs/self-hosted-env-functions.example) → `supabase-selfhost/.env.functions`，并按 **§四 步骤 5b** 用 `openssl rand -base64 32` 等生成 **`DIFY_GATEWAY_API_KEY`** |
 | 步骤 5c | `mail-guide-ai-main/scripts/linux/sync-functions-to-selfhost.sh`，再 `cd "$REPO_ROOT/supabase-selfhost"` → `docker compose up -d --force-recreate --no-deps functions` |
 | 步骤 6 | 与 §四 相同：配置 `mail-guide-ai-main/.env` 后在该目录 `docker compose build` → `docker compose up -d` |
 
@@ -185,7 +186,30 @@ cd $REPO_ROOT\mail-guide-ai-main\scripts\selfhosted
 **5b** 复制模板并填写（由研发提供具体值）：
 
 - 将 [`mail-guide-ai-main/docs/self-hosted-env-functions.example`](../mail-guide-ai-main/docs/self-hosted-env-functions.example) 复制为 **`supabase-selfhost/.env.functions`**
-- 填写 Dify、ERP、邮箱等（**勿提交 Git**）
+- **`DIFY_GATEWAY_API_KEY`（须本机或安全终端先生成，不是 Dify 控制台里的 `app-` 密钥）**  
+  - **用途**：`dify-gateway` Edge 校验请求头 `x-api-key`；调用草稿工作流时由 Edge 把 **同一字符串** 作为工作流输入 **`gateway_api_key`** 传给 Dify，供工作流内 HTTP 节点回调网关时使用（**环境变量名与 Dify 输入变量名不同，值为同一把密钥**）。  
+  - **Windows：在运维本机 PowerShell 执行**（任意目录均可，无需登录服务器）：
+
+    ```powershell
+    [Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Maximum 256 }))
+    ```
+
+  - **CentOS / RHEL / AlmaLinux / Rocky 等**：在 **Bash** 中执行（需已安装 **`openssl`**；最小化镜像可先 `sudo yum install -y openssl` 或 `sudo dnf install -y openssl`）：
+
+    ```bash
+    openssl rand -base64 32
+    ```
+
+    若无 `openssl`，可用系统随机设备（输出亦为 Base64 形态，长度略异无妨，整行粘贴即可）：
+
+    ```bash
+    head -c 32 /dev/urandom | base64
+    ```
+
+  - **其它 Linux / Git Bash**：与上一项相同，优先 `openssl rand -base64 32`（与 §三附 工具链一致）。  
+  - 将终端输出的 **整行**（勿含换行与首尾空格）粘贴到 **`DIFY_GATEWAY_API_KEY=`** 之后；**勿提交 Git**、勿贴工单明文。轮换密钥后须同步重建 **`functions`** 容器（见 **5c** / 文末「仅改 `.env.functions`」说明）。  
+  - **测试环境生成的密钥能否直接用于生产？** **技术上可以**：只要生产环境 **`supabase-selfhost/.env.functions`** 中填入 **同一字符串**，且 Dify 工作流仍通过 **`gateway_api_key` / `x-api-key`** 与网关一致，功能即正常。**安全上不建议**：测试与生产共用一把钥匙时，测试环境泄露、误配或多人可见会 **连带危及生产**；生产上线建议 **单独再生成一把** 并只写入生产 `.env.functions`，测试环境保留原值互不影响。
+- 填写其余 Dify（`DIFY_*_URL` / `DIFY_*_KEY`）、ERP、邮箱等（**勿提交 Git**）；分析与草稿应用的 URL/Key **不可混用**。
 
 **5c** 同步函数代码并重建 `functions` 容器：
 
@@ -255,7 +279,37 @@ docker compose up -d
 
 ---
 
-## 六、跑通验收（运维打勾）
+## 六、部署后密钥与配置检查（验收打勾）
+
+上线交接前，建议由 **运维 + 研发** 共同核对下列项；**任一项缺失都可能导致 Dify 草稿、网关回调或登录异常**。
+
+### 6.1 `supabase-selfhost/.env`（Supabase 栈根配置）
+
+- [ ] **`JWT_SECRET` / `ANON_KEY` / `SERVICE_ROLE_KEY`** 等已由 `utils/generate-keys.sh` 生成，且复制到前端时 **未截断、未混用其它环境**  
+- [ ] **`SUPABASE_PUBLIC_URL`、`API_EXTERNAL_URL`、`SITE_URL`** 与实际上线访问方式一致（HTTPS 反代后与真实域名一致）  
+- [ ] **`DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD`** 已设且符合安全要求（密码勿纯数字）  
+
+### 6.2 `supabase-selfhost/.env.functions`（Edge 业务密钥）
+
+- [ ] **Dify 工作流 API**：`DIFY_ANALYZE_URL` + `DIFY_ANALYZE_KEY`、`DIFY_DRAFT_URL` + `DIFY_DRAFT_KEY` 已填；**分析应用与草稿应用的 URL/Key 不可混用**  
+- [ ] **`DIFY_GATEWAY_API_KEY`**：已按 **§四 步骤 5b** 在本机或服务器终端生成并写入；**不是** Dify 应用 API 密钥（`app-xxxx`）。**推荐** 与测试环境 **分钥**（见 **§四 步骤 5b** 末段「测试与生产是否复用」）  
+- [ ] **`DIFY_GATEWAY_URL`（若填写）**：与 Dify 工作流中回调 **`dify-gateway`** 的地址 **一致**；**云端 Dify** 须使用 **公网可达的 HTTPS**（如 `https://<Kong 对外域名>/functions/v1/dify-gateway`），**不可**依赖仅本机有效的 `host.docker.internal`（说明见 [`self-hosted-env-functions.example`](../mail-guide-ai-main/docs/self-hosted-env-functions.example)）  
+- [ ] **ERP、邮箱、其它变量** 已按 [`self-hosted-env-functions.example`](../mail-guide-ai-main/docs/self-hosted-env-functions.example) 与研发清单补全  
+- [ ] 修改 `.env.functions` 后已执行 **`docker compose up -d --force-recreate --no-deps functions`**（或含 **5c** 的完整同步），确保进程已加载最新环境变量  
+
+### 6.3 `gateway_api_key` 与 Dify ↔ `dify-gateway` 链路
+
+- [ ] **同一密钥三处一致**：`.env.functions` 中的 **`DIFY_GATEWAY_API_KEY`** = Edge 调用 Dify 时传入的 **`gateway_api_key`（工作流输入）** = Dify 内请求 `dify-gateway` 的 HTTP 头 **`x-api-key`**（以当前导入的 DSL 为准；若研发改过节点须重新对齐）  
+- [ ] **研发 / AI**：Dify 草稿等工作流已 **发布**；从 **Dify 所在网络** 能访问 **`…/functions/v1/dify-gateway`**（防火墙/安全组放行 **Dify → 机 1 Kong**）  
+- [ ] **抽样验证**：由研发在 Dify 或业务路径触发一次依赖网关的草稿/分析链路；若出现 **401 /「未授权」/「DIFY_GATEWAY_API_KEY 未配置」** 类日志，回到 **6.2、6.3** 与 [`mail-guide-ai-main/dify-workflows/README.md`](../mail-guide-ai-main/dify-workflows/README.md) 排错说明  
+
+### 6.4 `mail-guide-ai-main/.env`（前端构建期变量）
+
+- [ ] **`VITE_SUPABASE_URL`** 与 **`SUPABASE_PUBLIC_URL`** 一致（含协议与端口）  
+- [ ] **`VITE_SUPABASE_PUBLISHABLE_KEY`** = 自建 **`supabase-selfhost/.env`** 中的 **`ANON_KEY`**  
+- [ ] 修改任意 **`VITE_*`** 后已重新 **`docker compose build`**（见 §四 步骤 6）  
+
+### 6.5 联通与功能（跑通）
 
 - [ ] **`SUPABASE_PUBLIC_URL`** 浏览器可打开 Studio，`docker compose ps` 无异常退出  
 - [ ] 已执行 **Vault + cron**（Windows：`Apply-VaultAndCron.ps1`；CentOS/Linux：`scripts/linux/selfhosted/apply-vault-and-cron.sh`），且与 [`startup-commands.md`](../mail-guide-ai-main/docs/startup-commands.md) 验证一致  

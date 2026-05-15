@@ -94,6 +94,7 @@ cd <仓库根>\mail-guide-ai-main\scripts\selfhosted
 2. 若尚未注入 `env_file`：`mail-guide-ai-main/scripts/selfhosted/Ensure-FunctionsEnvFileInCompose.ps1`。  
 3. 复制 [`self-hosted-env-functions.example`](../mail-guide-ai-main/docs/self-hosted-env-functions.example) 为 `supabase-selfhost/.env.functions`，至少配置：  
    - **Dify**：`DIFY_ANALYZE_URL` / `DIFY_ANALYZE_KEY`、`DIFY_DRAFT_URL` / `DIFY_DRAFT_KEY` 等（URL 为 **现网 Dify 固定域名 HTTPS**，与 3.1 中导入的工作流一致）。  
+   - **`DIFY_GATEWAY_API_KEY`**：由运维在本机生成强随机串写入（**非** Dify `app-` 密钥）；与 Dify 工作流输入 **`gateway_api_key`**、HTTP 头 **`x-api-key`** 为同一把钥匙。生成命令、重建 `functions` 与 **部署后密钥检查清单**（含 `gateway_api_key` 链路）见 [`docs/docker-deploy-new-server.md`](docker-deploy-new-server.md) **§四 步骤 5b** 与 **§六**。  
    - **ERP 正式**：`ERP_TOKEN_URL`、`ERP_OMS_BASE`、`ERP_GATEWAY_BASE`、账号与 `ERP_CLIENT_ID`、`ERP_TOKEN_PASSWORD_FIELD` 等。  
 4. 重建 Functions：  
    `cd supabase-selfhost && docker compose up -d --force-recreate --no-deps functions`  
@@ -116,6 +117,7 @@ cd <仓库根>\mail-guide-ai-main\scripts\selfhosted
 - Studio / Kong 可访问；`curl` 或等价请求 `/functions/v1/hello` 正常。  
 - SQL：`cron.job` 五条齐全且 URL 正确；`vault.secrets` 含 `service_role_key`。  
 - 前端：注册/登录、工作台打开无 CORS/跳转错误。  
+- **密钥与 Dify 网关**：按 [`docker-deploy-new-server.md`](docker-deploy-new-server.md) **§六** 核对 `.env`、`.env.functions`、`gateway_api_key` 链路及前端 `VITE_*`。  
 - **Gmail**：在机 1 网络条件下完成「添加邮箱 → 测试连接 → 同步」抽样。  
 - **网易**：同样抽样；若仍报 `UnknownIssuer`（例如证书链轮换后内置兜底未更新），记录域名与端口，转入 **第六节**。
 

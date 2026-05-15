@@ -5,6 +5,7 @@
 
 # --- Dify（与云端 npx supabase functions secrets set 对应）---
 # DIFY_ANALYZE_*：必须对应 Dify 应用「独立站智能客服-邮件智能分析」→ API 访问 → Workflow 密钥（app-xxxx），切勿填成草稿应用的 Key
+# DIFY_GATEWAY_API_KEY：应用层自拟强随机密钥（非 Dify app-xxxx）；生成：Windows PowerShell 或 CentOS/Linux `openssl rand -base64 32`（见仓库根 docs/docker-deploy-new-server.md §四 步骤 5b）；验收见同文档 §六。
 DIFY_GATEWAY_API_KEY=
 # 供 Dify 草稿工作流 HTTP 节点回调自建 Supabase Edge 网关。
 # Windows Docker 下通常用 host.docker.internal；生产请改为可被 Dify API 容器访问的 HTTPS/Kong 地址。
