@@ -35,7 +35,7 @@ escape_sql_lit() {
   printf '%s' "${s//\'/\'\'}"
 }
 
-SERVICE_ROLE_KEY="$(get_dotenv_value "$ENV_FILE" SERVICE_ROLE_KEY")"
+SERVICE_ROLE_KEY="$(get_dotenv_value "$ENV_FILE" SERVICE_ROLE_KEY)"
 if [[ -z "${SERVICE_ROLE_KEY// }" ]]; then
   echo "SERVICE_ROLE_KEY not found or empty in $ENV_FILE" >&2
   exit 1
