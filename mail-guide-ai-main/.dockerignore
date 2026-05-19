@@ -7,8 +7,6 @@ node_modules
 README.md
 CHANGELOG.md
 CONTRIBUTING.md
-bun.lock
-bun.lockb
 .cursor
 scripts
 vitest.config.ts

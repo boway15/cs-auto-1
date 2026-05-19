@@ -1,42 +1,22 @@
-# mail-guide-ai 新电脑迁移教程（当前仓库基线）
+# mail-guide-ai 新环境迁移（当前仓库基线）
 
-> **生产发布默认自建 Supabase（Docker）**，见 `docs/self-hosted-supabase.md`。  
-> 下文同时保留「仅迁移开发机 + 连现有云端项目」的简化路径；若团队已全面自建，请以自建文档为准。  
-> Node 后端替代方案见 `docs/risk-and-plan.md`（规划稿，非当前主路径）。
+> **生产默认：自建 Supabase（`supabase-selfhost`）+ Dify（`dify/docker`）+ 本前端。**  
+> 完整步骤与排障见 `docs/self-hosted-supabase.md`、`docs/startup-commands.md`。  
+> 架构备选与长期规划见 `docs/risk-and-plan.md`（规划稿）。
 
 ---
 
-## 1. 架构与迁移范围
+## 1. 需要准备的目录
 
-**推荐（生产）链路：**
-
-```text
-前端(8080) -> 自建 Supabase(Kong: Auth/DB + Edge Functions 运行时)
-                         -> ngrok/内网 -> Dify(8090)
-```
-（自建与 Cloud **同为** Edge Functions；仅网关 URL 与函数发布流程不同。）
-
-**开发机仅重装工具、数据仍在云端时：**
-
-```text
-前端(8080) -> Supabase Cloud(Auth/DB/Functions)
-                         -> ngrok -> 本机 Dify(8090)
-```
-
-需要迁移（新机器上的代码与容器）：
+在新机器上克隆或拷贝后，至少涉及：
 
 - `d:\Docker\project\cs-main\mail-guide-ai-main`
 - `d:\Docker\project\cs-main\dify\docker`
-- 自建时另需：`d:\Docker\project\cs-main\supabase-selfhost`（按 `docs/self-hosted-supabase.md`）
-
-不需要迁移（除非你做全量换机）：
-
-- 云端已有数据与 Auth 用户（仍用 Cloud 时）
-- 自建库内数据（仍用自建时，随 Postgres 卷备份迁移）
+- `d:\Docker\project\cs-main\supabase-selfhost`（生产 / 团队默认）
 
 ---
 
-## 2. 前置准备
+## 2. 前置检查
 
 ```powershell
 node --version
@@ -44,12 +24,14 @@ npm --version
 docker --version
 docker compose version
 npx supabase --version
-ngrok --version
 ```
 
 ---
 
-## 3. 启动 Dify（当前仓库）
+## 3. 推荐执行顺序
+
+1. **自建 Supabase**：按 `docs/self-hosted-supabase.md`（迁移、`vault`/cron、Functions 同步、`.env.functions`）。
+2. **Dify**：
 
 ```powershell
 cd d:\Docker\project\cs-main\dify\docker
@@ -57,119 +39,29 @@ docker compose -f docker-compose.cs.yml up -d
 docker compose -f docker-compose.cs.yml ps
 ```
 
-访问：`http://localhost:8090`
+访问 `http://localhost:8090`。
+
+3. **导入 Dify 工作流**：在 Dify 后台导入 `mail-guide-ai-main/dify-workflows/` 下的 `email-analysis.yml`、`draft-generation.yml`（及其他团队约定的工作流），发布并创建 API Key。
+4. **公网暴露 Dify（Edge 调本机 Dify 时需要）**：当前仓库默认用 **compose 内的 `dify-ngrok`**，见 `docs/startup-commands.md`「4.3 ngrok」。URL 变更后需同步 `supabase-selfhost/.env.functions` 中的 `DIFY_*`。
+5. **前端**：`copy .env.selfhosted.example .env`（或按团队模板），填 Kong URL 与 anon key；`npm ci` + `npm run dev`，或 `docker compose up -d`。
 
 ---
 
-## 4. 导入并发布 Dify 工作流
+## 4. 数据库与函数（自建）
 
-在 Dify 后台导入：
-
-- `d:\Docker\project\cs-main\mail-guide-ai-main\dify-workflows\email-analysis.yml`
-- `d:\Docker\project\cs-main\mail-guide-ai-main\dify-workflows\draft-generation.yml`
-
-然后分别发布并创建 API Key。
+- 迁移：`docs/self-hosted-supabase.md` 与 `docs/startup-commands.md`「4.5」中的 `db push` / 初始化说明。
+- Edge Functions：自建栈用 `scripts/sync-functions-to-selfhost.ps1`，**不要**依赖 `npx supabase functions deploy`（该命令面向 Supabase Cloud）。
 
 ---
 
-## 5. 启动 ngrok
+## 5. 验证清单
 
-```powershell
-ngrok config add-authtoken <your-token>
-
-cd d:\Docker\project\cs-main\mail-guide-ai-main
-ngrok start --config dify-workflows/ngrok.yml dify-api
-```
-
-> `dify-workflows/ngrok.yml` 已按当前仓库映射 `addr: 8090`。  
-> ngrok URL 变化后要同步更新 Supabase secrets。
+- Dify：`http://localhost:8090` 可登录。
+- 前端：`http://localhost:8080` 可打开登录页。
+- 自建：`supabase-selfhost` 下 `docker compose ps` 主要服务 healthy；cron 与 `vault.secrets` 已按 `self-hosted-supabase.md` 核对。
 
 ---
 
-## 6. 前端与 Supabase 配置
+## 附录：若仍维护历史 Supabase Cloud 项目
 
-```powershell
-cd d:\Docker\project\cs-main\mail-guide-ai-main
-copy .env.example .env
-```
-
-填写 `.env`：
-
-- `VITE_SUPABASE_URL`
-- `VITE_SUPABASE_PUBLISHABLE_KEY`
-- `VITE_SUPABASE_PROJECT_ID`
-
-登录并关联项目：
-
-```powershell
-npx supabase login
-npx supabase link --project-ref elchuqvftkhszbkwgfjp
-```
-
----
-
-## 7. 部署核心 Edge Functions
-
-```powershell
-cd d:\Docker\project\cs-main\mail-guide-ai-main
-
-npx supabase functions deploy sync-mailbox --no-verify-jwt
-npx supabase functions deploy process-email --no-verify-jwt
-npx supabase functions deploy generate-draft
-npx supabase functions deploy send-reply
-npx supabase functions deploy risk-intercept
-npx supabase functions deploy dify-gateway --no-verify-jwt
-npx supabase functions deploy get-email-context --no-verify-jwt
-npx supabase functions deploy get-order-by-email --no-verify-jwt
-npx supabase functions deploy test-mailbox --no-verify-jwt
-```
-
----
-
-## 8. 推送数据库迁移
-
-```powershell
-cd d:\Docker\project\cs-main\mail-guide-ai-main
-npx supabase db push
-```
-
-当前仓库迁移文件数为 **17**（`supabase/migrations/*.sql`）。
-
----
-
-## 9. 配置 Functions Secrets
-
-```powershell
-cd d:\Docker\project\cs-main\mail-guide-ai-main
-
-npx supabase functions secrets set DIFY_GATEWAY_API_KEY="replace_with_strong_key"
-npx supabase functions secrets set DIFY_ANALYZE_URL="https://xxxx.ngrok-free.app/v1/workflows/run"
-npx supabase functions secrets set DIFY_ANALYZE_KEY="app-xxxxx1"
-npx supabase functions secrets set DIFY_DRAFT_URL="https://xxxx.ngrok-free.app/v1/workflows/run"
-npx supabase functions secrets set DIFY_DRAFT_KEY="app-xxxxx2"
-```
-
-可选（Dify 草稿回退）：
-
-```powershell
-npx supabase functions secrets set LOVABLE_API_KEY="your_lovable_key"
-```
-
----
-
-## 10. 验证
-
-- Dify：`http://localhost:8090` 可访问
-- 前端：`http://localhost:8080` 可登录
-- ngrok：`http://localhost:4040/api/tunnels` 可见 `dify-api`
-- Supabase Dashboard 中 Edge Functions 状态正常
-- `auto-sync-mailbox-every-5min` cron 启用
-
----
-
-## 11. 常见问题
-
-- Dify 打不开：确认使用的是 `docker-compose.cs.yml` 且端口是 `8090`
-- Dify 调用超时：确认 ngrok 在线，且 URL 与 secrets 一致
-- 草稿失败：确认 `DIFY_DRAFT_*` 或 `LOVABLE_API_KEY` 至少配置一套
-- `dify-gateway` 401：确认请求头带 `x-api-key` 且值等于 `DIFY_GATEWAY_API_KEY`
+CLI 的 `link`、`functions deploy`、`secrets set` 与云端 cron 校验等，已集中到 `docs/startup-commands.md`「二、仅本地开发…」与「4.4 Supabase 云端（CLI，可选）」，避免与本迁移文重复维护。

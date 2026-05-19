@@ -36,14 +36,7 @@ docker --version      # 需安装 Docker Desktop
 3. mail-guide-ai 前端（d:\Docker\project\cs-main\mail-guide-ai-main）
 ```
 
-**仅本地开发且数据库仍用 Supabase Cloud 时：**
-
-```text
-1. Dify（d:\Docker\project\cs-main\dify\docker）
-2. ngrok（已并入 Dify compose，一起启动）
-3. mail-guide-ai 前端
-4. Supabase Cloud（无需本地起库，仅需 CLI 部署/配置）
-```
+**仅本地开发且后端仍用 Supabase Cloud（历史路径，不推荐新环境）：** 与上类似，但数据库与函数发布走 Supabase Cloud CLI；细节见下文「4.4」。
 
 ---
 
@@ -123,48 +116,19 @@ curl.exe http://localhost:4040/api/tunnels
 2. Dify 网关容器/端口发生变化（需同步改 `ngrok.yml` 的 `addr`）
 3. 改用了不同 tunnel 名称（需同步改启动命令中的 `dify-api`）
 
-> ngrok 免费版 URL 可能变化。若 URL 变化，需要更新 Supabase Functions Secrets 里的 `DIFY_ANALYZE_URL` / `DIFY_DRAFT_URL`。
+> ngrok 免费版 URL 可能变化。自建栈请在 `supabase-selfhost/.env.functions` 更新 `DIFY_ANALYZE_URL` / `DIFY_DRAFT_URL` 后重建 `functions`；云端项目则更新 Functions secrets。
 
-### 4.4 Supabase 云端（CLI）
+### 4.4 Supabase 云端（CLI，可选 / 历史）
+
+仅在仍维护 **Supabase Cloud** 上的项目时使用；**新环境请优先「4.5」自建栈。**
 
 ```powershell
 cd d:\Docker\project\cs-main\mail-guide-ai-main
-
 npx supabase login
-npx supabase link --project-ref elchuqvftkhszbkwgfjp
-
-# 常用函数部署
-npx supabase functions deploy sync-mailbox --no-verify-jwt
-npx supabase functions deploy process-email --no-verify-jwt
-npx supabase functions deploy generate-draft
-npx supabase functions deploy schedule-draft-generation --no-verify-jwt
-npx supabase functions deploy schedule-compensating-alerts --no-verify-jwt
-npx supabase functions deploy run-compensation-tasks --no-verify-jwt
-# close-email 为遗留函数，产品主流程以「已回复」为主，可选部署
-# npx supabase functions deploy close-email
-npx supabase functions deploy send-reply
-npx supabase functions deploy risk-intercept
-npx supabase functions deploy dify-gateway --no-verify-jwt
-npx supabase functions deploy get-email-context --no-verify-jwt
-npx supabase functions deploy get-order-by-email --no-verify-jwt
-npx supabase functions deploy test-mailbox --no-verify-jwt
-
-# Dify 相关 secrets
-npx supabase functions secrets set DIFY_GATEWAY_API_KEY="replace_with_strong_key"
-npx supabase functions secrets set DIFY_ANALYZE_URL="https://xxxx.ngrok-free.app/v1/workflows/run"
-npx supabase functions secrets set DIFY_ANALYZE_KEY="app-xxxxx1"
-npx supabase functions secrets set DIFY_DRAFT_URL="https://xxxx.ngrok-free.app/v1/workflows/run"
-npx supabase functions secrets set DIFY_DRAFT_KEY="app-xxxxx2"
-
-# ERP（Edge 单出口；勿把密码写入仓库）
-# npx supabase functions secrets set ERP_TOKEN_URL="https://loginserver.bestwo.net:9443/connect/token"
-# npx supabase functions secrets set ERP_OMS_BASE="https://omsapi.bestwo.net:9443"
-# npx supabase functions secrets set ERP_GATEWAY_BASE="https://gatewayjava.bestwo.net:9443"
-# npx supabase functions secrets set ERP_USERNAME="..."
-# npx supabase functions secrets set ERP_PASSWORD="..."
-# npx supabase functions secrets set ERP_CLIENT_ID="ERP"
-# 测试环境 IdP 使用 pw 字段时：ERP_TOKEN_PASSWORD_FIELD=pw
+npx supabase link --project-ref <your-project-ref>
 ```
+
+随后用 `npx supabase functions deploy <函数名>` 发布 `supabase/functions/` 中的实现，并用 `npx supabase functions secrets set KEY=value` 配置 `DIFY_*`、`DIFY_GATEWAY_API_KEY` 及 ERP 等密钥。函数清单以 `supabase/config.toml` 与仓库内 `supabase/functions/*` 为准；勿在仓库或聊天中粘贴真实密钥。
 
 ### 4.5 Supabase 自建 Docker（`supabase-selfhost`）
 
@@ -230,10 +194,9 @@ docker compose up -d --force-recreate --no-deps functions
 - 前端：打开 `http://localhost:8080` 能看到登录页
 - ngrok（若使用）：`http://localhost:4040` 可看到 tunnel
 
-### Supabase Cloud（CLI 部署时）
+### Supabase Cloud（仅历史项目）
 
-- Dashboard 中 Edge Functions 列表正常
-- Database → Cron：`auto-sync-mailbox-every-5min`、`auto-draft-every-30min`、`compensating-alerts-every-30min` 等与迁移一致（Cloud 项目是否含 `run-compensation-tasks` 以实际迁移为准；自建见下）
+Dashboard 中 Functions / Cron 与团队云端迁移一致即可；新环境不做默认检查项。
 
 ### 自建 Supabase（Docker）
 

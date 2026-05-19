@@ -51,42 +51,16 @@ DSL 文件位于：
 - `draft_api_url`（通常同上）
 - `draft_api_key`
 
-## 5. 配置 ngrok（可选但推荐）
+## 5. 配置 ngrok（Edge 调本机 Dify 时需要）
 
-因为 Supabase Edge Functions 在云端，若 Dify 在本机，需要公网 URL。
+**推荐（与 `docs/startup-commands.md` 一致）：** 使用 `dify/docker` 栈内的 **`dify-ngrok`** 容器，配置在 `dify/docker/ngrok/ngrok.yml`，查看隧道：`curl.exe http://localhost:4040/api/tunnels`。
 
-1) 先配置 token（仅一次）：
+**备选：** 本机安装 ngrok CLI 时，可参考仓库内 `dify-workflows/ngrok.yml` 自行 `ngrok start …`（与 compose 内 ngrok 二选一即可，避免重复占端口）。
 
-```powershell
-ngrok config add-authtoken <your-ngrok-token>
-```
+## 6. 配置 Dify 相关环境变量
 
-2) 启动 tunnel：
-
-```powershell
-cd d:\Docker\project\cs-main\mail-guide-ai-main
-ngrok start --config dify-workflows/ngrok.yml dify-api
-```
-
-3) 获取公网地址：
-
-```powershell
-curl.exe http://localhost:4040/api/tunnels
-```
-
-> `dify-workflows/ngrok.yml` 默认映射本机 `8090`。
-
-## 6. 设置 Supabase Functions Secrets
-
-```powershell
-cd d:\Docker\project\cs-main\mail-guide-ai-main
-
-npx supabase functions secrets set DIFY_GATEWAY_API_KEY="replace_with_strong_key"
-npx supabase functions secrets set DIFY_ANALYZE_URL="https://xxxx.ngrok-free.app/v1/workflows/run"
-npx supabase functions secrets set DIFY_ANALYZE_KEY="app-xxxxx1"
-npx supabase functions secrets set DIFY_DRAFT_URL="https://xxxx.ngrok-free.app/v1/workflows/run"
-npx supabase functions secrets set DIFY_DRAFT_KEY="app-xxxxx2"
-```
+- **自建 Supabase（默认）：** 在 `supabase-selfhost/.env.functions` 中配置 `DIFY_*`、`DIFY_GATEWAY_API_KEY` 等，模板见 `docs/self-hosted-env-functions.example`；改完后按 `docs/startup-commands.md`「4.5」重建 `functions`。
+- **Supabase Cloud（历史）：** 使用 `npx supabase functions secrets set …`，见 `docs/startup-commands.md`「4.4」。
 
 ### 6.1 ERP 订单查询与 Dify（Edge 单出口）
 
@@ -108,35 +82,22 @@ npx supabase functions secrets set DIFY_DRAFT_KEY="app-xxxxx2"
 
 人工点击「生成草稿」默认走 Dify 草稿工作流（本地兜底见 Edge `generate-draft`）；勿与邮件分析的 Key 混用。
 
-## 7. 部署相关 Edge Functions
+## 7. 同步 Edge Functions
 
-```powershell
-cd d:\Docker\project\cs-main\mail-guide-ai-main
-
-npx supabase functions deploy sync-mailbox --no-verify-jwt
-npx supabase functions deploy process-email --no-verify-jwt
-npx supabase functions deploy generate-draft
-npx supabase functions deploy schedule-draft-generation --no-verify-jwt
-npx supabase functions deploy schedule-compensating-alerts --no-verify-jwt
-npx supabase functions deploy close-email
-npx supabase functions deploy send-reply
-npx supabase functions deploy risk-intercept
-npx supabase functions deploy dify-gateway --no-verify-jwt
-npx supabase functions deploy get-email-context --no-verify-jwt
-npx supabase functions deploy get-order-by-email --no-verify-jwt
-```
+- **自建：** `mail-guide-ai-main/scripts/sync-functions-to-selfhost.ps1`（见 `docs/self-hosted-supabase.md`）。
+- **云端：** `npx supabase functions deploy …`（见 `docs/startup-commands.md`「4.4」）。
 
 ## 8. 最小验证
 
 1) 在 Dify 中手动运行两个工作流，确认无报错  
-2) 在 Supabase Dashboard 手动调用 `process-email`  
+2) 在 Supabase Studio 或自建调试入口手动触发 `process-email`（或按团队约定方式）  
 3) 在前端工作台触发“生成草稿”，确认本地产出  
 4) 手动调用 `schedule-draft-generation`，确认 0~4h 邮件走 Dify、4~24h 邮件走本地  
 
 ## 9. 常见问题
 
 - **Dify 打不开**：确认 `docker-compose.cs.yml` 已启动，并访问 `8090` 不是 `8081`
-- **Edge Function 调 Dify 超时**：检查 ngrok 是否在线，URL 是否与 secrets 一致
+- **Edge Function 调 Dify 超时**：检查 ngrok 隧道是否在线（`4040`），且 `DIFY_ANALYZE_URL` / `DIFY_DRAFT_URL` 与自建 `.env.functions`（或云端 secrets）一致
 - **草稿生成失败**：确认 `DIFY_DRAFT_*` 或 `LOVABLE_API_KEY` 至少有一套可用
 - **Dify「获取邮件上下文」曾报 `url is required` / `InvalidURLError`**：`NewEmailDraft` 已改为由 Edge `callDifyDraftWorkflow` **随请求传入** `gateway_url`、`gateway_api_key`、`max_search_depth`（开始变量），不再依赖 Dify 应用环境变量。请重新导入 DSL；并确保 Functions 已配置 **`DIFY_GATEWAY_API_KEY`**，且 **`DIFY_GATEWAY_URL` 或 `SUPABASE_URL`** 至少其一可用（未显式配置 URL 时将自动拼装 `{SUPABASE_URL}/functions/v1/dify-gateway`）。
 - **dify-gateway 返回未授权**：确认 `DIFY_GATEWAY_API_KEY` 已设置且请求带 `x-api-key`

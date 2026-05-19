@@ -5,11 +5,11 @@
 ## 当前已落地架构
 
 - 前端：`React + Vite`（默认 `http://localhost:8080`）
-- 数据与后端：`Supabase` — **生产默认自建 Docker**（`supabase-selfhost`）；**业务后端仍为 Supabase Edge Functions（Deno）**，与 Cloud 共用 `supabase/functions/` 源码，仅部署方式不同。开发可选用 Supabase Cloud
+- 数据与后端：`Supabase` — **生产默认自建 Docker**（`supabase-selfhost`）；业务逻辑在 **Supabase Edge Functions（Deno）**，源码在 `supabase/functions/`，自建栈通过 `scripts/sync-functions-to-selfhost.ps1` 同步
 - AI 工作流：`Dify`（`dify/docker/docker-compose.cs.yml`，默认 `http://localhost:8090`）
 - 定时任务：`pg_cron + pg_net` 调用 `sync-mailbox`、`schedule-draft-generation` 等函数（自建时 URL 须指向本栈 Kong，勿写死 `*.supabase.co`）
 
-> `docs/architecture-design.md` 是未来方案稿，不是当前线上运行时说明。
+> 长期架构备选见 `docs/risk-and-plan.md`（规划稿）。
 
 ## 目录速览
 
@@ -51,13 +51,9 @@ docker compose -f docker-compose.cs.yml up -d
 
 按 `docs/self-hosted-supabase.md` 执行（含 Docker 初始化、迁移、vault/cron 修正、functions 同步）。
 
-### 4) Supabase（Cloud，可选开发路径）
+### 4) Supabase（Cloud，仅历史/特殊场景）
 
-```powershell
-cd d:\Docker\project\cs-main\mail-guide-ai-main
-npx supabase login
-npx supabase link --project-ref elchuqvftkhszbkwgfjp
-```
+若团队仍保留云端项目，CLI 的 `login` / `link` / `functions deploy` 见 `docs/startup-commands.md`「4.4」。
 
 ## 邮箱连接现状（重要）
 

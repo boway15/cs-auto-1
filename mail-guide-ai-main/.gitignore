@@ -34,3 +34,6 @@ supabase/.temp/
 
 # Cursor IDE（本地技能与规则，勿提交）
 .cursor/
+
+# 本地打包产物
+*.zip
