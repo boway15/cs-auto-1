@@ -44,7 +44,6 @@ fi
 base="${KONG_INTERNAL_URL%/}"
 u_sync="$(escape_sql_lit "${base}/functions/v1/sync-mailbox")"
 u_draft="$(escape_sql_lit "${base}/functions/v1/schedule-draft-generation")"
-u_alert="$(escape_sql_lit "${base}/functions/v1/schedule-compensating-alerts")"
 u_comp="$(escape_sql_lit "${base}/functions/v1/run-compensation-tasks")"
 u_risk="$(escape_sql_lit "${base}/functions/v1/retry-risk-intercept-compensation")"
 
@@ -100,17 +99,18 @@ PART2
 END $$;
 
 PART3
+  printf "%s\n" "SELECT cron.unschedule('compensating-alerts-every-30min') WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'compensating-alerts-every-30min');"
+  printf "\n"
   add_cron_block "auto-sync-mailbox-every-5min" "*/4 * * * *" "$u_sync"
   add_cron_block "auto-draft-every-30min" "2-59/4 * * * *" "$u_draft"
-  add_cron_block "compensating-alerts-every-30min" "15 * * * *" "$u_alert"
-  add_cron_block "run-compensation-tasks-every-30min" "14 * * * *" "$u_comp"
+  add_cron_block "run-compensation-tasks-every-30min" "*/20 * * * *" "$u_comp"
   cat <<'PART4'
 SELECT cron.unschedule('retry-risk-intercept-hourly-at-10') WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'retry-risk-intercept-hourly-at-10');
 
 SELECT cron.unschedule('retry-risk-intercept-hourly-at-29') WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'retry-risk-intercept-hourly-at-29');
 
 PART4
-  add_cron_block "retry-risk-intercept-hourly-at-45" "45 * * * *" "$u_risk"
+  add_cron_block "retry-risk-intercept-hourly-at-45" "*/20 * * * *" "$u_risk"
 } >"$TMP"
 
 wait_db_ready() {

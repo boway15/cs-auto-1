@@ -53,6 +53,8 @@ export interface AlertInput {
   related_email_id?: string | null;
   related_order_id?: string | null;
   metadata?: Record<string, unknown>;
+  /** 若提供则覆盖默认 source:kind:email:order 幂等键（用于首次/末次分开发邮） */
+  idempotency_key?: string | null;
 }
 
 export interface AlertResult {
@@ -98,7 +100,7 @@ export async function createAlertAndNotify(
   admin: any,
   payload: AlertInput,
 ): Promise<AlertResult> {
-  const idempotencyKey = buildIdempotencyKey(payload);
+  const idempotencyKey = (payload.idempotency_key?.trim() || buildIdempotencyKey(payload));
   const severity = payload.severity ?? "warning";
 
   // 1) 查重

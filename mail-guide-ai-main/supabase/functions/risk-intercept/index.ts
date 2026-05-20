@@ -1,7 +1,15 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { createAlertAndNotify } from "../_shared/ops-notify.ts";
+import {
+  notifyAutoInterceptFinalFailure,
+  notifyAutoInterceptFirstFailure,
+} from "../_shared/automation-intercept-alerts.ts";
 import { blockOrderByOrderId, isErpHttpConfigured } from "../_shared/erp-client.ts";
-import { assertAutoRiskInterceptAllowed } from "../_shared/auto-risk-intercept-policy.ts";
+import {
+  assertAutoRiskInterceptAllowed,
+  MAX_COMPENSATION_ATTEMPTS,
+  nextCompensationRunAtIso,
+} from "../_shared/auto-risk-intercept-policy.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -108,7 +116,7 @@ function buildRiskTimelineDetail(params: {
   return lines.join("\n").trim().slice(0, 8000);
 }
 
-/** 失败落库：人工立即 failed；auto 首次失败进入 retrying+补偿队列；retry 失败递增补偿次数，满 3 次 failed */
+/** 失败落库：人工立即 failed；auto 首次失败进入 retrying+补偿队列；retry 失败递增补偿次数，满 MAX 次 failed */
 async function persistRiskInterceptFailure(admin: any, opts: {
   log: { id: string; retry_count?: number | null; compensation_attempts_done?: number | null; retrying_started_at?: string | null };
   trigger_source: string;
@@ -135,6 +143,7 @@ async function persistRiskInterceptFailure(admin: any, opts: {
   };
 
   let finalStatus: "failed" | "retrying";
+  let failureReason = "failed";
   if (ts === "manual") {
     patch.status = "failed";
     patch.auto_compensation_eligible = false;
@@ -145,24 +154,25 @@ async function persistRiskInterceptFailure(admin: any, opts: {
     patch.status = "retrying";
     patch.auto_compensation_eligible = true;
     patch.compensation_attempts_done = 0;
-    patch.next_compensation_at = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    patch.next_compensation_at = nextCompensationRunAtIso();
     patch.retrying_started_at = (opts.log as { retrying_started_at?: string | null }).retrying_started_at ??
       new Date().toISOString();
     finalStatus = "retrying";
   } else if (ts === "retry") {
     const done = Number(opts.log.compensation_attempts_done ?? 0) + 1;
-    const exhausted = done >= 3;
+    const exhausted = done >= MAX_COMPENSATION_ATTEMPTS;
+    if (exhausted) failureReason = "max_retries";
     patch.compensation_attempts_done = done;
     patch.status = exhausted ? "failed" : "retrying";
     patch.auto_compensation_eligible = !exhausted;
-    patch.next_compensation_at = exhausted ? null : new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    patch.next_compensation_at = exhausted ? null : nextCompensationRunAtIso();
     if (exhausted) patch.retrying_started_at = null;
     finalStatus = exhausted ? "failed" : "retrying";
   } else {
     patch.status = "retrying";
     patch.auto_compensation_eligible = true;
     patch.compensation_attempts_done = 0;
-    patch.next_compensation_at = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    patch.next_compensation_at = nextCompensationRunAtIso();
     patch.retrying_started_at = (opts.log as { retrying_started_at?: string | null }).retrying_started_at ??
       new Date().toISOString();
     finalStatus = "retrying";
@@ -170,7 +180,18 @@ async function persistRiskInterceptFailure(admin: any, opts: {
 
   await admin.from("risk_intercept_logs").update(patch).eq("id", opts.log.id);
 
-  if (finalStatus === "failed") {
+  if (finalStatus === "retrying" && ts === "auto") {
+    await notifyAutoInterceptFirstFailure(admin, {
+      email_id: opts.email_id,
+      order_id: opts.order_id,
+      order_no: opts.orderNo,
+      log_id: opts.log.id,
+      message: opts.message,
+      email_provided_only: opts.emailProvidedOnly,
+      trigger_source: ts,
+      metadata: { retry_count: nextRetry },
+    });
+  } else if (finalStatus === "failed" && ts === "manual") {
     await createAlertAndNotify(admin, {
       source: "risk-intercept",
       kind: "failed",
@@ -182,6 +203,22 @@ async function persistRiskInterceptFailure(admin: any, opts: {
       metadata: { log_id: opts.log.id, retry_count: nextRetry, trigger_source: ts },
     });
     if (opts.email_id) await admin.from("emails").update({ priority: "urgent" }).eq("id", opts.email_id);
+  } else if (finalStatus === "failed") {
+    await notifyAutoInterceptFinalFailure(admin, {
+      email_id: opts.email_id,
+      order_id: opts.order_id,
+      order_no: opts.orderNo,
+      log_id: opts.log.id,
+      message: opts.message,
+      email_provided_only: opts.emailProvidedOnly,
+      reason: failureReason,
+      metadata: {
+        log_id: opts.log.id,
+        retry_count: nextRetry,
+        trigger_source: ts,
+        compensation_attempts_done: patch.compensation_attempts_done,
+      },
+    });
   }
 
   if (opts.email_id) {

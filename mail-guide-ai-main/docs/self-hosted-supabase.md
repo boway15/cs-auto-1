@@ -131,9 +131,8 @@ cd d:\Docker\project\cs-main\mail-guide-ai-main\scripts\selfhosted
 |---------|----------|----------------|
 | `auto-sync-mailbox-every-5min` | `*/4 * * * *` | `sync-mailbox` |
 | `auto-draft-every-30min` | `2-59/4 * * * *` | `schedule-draft-generation` |
-| `compensating-alerts-every-30min` | `15 * * * *` | `schedule-compensating-alerts` |
-| `run-compensation-tasks-every-30min` | `14 * * * *` | `run-compensation-tasks` |
-| `retry-risk-intercept-hourly-at-45` | `45 * * * *` | `retry-risk-intercept-compensation` |
+| `run-compensation-tasks-every-30min` | `*/20 * * * *` | `run-compensation-tasks`（job 名历史遗留，实际每 20 分钟） |
+| `retry-risk-intercept-hourly-at-45` | `*/20 * * * *` | `retry-risk-intercept-compensation`（job 名历史遗留，实际每 20 分钟） |
 
 **注意**：不要把 Cloud 的 cron URL 留在生产自建库中，否则定时任务会打到云端。
 
@@ -209,7 +208,6 @@ FROM cron.job
 WHERE jobname IN (
   'auto-sync-mailbox-every-5min',
   'auto-draft-every-30min',
-  'compensating-alerts-every-30min',
   'run-compensation-tasks-every-30min'
 )
 ORDER BY jobname;

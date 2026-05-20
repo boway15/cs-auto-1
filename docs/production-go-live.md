@@ -1,6 +1,6 @@
 # cs-main 生产上线准备与运维说明
 
-本文档描述 **mail-guide-ai + 自建 Supabase（`supabase-selfhost`）+ Dify** 整体上线准备、上线后运维要点，以及 **邮箱 TLS / 自定义 CA**（第六节：何时需要 PEM、如何与当前函数实现配合）。**自动风控拦截**的产品规则与运维约定见 **第五节 5.5**（与代码实现迭代同步）。  
+本文档描述 **mail-guide-ai + 自建 Supabase（`supabase-selfhost`）+ Dify** 整体上线准备、上线后运维要点，以及 **邮箱 TLS / 自定义 CA**（第六节：何时需要 PEM、如何与当前函数实现配合）。**客户邮件自动处理**（订单关联、风控拦截、自动回邮）的统一规则与运维约定见 **第五节 5.5**（与代码实现迭代同步；业务说明见工作台 **帮助中心**）。
 **不替代**下列原文档，细节命令与排错仍以原文为准：
 
 | 文档 | 路径 |
@@ -56,10 +56,10 @@
 
 **前提**：Dify 已在独立服务器运行；本次上线 **不在此文档范围内** 重复搭建 Dify 操作系统级或集群级安装（由现网负责）。
 
-1. **导入代码/工作流**：在现网 Dify 控制台中，将本仓库 [`mail-guide-ai-main/dify-workflows/`](../mail-guide-ai-main/dify-workflows/) 下对应 DSL **导入为应用/工作流**（或按团队流程从 Git 拉取后导入），发布为可 API 调用的版本。  
-2. **密钥与入口**：在 Dify 中为「邮件智能分析」「邮件草稿生成」等应用分别取得 **Workflow API 密钥（`app-xxxx`）** 与 **对外 API 地址**（`.../v1/workflows/run` 等，以现网 Dify 版本为准）；**分析应用与草稿应用的 URL/Key 不可混用**。  
-3. **域名与 HTTPS**：沿用现网 **固定域名** 与证书策略；若后续证书轮换，同步更新 `supabase-selfhost/.env.functions` 中的 `DIFY_*_URL`（若域名不变则通常只需关注 Key 与路径）。  
-4. **连通性**：从 **机 1**（与生产 `functions` 容器出站一致）对现网 Dify 的 **HTTPS 工作流地址** 做测试（如 `curl`），确保防火墙/代理不拦截 **机 1 → 机 2**。  
+1. **导入代码/工作流**：在现网 Dify 控制台中，将本仓库 [`mail-guide-ai-main/dify-workflows/`](../mail-guide-ai-main/dify-workflows/) 下对应 DSL **导入为应用/工作流**（或按团队流程从 Git 拉取后导入），发布为可 API 调用的版本。
+2. **密钥与入口**：在 Dify 中为「邮件智能分析」「邮件草稿生成」等应用分别取得 **Workflow API 密钥（`app-xxxx`）** 与 **对外 API 地址**（`.../v1/workflows/run` 等，以现网 Dify 版本为准）；**分析应用与草稿应用的 URL/Key 不可混用**。
+3. **域名与 HTTPS**：沿用现网 **固定域名** 与证书策略；若后续证书轮换，同步更新 `supabase-selfhost/.env.functions` 中的 `DIFY_*_URL`（若域名不变则通常只需关注 Key 与路径）。
+4. **连通性**：从 **机 1**（与生产 `functions` 容器出站一致）对现网 Dify 的 **HTTPS 工作流地址** 做测试（如 `curl`），确保防火墙/代理不拦截 **机 1 → 机 2**。
 5. **本地参考栈（可选）**：若开发人员需在笔记本复现全栈，仍可使用 [`DEPLOY.md`](../DEPLOY.md) 第三节的 `docker-compose.cs.yml`；**与生产现网 Dify 无必然同一套实例**。
 
 ### 3.2 机 1：自建 Supabase 栈
@@ -72,7 +72,7 @@
 
 ### 3.3 数据库迁移
 
-1. 按 `self-hosted-supabase.md` 为 `db` **临时**暴露宿主机端口（如 `54323:5432`），执行：  
+1. 按 `self-hosted-supabase.md` 为 `db` **临时**暴露宿主机端口（如 `54323:5432`），执行：
    `npx supabase db push --db-url "postgresql://postgres:<密码>@127.0.0.1:54323/postgres"`（`PGSSLMODE=disable` 等见原文档）。
 2. **迁移完成后删除** `db` 的临时 `ports` 映射，避免 Postgres 长期暴露在宿主机。
 
@@ -85,47 +85,47 @@ cd <仓库根>\mail-guide-ai-main\scripts\selfhosted
 .\Apply-VaultAndCron.ps1
 ```
 
-- 确认 `cron.job` 中存在 **5 条**业务任务，且 **`command` 中不得出现 `*.supabase.co`**（应指向本栈 Kong，如 `http://kong:8000/functions/v1/...`）。  
+- 确认 `cron.job` 中存在 **5 条**业务任务，且 **`command` 中不得出现 `*.supabase.co`**（应指向本栈 Kong，如 `http://kong:8000/functions/v1/...`）。
 - 验证 SQL 见 [`startup-commands.md`](../mail-guide-ai-main/docs/startup-commands.md)「五、验证清单」。
 
 ### 3.5 Edge Functions 与 `.env.functions`
 
-1. 同步函数：`mail-guide-ai-main/scripts/sync-functions-to-selfhost.ps1`。  
-2. 若尚未注入 `env_file`：`mail-guide-ai-main/scripts/selfhosted/Ensure-FunctionsEnvFileInCompose.ps1`。  
-3. 复制 [`self-hosted-env-functions.example`](../mail-guide-ai-main/docs/self-hosted-env-functions.example) 为 `supabase-selfhost/.env.functions`，至少配置：  
-   - **Dify**：`DIFY_ANALYZE_URL` / `DIFY_ANALYZE_KEY`、`DIFY_DRAFT_URL` / `DIFY_DRAFT_KEY` 等（URL 为 **现网 Dify 固定域名 HTTPS**，与 3.1 中导入的工作流一致）。  
-   - **`DIFY_GATEWAY_API_KEY`**：由运维在本机生成强随机串写入（**非** Dify `app-` 密钥）；与 Dify 工作流输入 **`gateway_api_key`**、HTTP 头 **`x-api-key`** 为同一把钥匙。生成命令、重建 `functions` 与 **部署后密钥检查清单**（含 `gateway_api_key` 链路）见 [`docs/docker-deploy-new-server.md`](docker-deploy-new-server.md) **§四 步骤 5b** 与 **§六**。  
-   - **ERP 正式**：`ERP_TOKEN_URL`、`ERP_OMS_BASE`、`ERP_GATEWAY_BASE`、账号与 `ERP_CLIENT_ID`、`ERP_TOKEN_PASSWORD_FIELD` 等。  
-4. 重建 Functions：  
-   `cd supabase-selfhost && docker compose up -d --force-recreate --no-deps functions`  
+1. 同步函数：`mail-guide-ai-main/scripts/sync-functions-to-selfhost.ps1`。
+2. 若尚未注入 `env_file`：`mail-guide-ai-main/scripts/selfhosted/Ensure-FunctionsEnvFileInCompose.ps1`。
+3. 复制 [`self-hosted-env-functions.example`](../mail-guide-ai-main/docs/self-hosted-env-functions.example) 为 `supabase-selfhost/.env.functions`，至少配置：
+   - **Dify**：`DIFY_ANALYZE_URL` / `DIFY_ANALYZE_KEY`、`DIFY_DRAFT_URL` / `DIFY_DRAFT_KEY` 等（URL 为 **现网 Dify 固定域名 HTTPS**，与 3.1 中导入的工作流一致）。
+   - **`DIFY_GATEWAY_API_KEY`**：由运维在本机生成强随机串写入（**非** Dify `app-` 密钥）；与 Dify 工作流输入 **`gateway_api_key`**、HTTP 头 **`x-api-key`** 为同一把钥匙。生成命令、重建 `functions` 与 **部署后密钥检查清单**（含 `gateway_api_key` 链路）见 [`docs/docker-deploy-new-server.md`](docker-deploy-new-server.md) **§四 步骤 5b** 与 **§六**。
+   - **ERP 正式**：`ERP_TOKEN_URL`、`ERP_OMS_BASE`、`ERP_GATEWAY_BASE`、账号与 `ERP_CLIENT_ID`、`ERP_TOKEN_PASSWORD_FIELD` 等。
+4. 重建 Functions：
+   `cd supabase-selfhost && docker compose up -d --force-recreate --no-deps functions`
 5. **安全**：`supabase/config.toml` 中部分函数为 `verify_jwt=false` 时，生产须配合 **网关限源、内网调用或独立密钥**，避免公网裸调（见项目 README / 技能说明）。
 
 ### 3.6 前端（mail-guide-ai）
 
-1. 配置 `mail-guide-ai-main/.env`（可参考 `.env.selfhosted.example`）：  
-   - `VITE_SUPABASE_URL` = **机 1 Kong 对外基址**（HTTPS 就绪后为 `https://...`）。  
-   - `VITE_SUPABASE_PUBLISHABLE_KEY` = 自建 `.env` 中的 `ANON_KEY`（或当前密钥体系下的 publishable key）。  
+1. 配置 `mail-guide-ai-main/.env`（可参考 `.env.selfhosted.example`）：
+   - `VITE_SUPABASE_URL` = **机 1 Kong 对外基址**（HTTPS 就绪后为 `https://...`）。
+   - `VITE_SUPABASE_PUBLISHABLE_KEY` = 自建 `.env` 中的 `ANON_KEY`（或当前密钥体系下的 publishable key）。
 2. **构建期注入**：修改上述变量后必须 **重新执行** `docker compose build` / `npm run build`，再部署静态资源或容器。
 
 ### 3.7 HTTPS 与证书（与业务并行推进）
 
-- 证书未就绪前仅适合 **内测**；**对外生产**建议在 **Kong、前端、Dify** 的对外入口均配置有效 TLS 后再切换流量，避免会话劫持与回调异常。  
+- 证书未就绪前仅适合 **内测**；**对外生产**建议在 **Kong、前端、Dify** 的对外入口均配置有效 TLS 后再切换流量，避免会话劫持与回调异常。
 - 官方 HTTPS 反代说明见 [Supabase Self-Hosted Proxy HTTPS](https://supabase.com/docs/guides/self-hosting/self-hosted-proxy-https)。
 
 ### 3.8 上线前最小验收
 
-- Studio / Kong 可访问；`curl` 或等价请求 `/functions/v1/hello` 正常。  
-- SQL：`cron.job` 五条齐全且 URL 正确；`vault.secrets` 含 `service_role_key`。  
-- 前端：注册/登录、工作台打开无 CORS/跳转错误。  
-- **密钥与 Dify 网关**：按 [`docker-deploy-new-server.md`](docker-deploy-new-server.md) **§六** 核对 `.env`、`.env.functions`、`gateway_api_key` 链路及前端 `VITE_*`。  
-- **Gmail**：在机 1 网络条件下完成「添加邮箱 → 测试连接 → 同步」抽样。  
+- Studio / Kong 可访问；`curl` 或等价请求 `/functions/v1/hello` 正常。
+- SQL：`cron.job` 五条齐全且 URL 正确；`vault.secrets` 含 `service_role_key`。
+- 前端：注册/登录、工作台打开无 CORS/跳转错误。
+- **密钥与 Dify 网关**：按 [`docker-deploy-new-server.md`](docker-deploy-new-server.md) **§六** 核对 `.env`、`.env.functions`、`gateway_api_key` 链路及前端 `VITE_*`。
+- **Gmail**：在机 1 网络条件下完成「添加邮箱 → 测试连接 → 同步」抽样。
 - **网易**：同样抽样；若仍报 `UnknownIssuer`（例如证书链轮换后内置兜底未更新），记录域名与端口，转入 **第六节**。
 
 ---
 
 ## 四、用户注册与角色（与当前实现一致）
 
-当前数据库触发器行为：**首个注册用户为 `admin`，之后新用户会自动获得 `agent` 角色**，并非「零角色、待管理员分配后才可用」。  
+当前数据库触发器行为：**首个注册用户为 `admin`，之后新用户会自动获得 `agent` 角色**，并非「零角色、待管理员分配后才可用」。
 若产品要求改为「仅管理员分配角色后方可使用」，需 **另行** 数据库迁移与前端路由改造，**不在本文默认上线路径内**。
 
 ---
@@ -134,16 +134,16 @@ cd <仓库根>\mail-guide-ai-main\scripts\selfhosted
 
 ### 5.1 日常运维
 
-- **日志**：`docker compose logs` 关注 `kong`、`functions`、`db`；定时任务失败时核对 `cron.job` 与 vault 中 service role。  
-- **发布**：  
-  - 仅改函数源码 → `sync-functions-to-selfhost.ps1` + 重建 `functions`。  
-  - 仅改 `.env.functions` → 重建 `functions`。  
-  - 改迁移 → `db push`（仍建议临时端口流程，勿长期暴露 DB）。  
+- **日志**：`docker compose logs` 关注 `kong`、`functions`、`db`；定时任务失败时核对 `cron.job` 与 vault 中 service role。
+- **发布**：
+  - 仅改函数源码 → `sync-functions-to-selfhost.ps1` + 重建 `functions`。
+  - 仅改 `.env.functions` → 重建 `functions`。
+  - 改迁移 → `db push`（仍建议临时端口流程，勿长期暴露 DB）。
   - 改前端 `VITE_*` → **重新 build** 再发布。
 
 ### 5.2 备份与恢复
 
-- **机 1 Postgres**：制定 **每日**（或更密）逻辑备份或卷快照，**保留 ≥ 30 天**；定期做 **恢复到测试环境** 演练，对照「≤4 小时」停机目标记录实际 RTO。  
+- **机 1 Postgres**：制定 **每日**（或更密）逻辑备份或卷快照，**保留 ≥ 30 天**；定期做 **恢复到测试环境** 演练，对照「≤4 小时」停机目标记录实际 RTO。
 - **现网 Dify 服务器**：其数据库与向量存储由 **现网备份策略** 覆盖；须保证与机 1 同等级别的 **保留周期（建议 ≥30 天）** 及恢复演练，否则仅恢复机 1 仍可能导致 AI 链路不可用。
 
 ### 5.3 密钥与依赖变更
@@ -154,60 +154,136 @@ cd <仓库根>\mail-guide-ai-main\scripts\selfhosted
 
 - 大邮件同步体积上限见 [`DEPLOY.md`](../DEPLOY.md)「一」末尾与 `self-hosted-env-functions.example` 中 `MAIL_SYNC_FULL_BODY_*` 说明。
 
-### 5.5 自动风控拦截（产品规则与运维约定）
+### 5.5 客户邮件自动处理（统一规则与运维约定）
 
-本节描述 **自动** 风控拦截与补偿的**目标行为**，用于新账号绑定邮箱、同步大量历史邮件时**降低批量误拦截**风险；实现以 `risk-intercept`、`process-email`、定时任务及配置开关为准，**与代码迭代同步修订**。
+本节描述 **自动订单关联**、**自动风控拦截**、**自动回复客户邮件** 的统一产品行为，用于新绑定邮箱、同步大量历史邮件时**降低误操作**并保证时效；实现以 `process-email`、`risk-intercept`、订单/拦截补偿定时任务及配置开关为准，**与代码迭代同步修订**。业务侧说明见工作台 **帮助中心**（`business-user-guide.md`）。
 
 #### 5.5.1 背景与目标
 
-- **风险**：新绑定邮箱后若一次性同步大量旧邮件，自动拦截可能对无关历史邮件**批量误拦**。
-- **目标**：通过**可关闭的自动拦截**、**严格的准入条件**、**有限次数的补偿重试**与**发件时间窗口**，将自动动作限制在「新、可识别、仍有时效」的邮件上；紧急处置仍依赖**人工**。
+- **风险**：新绑定邮箱后若一次性同步大量旧邮件，自动关联/拦截/回邮可能对无关历史邮件**批量误处理**。
+- **目标**：三类自动能力共用 **12 小时发件时间窗**（减轻历史邮件与定时扫描压力）；关联与拦截在逻辑上**先关联、再拦截**（关联失败仍可按邮件单号尝试拦截）；通过**可关闭的自动拦截总开关**、**有限重试**与**定时兜底**，将自动动作限制在「新、可识别、仍有时效」的邮件上；紧急处置仍依赖**人工**。
 
-#### 5.5.2 总开关（仅约束自动）
+#### 5.5.2 统一时间窗（12 小时）
+
+以下自动能力均以 **`emails.received_at`（邮件发件/解析时间）** 为准，相对**当前执行时刻**须在 **12 小时内**；超过 12 小时**不再**自动关联、自动拦截、自动回邮（人工操作不受此限，见 **5.5.9**）。
+
+| 能力 | 12h 内 | 超过 12h | 发件时间缺失 |
+|------|--------|----------|----------------|
+| 自动关联订单 | 允许 | 不处理 | 保守视为不允许 |
+| 自动拦截（开关开） | 允许 | 不处理、不补偿 | 保守视为不允许 |
+| 自动回复客户 | 允许（另须模板/总开关等） | 不发送 | 保守视为不允许 |
+
+实现参考：`process-email`（回邮）、`_shared/auto-risk-intercept-policy.ts`（`CUSTOMER_AUTOMATION_WINDOW_MS` 等）、`run-compensation-tasks` / `retry-risk-intercept-compensation`。**草稿生成**（`schedule-draft-generation`）仍为 **24h** 窗，与本节三类 **12h** 分离。
+
+#### 5.5.3 统一处理流水线（关联 → 拦截）
+
+对**取消订单 / 改地址**类意图（`order_cancel`、`address_change`），推荐在收信与定时兜底中共用同一顺序：
+
+1. **准入**：12h 内、非 `manual_unlink`、有订单号或已关联等（见 **5.5.4**、**5.5.5**）。
+2. **关联**：查本地 `orders` → 无则 OMS 查单 → 成功写 `email_order_links`；失败写/更新 `order_compensation_tasks`（**不阻塞**下一步）。
+3. **拦截**（仅当自动拦截总开关为开）：已关联则按 `order_id`；未关联但有邮件单号则按 `order_no` 调 ERP hold；关联成功且需拦时**同轮**发起拦截。
+4. **审计**：关联写入 `order_compensation_tasks`；拦截写入 `risk_intercept_logs`（含 ERP 响应、重试状态）。二者**可独立存在**（例如仅关联未拦、仅邮件单号拦、人工先关联后自动拦）。
+
+**自动回复**仍在 `process-email` 既有分支处理，与上表共用 12h 窗，但不强制「先关联再回邮」。
+
+#### 5.5.4 自动关联订单
 
 | 项 | 约定 |
 |----|------|
-| **开** | 允许在邮件处理链路中执行**自动拦截**，并在失败时进入**自动补偿**调度。 |
-| **关** | **不**执行自动拦截，**不**继续执行自动补偿；避免环境或策略原因下的误操作扩大。 |
-| **人工** | **不受开关约束**：工作台人工「暂停发货 / 恢复发货」等拦截类操作**始终可用**（见 5.5.5）。 |
+| **触发** | 收信 `process-email` 分析后**立即尝试一次**；近 12h 内「待关联」由定时任务**兜底**（见 **5.5.7**）。 |
+| **条件** | AI/工作流解析出**有效订单号**；非人工解除关联；在 **12h** 窗内。 |
+| **步骤** | 本地按单号匹配 → 无则 OMS（发件人邮箱 + 单号）→ 仍无则 `order_compensation_tasks` 待重试。 |
+| **与拦截开关** | **无关**：总开关关闭时**仍**自动查单、关联。 |
+| **重试** | 定时兜底扫描；单邮件有**最小间隔**与 **12h 内最大次数**上限（实现可配置；目标架构见 **5.5.7**）。 |
+| **成功** | `association_status` 趋于 `linked`，写 `email_order_links`。 |
 
-#### 5.5.3 自动拦截与补偿节奏
+#### 5.5.5 自动风控拦截与总开关
+
+**总开关**（`automation_settings.risk_auto_intercept_enabled`，管理员在 **拦截记录** 页配置，默认建议 **关**）：
 
 | 项 | 约定 |
 |----|------|
-| **收信触发** | 在开关为**开**且满足 **5.5.4** 准入条件时，对同一封邮件的自动拦截在收信处理链路中**最多尝试 1 次**。 |
-| **补偿** | 若该次自动拦截**未成功**（需进入待补偿/重试类状态），则再执行**最多 3 次**自动补偿；**同一记录两次补偿尝试之间间隔不少于 1 小时**（按「上次尝试时间 + 1 小时」等字段控制，避免同一小时内重复打 ERP）。 |
-| **终态** | **收信 1 次 + 补偿 3 次**仍不成功 → 记为**拦截失败**（与 `risk_intercept_logs` 等业务终态对齐，具体字段名以实现为准）。 |
-| **成功** | 任意一次（收信或第 1～3 次补偿）成功 → 成功终态，**不再**排后续补偿。 |
-| **超长「重试中」** | 每次**补偿任务**执行时，若记录仍处于自动补偿的「重试中」状态且**自进入该状态起已超过 4 小时**，则记为**拦截失败**（错误信息中带 `[policy:retrying_timeout_4h]`），避免队列永久卡住。计时以 `retrying_started_at` 为准，缺失时回退 **`created_at`**（不得用 `updated_at`：补偿失败落库会刷新该行 `updated_at`，否则 4 小时条件永远不成立）。 |
+| **开** | 允许自动 ERP hold；失败进入 `risk_intercept_logs` 补偿队列。 |
+| **关** | **不**自动拦截、**不**继续自动补偿；**仍**执行自动关联（**5.5.4**）。 |
+| **人工** | 工作台「暂停发货 / 恢复发货」**不受**开关与 12h 限制（见 **5.5.9**）。 |
 
-**调度（cron）**：补偿任务在**每小时的第 45 分钟**执行一轮（例如 **09:45、10:45、11:45**），与业务时区一致；每轮仅处理「已到下次执行时间」且仍未成功、未用尽次数的记录。
+**自动拦截准入**（须同时满足，与开关无关的条目仍须满足）：
 
-#### 5.5.4 自动拦截准入（须同时考虑）
+1. 意图为 **取消订单** 或 **改地址**。
+2. **12h** 发件时间窗内；`received_at` 不可解析则**不拦**。
+3. **已关联本地订单**，或工作流已提供**邮件单号**（未关联无单号 → **不自动拦**）。
+4. 非 `manual_unlink`。
+5. 总开关为 **开**。
 
-以下不满足时，**不进行自动拦截**，且**不进入自动补偿队列**（与开关状态无关，属准入逻辑）：
+**解除拦截**：本系统不向 ERP 发 release；运营在 **迅捷 ERP** 操作；工作台 release 仅同步本地展示。
 
-1. **未关联本地订单**且**工作流判定邮件未提供订单号** → **不自动拦截**（避免无单号历史邮件被批量处理）。  
-   - 未关联但工作流**已提供**订单号时，仍可按产品允许走「凭邮件单号」等自动路径（若实现支持）。
+#### 5.5.6 自动回复客户邮件
 
-2. **发件时间**：以邮件头中的发送时间为准，若相对**当前执行时刻**已超过 **24 小时**，则**不自动拦截**、不参与自动补偿。  
-   - **发件时间不可解析**时，建议按**保守策略**处理（例如视为超窗或视为不满足自动拦截条件），并在需求/实现说明中写死一种，避免误拦。
+| 项 | 约定 |
+|----|------|
+| **时间窗** | 与上：**12h** 内 `received_at`（`CUSTOMER_AUTOMATION_WINDOW_MS`）。 |
+| **其它** | 模板 `auto_send`、意图勾选、首封/冷却、缺单号与缺附件等规则见 `customer-service-automation-spec.md` §6；**12h 与模板规则同时生效，取更严者**。 |
+| **与关联/拦截** | 并行；不要求先关联再回邮。 |
 
-#### 5.5.5 人工不受限范围
+#### 5.5.7 触发节奏与定时兜底
 
-- **开关**：人工拦截**不受**自动拦截总开关限制。  
-- **24 小时**：人工在工作台发起的拦截/解除**不受**「发件时间超过 24 小时」限制。
+| 入口 | 行为 |
+|------|------|
+| **收信** | `sync-mailbox` 入库后异步 `process-email`：**完整跑一遍**（分析、关联、拦截、自动回邮等分支）。 |
+| **定时兜底** | 扫描近 **12h** 内仍「待关联 / 待拦截 / 任务到期」的邮件，执行与收信相同的关联→拦截顺序；建议周期 **每 20 分钟** 一轮，单轮**处理条数上限**与单邮件**最短间隔**可配置，避免瞬时打满 OMS/ERP。 |
 
-#### 5.5.6 开关关闭时的终态（进行中记录）
+**Phase A 现行实现（以 `Apply-VaultAndCron.ps1` 为准）**
 
-- 开关由开改为关后：**不再继续**跑满剩余自动补偿次数。  
-- 对**已因自动拦截进入待补偿/重试中**的记录，须在合理时限内将**自动链路**相关终态更新为**拦截失败**（或等价失败态），并建议通过**错误原因/元数据**区分「自然用尽失败」与「策略关停（开关关闭）终止」，便于审计与客服解释。
+- 收信：`process-email`（分析、关联、拦截、自动回邮）。
+- 订单关联补偿：`run-compensation-tasks`，cron **`*/20 * * * *`**（job 名 `run-compensation-tasks-every-30min` 为历史遗留）。
+- 拦截补偿：`retry-risk-intercept-compensation`，cron **`*/20 * * * *`**（job 名 `retry-risk-intercept-hourly-at-45` 为历史遗留）。
+- **补偿间隔**：`next_run_at` / `next_compensation_at` 步长 **20 分钟**（`COMPENSATION_STEP_MS`）。
+- **补偿次数**：收信 **1 次** + 补偿 **最多 20 次**（`MAX_COMPENSATION_ATTEMPTS`）；关联任务 `max_retries` 默认 **20**。
+- **超长 retrying**：自 `retrying_started_at`（缺省 `created_at`）起 **超过 4 小时** 仍为 retrying → `failed`，错误信息含 `[policy:retrying_timeout_4h]`（**不得**用 `updated_at` 计时）。
 
-#### 5.5.7 运维与上线核对（实现落地后）
+**后续可选（Phase B）**：合并为单一 `sweep-order-actions` cron，替代上述两条补偿 job。
 
-- 确认**开关**在 **拦截记录**页由管理员配置（`automation_settings.risk_auto_intercept_enabled`）、默认值及权限。
-- 确认 **pg_cron / 自建 cron** 中补偿任务为**每小时 `:45`** 触发，且任务 URL 指向本栈 Kong（与 **3.4** 一致，不得误用 `*.supabase.co`）。  
-- 新账号绑定后抽样：大量**无单号且未关联**、或**发件时间早于 24 小时**的邮件应**无自动拦截调用**；人工仍可对指定邮件操作拦截。
+#### 5.5.8 限流与审计
+
+| 项 | 约定 |
+|----|------|
+| **限流** | 定时兜底每轮 LIMIT（建议 **40～60** 封，按日均约 1000～2000 封可调）；单邮件 `last_order_action_at` 冷却（建议 **≥20 分钟**）。 |
+| **审计表** | **`order_compensation_tasks`**：关联重试；**`risk_intercept_logs`**：拦截与 ERP 结果。允许「只关联不拦」「只拦未关联（邮件单号）」「人工关联 + 自动拦」等组合。 |
+| **幂等** | 拦截按 `idempotency_key` upsert；已成功 `hold` 不重复打 ERP。 |
+
+#### 5.5.9 人工不受限范围
+
+- **自动拦截总开关**：不限制人工拦截。
+- **12 小时**：人工在工作台发起的拦截/解除、查单关联**不受**发件 12h 限制（以培训与 ERP 规则为准）。
+
+#### 5.5.10 开关关闭时的终态（进行中拦截）
+
+- 开关由开改为关：**不再**跑满剩余自动补偿。
+- 对 `risk_intercept_logs` 中 `retrying` 且可补偿行：下一轮兜底标 **failed**，`error_message` 建议含 `[policy:disabled]`，与自然用尽区分。
+
+#### 5.5.11 运营告警（首次 / 末次邮件）
+
+自动**关联**与自动**拦截**失败时，各向运营收件人发送 **最多两封**邮件（写入 `ops_alerts`，独立 `idempotency_key` 去重）：
+
+| 链路 | 首次（`kind`） | 末次（`kind`） |
+|------|----------------|----------------|
+| 自动拦截 | `auto_failed_first`：首次 ERP/流程失败进入 `retrying` 或 `process-email` 调 `risk-intercept` HTTP 失败 | `auto_failed_final`：补偿 20 次用尽、4h retrying 超时、超 12h、开关关闭等终态 `failed` |
+| 自动关联 | `auto_association_first`：收信查单未命中且已创建 `order_compensation_tasks` | `auto_association_final`：补偿 20 次仍无订单、`manual_unlink`、超 12h 停止等 |
+
+- 标题含 **`[首次]`** / **`[末次]`** 便于运营告警页区分。
+- **已取消**原 `schedule-compensating-alerts` 的 **2h compensating 定时提醒**（`compensating-alerts-every-30min` cron 由部署脚本 `unschedule`）。
+- 人工拦截失败仍走原 `kind: failed` 单次告警。
+
+实现：`_shared/ops-notify.ts`、`_shared/automation-alert-keys.ts`、`automation-intercept-alerts.ts`、`automation-association-alerts.ts`。
+
+#### 5.5.12 运维与上线核对
+
+- **开关**：`automation_settings.risk_auto_intercept_enabled` 默认值、管理员权限、拦截记录页 UI。
+- **Cron**：`SELECT jobname, schedule, command FROM cron.job;` — URL 指向本栈 Kong，无 `*.supabase.co`；**无** `compensating-alerts-every-30min`；`run-compensation-tasks-every-30min` 与 `retry-risk-intercept-hourly-at-45` 的 `schedule` 均为 **`*/20 * * * *`**（部署后须执行 `Apply-VaultAndCron.ps1`）。
+- **迁移**：`20260520120000_automation_12h_twenty_compensation_retries.sql`（补偿次数上限 20）。
+- **12h 抽样**：无单号、超 12h、`manual_unlink` 邮件**无**自动拦截；开关关时**仍可有**关联任务、**无**新 hold。
+- **告警抽样**：自动拦截首次失败 → `ops_alerts.auto_failed_first` 且 `email_sent_at` 非空；用尽补偿 → 另有 `auto_failed_final` 且再发一封；关联同理 `auto_association_first` / `auto_association_final`。
+- **帮助中心**：`business-user-guide.md` 与本文 **5.5** 口径一致（12h、先关联再拦、开关仅控拦截、首次/末次运营邮件）。
 
 ---
 
@@ -215,9 +291,9 @@ cd <仓库根>\mail-guide-ai-main\scripts\selfhosted
 
 Edge Functions 里 IMAP/SMTP 使用 Deno 原生 `connectTls` / STARTTLS，通过 `_shared/mail-tls-ca.ts` 组装 **`caCerts`（额外信任的 PEM 段）**。逻辑顺序为：
 
-1. `MAIL_TLS_CA_CERT_PEM`（内联 PEM，可选）  
-2. `MAIL_TLS_CA_CERT_PATH` 或 `DENO_CERT` 指向的文件（可选；**User Worker 沙箱内读宿主机挂载路径可能失败**，见下）  
-3. 依次尝试读取默认路径 `../certs/mail-ca.pem`（相对 `_shared`）与绝对路径 `/home/deno/functions/certs/mail-ca.pem`  
+1. `MAIL_TLS_CA_CERT_PEM`（内联 PEM，可选）
+2. `MAIL_TLS_CA_CERT_PATH` 或 `DENO_CERT` 指向的文件（可选；**User Worker 沙箱内读宿主机挂载路径可能失败**，见下）
+3. 依次尝试读取默认路径 `../certs/mail-ca.pem`（相对 `_shared`）与绝对路径 `/home/deno/functions/certs/mail-ca.pem`
 4. 仍无可用材料时，使用代码内 **`BUNDLED_163_MAIL_CA_PEM`**（当前为 **163 `imap.163.com` / TecSign** 叶子 + 根）
 
 因此：**首轮上线不必为 163 单独准备 PEM**；若日志出现 `parsed 2 certificate(s) from bundled 163 mail CA`，说明 163 兜底已参与校验。其他邮箱、代理或私有 CA 仍可按本节补链。
@@ -233,39 +309,39 @@ Edge Functions 里 IMAP/SMTP 使用 Deno 原生 `connectTls` / STARTTLS，通过
 
 ### 6.2 如何获取 PEM（需要时）
 
-1. **向服务商或 IT 索取（推荐）**  
+1. **向服务商或 IT 索取（推荐）**
    索取 **完整 TLS 链** 或签发该服务器证书的 **根/中间 CA**，格式为 **PEM**（可含多段 `-----BEGIN CERTIFICATE-----` …）。
 
-2. **使用 OpenSSL 抓取链**  
-   在与生产 **出站一致** 的环境执行（主机与端口改为实际 IMAP/SMTP）：  
+2. **使用 OpenSSL 抓取链**
+   在与生产 **出站一致** 的环境执行（主机与端口改为实际 IMAP/SMTP）：
    ```bash
    openssl s_client -connect imap.example.com:993 -showcerts </dev/null 2>/dev/null
-   ```  
-   将输出中的多段证书合并为一个 `.pem`（通常含服务器证书 + 中间 CA；仍报错再补根或咨询 IT）。  
+   ```
+   将输出中的多段证书合并为一个 `.pem`（通常含服务器证书 + 中间 CA；仍报错再补根或咨询 IT）。
    Windows 若无本地 `openssl`，可用仓库内已用过的方式：在 **能访问目标邮箱** 的机器上导出链，或临时用 **Docker + Alpine + openssl** 拉取后再保存为 PEM。
 
-3. **经 TLS 解密代理**  
+3. **经 TLS 解密代理**
    仅合并 **代理根 / 企业信任锚** 与 **邮箱链** 中 **必要** 的 PEM，避免盲目扩大信任面。
 
-4. **禁止用于生产的权宜之计**  
+4. **禁止用于生产的权宜之计**
    `MAIL_LOCAL_TEST_MODE=true` 仅用于本地调试，**生产不得依赖**。
 
 ### 6.3 放入仓库并同步到自建（推荐路径）
 
 **推荐把 PEM 放进源码树**，由 `sync-functions-to-selfhost.ps1` 一并复制到 `supabase-selfhost/volumes/functions/`，避免只改挂载卷而漏同步：
 
-1. 保存为：  
-   `mail-guide-ai-main/supabase/functions/certs/mail-ca.pem`  
+1. 保存为：
+   `mail-guide-ai-main/supabase/functions/certs/mail-ca.pem`
    （与 [`self-hosted-supabase.md`](../mail-guide-ai-main/docs/self-hosted-supabase.md)「D3.1」、[`DEPLOY.md`](../DEPLOY.md) 描述一致；同步后出现在 `supabase-selfhost/volumes/functions/certs/mail-ca.pem`。）
 
-2. 在 **`supabase-selfhost/.env.functions`** 中保留（推荐）：  
-   `MAIL_TLS_CA_CERT_PATH=/home/deno/functions/certs/mail-ca.pem`  
-   或使用 `MAIL_TLS_CA_CERT_PEM` 内联（见 `self-hosted-env-functions.example`）。  
+2. 在 **`supabase-selfhost/.env.functions`** 中保留（推荐）：
+   `MAIL_TLS_CA_CERT_PATH=/home/deno/functions/certs/mail-ca.pem`
+   或使用 `MAIL_TLS_CA_CERT_PEM` 内联（见 `self-hosted-env-functions.example`）。
    说明：部分环境下 User Worker **读不到**上述路径文件时，函数仍会尝试 **内置 163 链** 或其它已加载的 PEM；保留环境变量有利于 **非 163** 邮箱与后续轮换。
 
 3. **确认生产关闭调试模式**：`MAIL_LOCAL_TEST_MODE` 未启用或为 `false`。
 
-4. **同步并重建 `functions`**（自建 **不需要** `npx supabase functions deploy`）：  
+4. **同步并重建 `functions`**（自建 **不需要** `npx supabase functions deploy`）：
    ```powershell
    cd <仓库根>\mail-guide-ai-main\scripts
    .\sync-functions-to-selfhost.ps1
@@ -276,9 +352,9 @@ Edge Functions 里 IMAP/SMTP 使用 Deno 原生 `connectTls` / STARTTLS，通过
 
 ### 6.4 验证、日志与 163 兜底维护
 
-1. 工作台执行 **「测试连接」** 与 **「立即同步」**。  
-2. `docker compose logs functions --tail 100`：应无持续 `UnknownIssuer`。  
-3. **163**：若见 `parsed 2 certificate(s) from bundled 163 mail CA`，说明内置兜底在起作用。  
+1. 工作台执行 **「测试连接」** 与 **「立即同步」**。
+2. `docker compose logs functions --tail 100`：应无持续 `UnknownIssuer`。
+3. **163**：若见 `parsed 2 certificate(s) from bundled 163 mail CA`，说明内置兜底在起作用。
 4. **证书轮换后**：若 163 更换链导致再次 `UnknownIssuer`，需更新 **`mail-guide-ai-main/supabase/functions/_shared/mail-tls-ca.ts`** 中的 `BUNDLED_163_MAIL_CA_PEM`，并/或更新 **`certs/mail-ca.pem`**，再执行 **6.3 第 4 步**。
 
 ### 6.5 与「仅重建容器」的关系
@@ -301,7 +377,7 @@ Edge Functions 里 IMAP/SMTP 使用 Deno 原生 `connectTls` / STARTTLS，通过
 | 8 | 抽样：Gmail/网易 测试连接与同步 | ☐ |
 | 9 | Postgres（及 Dify 库）备份策略 ≥30 天 + 演练记录 | ☐ |
 | 10 | 若出现 TLS 报错：按 **第六节** 决策是否补 PEM；163 可先查日志是否已 `bundled 163 mail CA`，再决定是否更新内置链或 `certs/mail-ca.pem` 并同步重建 functions | ☐ |
-| 11 | **自动风控拦截**（见 **5.5**）：开关默认值与权限、补偿 cron（每小时 `:45`）、抽样验证无单号/超 24h 邮件不误拦；关停后进行中记录终态策略已确认 | ☐ |
+| 11 | **客户邮件自动处理**（见 **5.5**）：12h 窗与 20min/20 次补偿已部署；`Apply-VaultAndCron` 已跑；抽样无单号/超 12h 不误拦、关开关仍可关联 | ☐ |
 
 ---
 

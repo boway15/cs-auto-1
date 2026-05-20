@@ -243,15 +243,16 @@ docker compose up -d db
 "$REPO_ROOT/mail-guide-ai-main/scripts/linux/selfhosted/apply-vault-and-cron.sh"
 ```
 
-脚本会：写入 vault 中的 `service_role_key`；注册 **5 条** 定时任务，调用栈内 `http://kong:8000/functions/v1/...`。
+脚本会：写入 vault 中的 `service_role_key`；注册 **4 条** 业务定时任务，调用栈内 `http://kong:8000/functions/v1/...`（已移除 `compensating-alerts`，运营邮件改为首次/末次告警）。
 
 | 定时任务名 | 调用的 Edge Function |
 |------------|----------------------|
 | `auto-sync-mailbox-every-5min` | `sync-mailbox` |
 | `auto-draft-every-30min` | `schedule-draft-generation` |
-| `compensating-alerts-every-30min` | `schedule-compensating-alerts` |
 | `run-compensation-tasks-every-30min` | `run-compensation-tasks` |
 | `retry-risk-intercept-hourly-at-45` | `retry-risk-intercept-compensation` |
+
+`run-compensation-tasks` 与 `retry-risk-intercept-compensation` 的 pg_cron schedule 为 **`*/20 * * * *`**（每 20 分钟；job 名中的 `30min` / `hourly-at-45` 为历史遗留）。自动关联/拦截/回邮发件时间窗为 **12 小时**（见 `docs/production-go-live.md` §5.5）。
 
 ### 4.3 Edge Functions 环境（仅首次）
 
@@ -279,7 +280,7 @@ docker compose logs functions --tail 50
 
 同步脚本会把 `mail-guide-ai-main/supabase/functions/` 下业务目录复制到 `supabase-selfhost/volumes/functions/`，主要包括：
 
-`sync-mailbox`、`process-email`、`generate-draft`、`send-reply`、`test-mailbox`、`dify-gateway`、`risk-intercept`、`schedule-draft-generation`、`schedule-compensating-alerts`、`run-compensation-tasks`、`retry-risk-intercept-compensation`、`get-order-by-email`、`get-email-context`、`close-email`、`delete-mailbox`、`cleanup-emails` 及共享模块 `_shared/`。
+`sync-mailbox`、`process-email`、`generate-draft`、`send-reply`、`test-mailbox`、`dify-gateway`、`risk-intercept`、`schedule-draft-generation`、`run-compensation-tasks`、`retry-risk-intercept-compensation`、`get-order-by-email`、`get-email-context`、`close-email`、`delete-mailbox`、`cleanup-emails` 及共享模块 `_shared/`（含 `automation-*-alerts.ts`；`schedule-compensating-alerts` 已废弃）。
 
 官方模板自带的 **`hello`**、**`main`** 入口目录保留，勿删。
 
@@ -304,14 +305,13 @@ FROM cron.job
 WHERE jobname IN (
   'auto-sync-mailbox-every-5min',
   'auto-draft-every-30min',
-  'compensating-alerts-every-30min',
   'run-compensation-tasks-every-30min',
   'retry-risk-intercept-hourly-at-45'
 )
 ORDER BY jobname;
 ```
 
-预期 **5 行**；`cmd` 中**不得**出现 `*.supabase.co`。
+预期 **4 行**；**无** `compensating-alerts-every-30min`；`cmd` 中**不得**出现 `*.supabase.co`。
 
 **（3）业务冒烟**
 

@@ -1,5 +1,10 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { getRiskAutoInterceptEnabled, isEmailWithinAutoRiskInterceptAge } from "../_shared/auto-risk-intercept-policy.ts";
+import {
+  getRiskAutoInterceptEnabled,
+  isEmailWithinCustomerAutomationAge,
+  MAX_COMPENSATION_ATTEMPTS,
+} from "../_shared/auto-risk-intercept-policy.ts";
+import { notifyAutoInterceptFinalFromLogRow } from "../_shared/automation-intercept-alerts.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -29,7 +34,7 @@ async function closeStaleRetryingLogs(admin: ReturnType<typeof createClient>): P
   const threshold = Date.now() - STALE_RETRYING_MS;
   const { data: rows, error } = await admin
     .from("risk_intercept_logs")
-    .select("id, error_message, retrying_started_at, created_at")
+    .select("id, email_id, order_id, referenced_order_no, error_message, retrying_started_at, created_at")
     .eq("status", "retrying")
     .eq("auto_compensation_eligible", true);
   if (error) throw error;
@@ -56,9 +61,46 @@ async function closeStaleRetryingLogs(admin: ReturnType<typeof createClient>): P
         error_message: mergeErrorMessage(r.error_message, "[policy:retrying_timeout_4h]"),
       })
       .eq("id", r.id);
-    if (!upErr) closed++;
+    if (!upErr) {
+      closed++;
+      await notifyAutoInterceptFinalFromLogRow(admin, {
+        ...r,
+        error_message: mergeErrorMessage(r.error_message, "[policy:retrying_timeout_4h]"),
+      }, "retrying_timeout_4h");
+    }
   }
   return closed;
+}
+
+async function failLogWithPolicyTag(
+  admin: ReturnType<typeof createClient>,
+  log: {
+    id: string;
+    error_message?: string | null;
+    email_id?: string | null;
+    order_id?: string | null;
+    referenced_order_no?: string | null;
+  },
+  tag: string,
+  reason: string,
+): Promise<boolean> {
+  const { error: upErr } = await admin
+    .from("risk_intercept_logs")
+    .update({
+      status: "failed",
+      auto_compensation_eligible: false,
+      next_compensation_at: null,
+      retrying_started_at: null,
+      error_message: mergeErrorMessage(log.error_message, tag),
+    })
+    .eq("id", log.id);
+  if (upErr) return false;
+  await notifyAutoInterceptFinalFromLogRow(
+    admin,
+    { ...log, error_message: mergeErrorMessage(log.error_message, tag) },
+    reason,
+  );
+  return true;
 }
 
 Deno.serve(async (req) => {
@@ -79,23 +121,15 @@ Deno.serve(async (req) => {
     if (!enabled) {
       const { data: stuck, error: selErr } = await admin
         .from("risk_intercept_logs")
-        .select("id, error_message")
+        .select("id, email_id, order_id, referenced_order_no, error_message")
         .eq("status", "retrying")
         .eq("auto_compensation_eligible", true);
       if (selErr) throw selErr;
       let closed = 0;
       for (const row of stuck ?? []) {
-        const { error: upErr } = await admin
-          .from("risk_intercept_logs")
-          .update({
-            status: "failed",
-            auto_compensation_eligible: false,
-            next_compensation_at: null,
-            retrying_started_at: null,
-            error_message: mergeErrorMessage(row.error_message as string | null, "[policy:disabled]"),
-          })
-          .eq("id", row.id);
-        if (!upErr) closed++;
+        if (await failLogWithPolicyTag(admin, row as { id: string; error_message?: string | null; email_id?: string | null; order_id?: string | null; referenced_order_no?: string | null }, "[policy:disabled]", "policy_disabled")) {
+          closed++;
+        }
       }
       return new Response(JSON.stringify({ ok: true, policy_disabled_closed: closed }), {
         headers: corsJsonHeaders,
@@ -110,7 +144,7 @@ Deno.serve(async (req) => {
       .select("*")
       .eq("status", "retrying")
       .eq("auto_compensation_eligible", true)
-      .lt("compensation_attempts_done", 3)
+      .lt("compensation_attempts_done", MAX_COMPENSATION_ATTEMPTS)
       .lte("next_compensation_at", nowIso)
       .order("next_compensation_at", { ascending: true })
       .limit(20);
@@ -123,14 +157,9 @@ Deno.serve(async (req) => {
       const emailId = log.email_id ? String(log.email_id) : null;
 
       if (!emailId) {
-        await admin.from("risk_intercept_logs").update({
-          status: "failed",
-          auto_compensation_eligible: false,
-          next_compensation_at: null,
-          retrying_started_at: null,
-          error_message: mergeErrorMessage(log.error_message as string | null, "[policy:no_email]"),
-        }).eq("id", logId);
-        results.push({ id: logId, result: "failed_no_email" });
+        if (await failLogWithPolicyTag(admin, log, "[policy:no_email]", "no_email")) {
+          results.push({ id: logId, result: "failed_no_email" });
+        }
         continue;
       }
 
@@ -140,26 +169,16 @@ Deno.serve(async (req) => {
         .eq("id", emailId)
         .maybeSingle();
       if (emErr || !em) {
-        await admin.from("risk_intercept_logs").update({
-          status: "failed",
-          auto_compensation_eligible: false,
-          next_compensation_at: null,
-          retrying_started_at: null,
-          error_message: mergeErrorMessage(log.error_message as string | null, "[policy:stale_email]"),
-        }).eq("id", logId);
-        results.push({ id: logId, result: "failed_email_missing" });
+        if (await failLogWithPolicyTag(admin, log, "[policy:stale_email]", "stale_email")) {
+          results.push({ id: logId, result: "failed_email_missing" });
+        }
         continue;
       }
       const receivedAt = (em as { received_at?: string | null }).received_at;
-      if (!isEmailWithinAutoRiskInterceptAge(receivedAt ?? null)) {
-        await admin.from("risk_intercept_logs").update({
-          status: "failed",
-          auto_compensation_eligible: false,
-          next_compensation_at: null,
-          retrying_started_at: null,
-          error_message: mergeErrorMessage(log.error_message as string | null, "[policy:stale_email]"),
-        }).eq("id", logId);
-        results.push({ id: logId, result: "failed_stale_email" });
+      if (!isEmailWithinCustomerAutomationAge(receivedAt ?? null)) {
+        if (await failLogWithPolicyTag(admin, log, "[policy:stale_email]", "stale_email")) {
+          results.push({ id: logId, result: "failed_stale_email" });
+        }
         continue;
       }
 
@@ -179,14 +198,9 @@ Deno.serve(async (req) => {
       } else if (refNo) {
         body.order_no = refNo;
       } else {
-        await admin.from("risk_intercept_logs").update({
-          status: "failed",
-          auto_compensation_eligible: false,
-          next_compensation_at: null,
-          retrying_started_at: null,
-          error_message: mergeErrorMessage(log.error_message as string | null, "[policy:no_order_ref]"),
-        }).eq("id", logId);
-        results.push({ id: logId, result: "failed_no_order_ref" });
+        if (await failLogWithPolicyTag(admin, log, "[policy:no_order_ref]", "no_order_ref")) {
+          results.push({ id: logId, result: "failed_no_order_ref" });
+        }
         continue;
       }
 

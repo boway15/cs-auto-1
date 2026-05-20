@@ -1,6 +1,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { sendMail } from "../_shared/smtp.ts";
 import { createAlertAndNotify } from "../_shared/ops-notify.ts";
+import { notifyAutoInterceptFirstFailure } from "../_shared/automation-intercept-alerts.ts";
+import { notifyAutoAssociationFirstFailure } from "../_shared/automation-association-alerts.ts";
 import {
   erpEnvelopeNoOrderMessage,
   erpEnvelopeOmsQuerySucceeded,
@@ -9,6 +11,11 @@ import {
 } from "../_shared/erp-client.ts";
 import { upsertOrderFromOmsData } from "../_shared/erp-order-sync.ts";
 import { sanitizeDisplayName } from "../_shared/display-name.ts";
+import {
+  CUSTOMER_AUTOMATION_WINDOW_MS,
+  isEmailWithinCustomerAutomationAge,
+  nextCompensationRunAtIso,
+} from "../_shared/auto-risk-intercept-policy.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -18,7 +25,7 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-const CUSTOMER_AUTO_REPLY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const CUSTOMER_AUTO_REPLY_MAX_AGE_MS = CUSTOMER_AUTOMATION_WINDOW_MS;
 
 function envBool(key: string, defaultValue: boolean): boolean {
   const v = Deno.env.get(key);
@@ -49,7 +56,7 @@ function getCustomerAutoReplyBlockReason(email: { received_at?: string | null })
   if (!ra) return "missing_received_at";
   const ms = Date.now() - new Date(ra).getTime();
   if (Number.isNaN(ms) || ms < 0) return "invalid_received_at";
-  if (ms > CUSTOMER_AUTO_REPLY_MAX_AGE_MS) return "outside_24h_window";
+  if (ms > CUSTOMER_AUTO_REPLY_MAX_AGE_MS) return "outside_12h_window";
   return null;
 }
 
@@ -481,6 +488,9 @@ async function sendAutoReplyBySlot(
 
 async function associateOrders(admin: any, email: any, analysis: Analysis) {
   const linkedOrders: any[] = [];
+  if (!isEmailWithinCustomerAutomationAge(email.received_at ?? null)) {
+    return linkedOrders;
+  }
   if (analysis.order_no) {
     const { data: order } = await admin
       .from("orders")
@@ -548,9 +558,14 @@ async function associateOrders(admin: any, email: any, analysis: Analysis) {
           email_id: email.id,
           order_no: analysis.order_no,
           status: "pending",
-          next_run_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+          next_run_at: nextCompensationRunAtIso(),
         }, { onConflict: "email_id,order_no" });
         await recordEvent(admin, email.id, "compensation_created", `订单 ${analysis.order_no} 暂未查到，已创建补偿任务`);
+        await notifyAutoAssociationFirstFailure(admin, {
+          email_id: email.id,
+          order_no: analysis.order_no,
+          from_email: email.from_email ?? null,
+        });
       }
     }
   }
@@ -753,15 +768,12 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
     if (!response.ok) {
       const errText = await response.text();
       await recordEvent(admin, emailId, "risk_intercept_failed", "调用 risk-intercept 失败", errText);
-      await createAlertAndNotify(admin, {
-        source: "process-email",
-        kind: "risk_intercept_http_failed",
-        title: "风控拦截调用失败",
+      await notifyAutoInterceptFirstFailure(admin, {
+        email_id: emailId,
+        order_id: linkedOrders[0].id,
+        order_no: String(linkedOrders[0].order_no ?? ""),
         message: errText,
-        related_email_id: emailId,
-        related_order_id: linkedOrders[0].id,
-        severity: "critical",
-        metadata: { http_status: response.status },
+        metadata: { http_status: response.status, branch: "risk_intercept_http_failed" },
       });
     } else {
       await recordEvent(admin, emailId, "risk_intercept_requested", "已触发自动风控拦截");
@@ -791,15 +803,13 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
     if (!response.ok) {
       const errText = await response.text();
       await recordEvent(admin, emailId, "risk_intercept_failed", "调用 risk-intercept（邮件单号）失败", errText);
-      await createAlertAndNotify(admin, {
-        source: "process-email",
-        kind: "risk_intercept_http_failed",
-        title: "风控拦截调用失败（邮件单号）",
+      await notifyAutoInterceptFirstFailure(admin, {
+        email_id: emailId,
+        order_id: null,
+        order_no: providedOrderNo,
         message: errText,
-        related_email_id: emailId,
-        related_order_id: null,
-        severity: "critical",
-        metadata: { http_status: response.status, order_no: providedOrderNo },
+        email_provided_only: true,
+        metadata: { http_status: response.status, branch: "risk_intercept_http_failed" },
       });
     } else {
       await recordEvent(admin, emailId, "risk_intercept_requested", "已触发自动风控拦截（邮件单号，未关联本地订单）");

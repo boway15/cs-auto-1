@@ -1,14 +1,15 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  自建 Supabase：更新 vault.service_role_key，并将 pg_cron 改为调用栈内 Kong 的 Functions URL。
-  注册 5 条任务：sync-mailbox(每 4 分钟整分)、schedule-draft-generation(每 4 分钟自第 2 分起，与收信错峰)、schedule-compensating-alerts(每小时第 15 分)、run-compensation-tasks(每小时第 14 分，与补偿任务 next_run_at 步长 1 小时一致)、retry-risk-intercept-compensation(每小时第 45 分，自动风控拦截补偿)。
+  Self-hosted Supabase: update vault.service_role_key and pg_cron to call the in-stack Kong Functions URL.
+  Registers 4 business cron jobs: sync-mailbox, schedule-draft-generation, run-compensation-tasks,
+  retry-risk-intercept-compensation. compensating-alerts is removed and replaced by first/final ops alerts.
 
 .PARAMETER SelfhostRoot
-  supabase-selfhost 目录，默认 <cs-main>/supabase-selfhost
+  supabase-selfhost directory, defaults to <cs-main>/supabase-selfhost
 
 .PARAMETER KongInternalUrl
-  db 容器内可访问的 Kong 基址，默认同栈为 http://kong:8000
+  Kong base URL reachable from the db container, defaults to http://kong:8000
 #>
 param(
     [string]$SelfhostRoot = "",
@@ -73,7 +74,6 @@ if ([string]::IsNullOrWhiteSpace($serviceRoleKey)) {
 $base = $KongInternalUrl.TrimEnd("/")
 $uSync = Sql-EscapeLiteral ($base + "/functions/v1/sync-mailbox")
 $uDraft = Sql-EscapeLiteral ($base + "/functions/v1/schedule-draft-generation")
-$uAlert = Sql-EscapeLiteral ($base + "/functions/v1/schedule-compensating-alerts")
 $uComp = Sql-EscapeLiteral ($base + "/functions/v1/run-compensation-tasks")
 $uRiskRetry = Sql-EscapeLiteral ($base + "/functions/v1/retry-risk-intercept-compensation")
 
@@ -128,15 +128,16 @@ function Add-CronBlock {
     $Out.Add("")
 }
 
+$lines.Add("SELECT cron.unschedule('compensating-alerts-every-30min') WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'compensating-alerts-every-30min');")
+$lines.Add("")
 Add-CronBlock -Out $lines -JobName "auto-sync-mailbox-every-5min" -Schedule "*/4 * * * *" -UrlEscaped $uSync
 Add-CronBlock -Out $lines -JobName "auto-draft-every-30min" -Schedule "2-59/4 * * * *" -UrlEscaped $uDraft
-Add-CronBlock -Out $lines -JobName "compensating-alerts-every-30min" -Schedule "15 * * * *" -UrlEscaped $uAlert
-Add-CronBlock -Out $lines -JobName "run-compensation-tasks-every-30min" -Schedule "14 * * * *" -UrlEscaped $uComp
+Add-CronBlock -Out $lines -JobName "run-compensation-tasks-every-30min" -Schedule "*/20 * * * *" -UrlEscaped $uComp
 $lines.Add("SELECT cron.unschedule('retry-risk-intercept-hourly-at-10') WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'retry-risk-intercept-hourly-at-10');")
 $lines.Add("")
 $lines.Add("SELECT cron.unschedule('retry-risk-intercept-hourly-at-29') WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'retry-risk-intercept-hourly-at-29');")
 $lines.Add("")
-Add-CronBlock -Out $lines -JobName "retry-risk-intercept-hourly-at-45" -Schedule "45 * * * *" -UrlEscaped $uRiskRetry
+Add-CronBlock -Out $lines -JobName "retry-risk-intercept-hourly-at-45" -Schedule "*/20 * * * *" -UrlEscaped $uRiskRetry
 
 $sql = ($lines -join "`n") + "`n"
 $tempSql = [IO.Path]::GetTempFileName() + ".sql"

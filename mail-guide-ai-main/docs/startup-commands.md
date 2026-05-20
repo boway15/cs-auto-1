@@ -201,7 +201,7 @@ Dashboard 中 Functions / Cron 与团队云端迁移一致即可；新环境不�
 ### 自建 Supabase（Docker）
 
 - `docker compose ps`（在 `supabase-selfhost`）主要服务 healthy
-- 已在 **`scripts/selfhosted/Apply-VaultAndCron.ps1`** 执行后，Postgres 中 **5 条** cron 齐全（与 [`docs/self-hosted-supabase.md`](./self-hosted-supabase.md)「四步续」表格一致），含 **`run-compensation-tasks-every-30min`**（每 30 分钟订单补偿，与 `order_compensation_tasks.next_run_at` 步长一致）及 **`retry-risk-intercept-hourly-at-45`**（每小时第 45 分自动风控拦截补偿）。
+- 已在 **`scripts/selfhosted/Apply-VaultAndCron.ps1`** 执行后，Postgres 中 **4 条** 业务 cron 齐全（与 [`docs/self-hosted-supabase.md`](./self-hosted-supabase.md) 一致；**无** `compensating-alerts-every-30min`），含 **`run-compensation-tasks-every-30min`**、**`retry-risk-intercept-hourly-at-45`**（二者 schedule 均为 **`*/20 * * * *`**）。
 - 校验 SQL（勿把输出中的密钥贴到公共环境）：
 
 ```sql
@@ -209,11 +209,11 @@ SELECT jobname, schedule FROM cron.job
 WHERE jobname IN (
   'auto-sync-mailbox-every-5min',
   'auto-draft-every-30min',
-  'compensating-alerts-every-30min',
-  'run-compensation-tasks-every-30min'
+  'run-compensation-tasks-every-30min',
+  'retry-risk-intercept-hourly-at-45'
 )
 ORDER BY jobname;
--- 预期 4 行；command 中不应含 *.supabase.co
+-- 预期 4 行；不应含 compensating-alerts-every-30min；command 中不应含 *.supabase.co
 SELECT name FROM vault.secrets WHERE name = 'service_role_key';
 ```
 

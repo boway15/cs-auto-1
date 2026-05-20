@@ -1,12 +1,17 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { createAlertAndNotify } from "../_shared/ops-notify.ts";
+import { notifyAutoAssociationFinalFailure } from "../_shared/automation-association-alerts.ts";
 import {
   erpEnvelopeOmsQuerySucceeded,
   isErpOmsConfigured,
   queryOrderInfo,
 } from "../_shared/erp-client.ts";
 import { upsertOrderFromOmsData } from "../_shared/erp-order-sync.ts";
-import { assertAutoRiskInterceptAllowed } from "../_shared/auto-risk-intercept-policy.ts";
+import {
+  assertAutoRiskInterceptAllowed,
+  isEmailWithinCustomerAutomationAge,
+  MAX_COMPENSATION_ATTEMPTS,
+  nextCompensationRunAtIso,
+} from "../_shared/auto-risk-intercept-policy.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -40,17 +45,39 @@ Deno.serve(async (req) => {
 
     const results = [];
     for (const task of tasks ?? []) {
-      const { data: emailAssoc } = await admin
+      const { data: emailRow } = await admin
         .from("emails")
-        .select("association_status")
+        .select("association_status, received_at")
         .eq("id", task.email_id)
         .maybeSingle();
-      if (emailAssoc?.association_status === "manual_unlink") {
+      if (emailRow?.association_status === "manual_unlink") {
         await admin.from("order_compensation_tasks").update({
           status: "failed",
           last_error: "邮件已人工解除关联，停止补偿",
         }).eq("id", task.id);
+        await notifyAutoAssociationFinalFailure(admin, {
+          email_id: task.email_id,
+          order_no: task.order_no,
+          task_id: task.id,
+          reason: "manual_unlink",
+          message: `订单号 ${task.order_no}：邮件已人工解除关联，已停止订单关联补偿。`,
+        });
         results.push({ id: task.id, status: "skipped_manual_unlink" });
+        continue;
+      }
+      if (!isEmailWithinCustomerAutomationAge(emailRow?.received_at ?? null)) {
+        await admin.from("order_compensation_tasks").update({
+          status: "failed",
+          last_error: "[policy:stale_email] 发件已超过 12 小时，停止订单关联补偿",
+        }).eq("id", task.id);
+        await notifyAutoAssociationFinalFailure(admin, {
+          email_id: task.email_id,
+          order_no: task.order_no,
+          task_id: task.id,
+          reason: "stale_email",
+          message: `订单号 ${task.order_no}：发件已超过 12 小时，已停止订单关联补偿。`,
+        });
+        results.push({ id: task.id, status: "failed_stale_email" });
         continue;
       }
 
@@ -101,14 +128,14 @@ Deno.serve(async (req) => {
         });
 
         // 若邮件意图为取消/改地址，关联成功后立即触发风控拦截
-        const { data: emailRow } = await admin
+        const { data: intentRow } = await admin
           .from("emails")
           .select("business_intent")
           .eq("id", task.email_id)
           .maybeSingle();
         const mustIntercept =
-          emailRow?.business_intent === "order_cancel" ||
-          emailRow?.business_intent === "address_change";
+          intentRow?.business_intent === "order_cancel" ||
+          intentRow?.business_intent === "address_change";
         if (mustIntercept) {
           const pol = await assertAutoRiskInterceptAllowed(admin, task.email_id);
           if (!pol.ok) {
@@ -129,7 +156,7 @@ Deno.serve(async (req) => {
                   order_id: order.id,
                   action: "hold",
                   intercept_reason: "补偿任务关联成功后自动拦截",
-                  reason_category: emailRow.business_intent,
+                  reason_category: intentRow.business_intent,
                   trigger_source: "auto",
                 }),
               });
@@ -155,11 +182,11 @@ Deno.serve(async (req) => {
       }
 
       const retryCount = Number(task.retry_count ?? 0) + 1;
-      const failed = retryCount >= Number(task.max_retries ?? 10);
+      const failed = retryCount >= Number(task.max_retries ?? MAX_COMPENSATION_ATTEMPTS);
       await admin.from("order_compensation_tasks").update({
         retry_count: retryCount,
         status: failed ? "failed" : "pending",
-        next_run_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        next_run_at: nextCompensationRunAtIso(),
         last_error: failed ? "达到最大重试次数，仍未查到订单" : "本次未查到订单",
       }).eq("id", task.id);
       if (failed) {
@@ -167,14 +194,13 @@ Deno.serve(async (req) => {
           association_status: "not_provided",
           priority: "high",
         }).eq("id", task.email_id);
-        await createAlertAndNotify(admin, {
-          source: "run-compensation-tasks",
-          kind: "failed",
-          title: "订单补偿失败",
-          message: `订单号 ${task.order_no} 重试 ${retryCount} 次仍未查到，邮件关联状态已置为未提供`,
-          related_email_id: task.email_id,
-          severity: "warning",
-          metadata: { task_id: task.id, order_no: task.order_no, retry_count: retryCount },
+        await notifyAutoAssociationFinalFailure(admin, {
+          email_id: task.email_id,
+          order_no: task.order_no,
+          task_id: task.id,
+          retry_count: retryCount,
+          reason: "max_retries",
+          message: `订单号 ${task.order_no} 已重试 ${retryCount} 次仍未查到，邮件关联状态已置为未提供。`,
         });
       }
       results.push({ id: task.id, status: failed ? "failed" : "pending", retry_count: retryCount });
