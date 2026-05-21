@@ -239,7 +239,7 @@ cd <仓库根>\mail-guide-ai-main\scripts\selfhosted
 - 拦截补偿：`retry-risk-intercept-compensation`，cron **`*/20 * * * *`**（job 名 `retry-risk-intercept-hourly-at-45` 为历史遗留）。
 - **补偿间隔**：`next_run_at` / `next_compensation_at` 步长 **20 分钟**（`COMPENSATION_STEP_MS`）。
 - **补偿次数**：收信 **1 次** + 补偿 **最多 20 次**（`MAX_COMPENSATION_ATTEMPTS`）；关联任务 `max_retries` 默认 **20**。
-- **超长 retrying**：自 `retrying_started_at`（缺省 `created_at`）起 **超过 4 小时** 仍为 retrying → `failed`，错误信息含 `[policy:retrying_timeout_4h]`（**不得**用 `updated_at` 计时）。
+- **retrying 终态**：补偿 **20 次用尽**、邮件 **超 12h**（`[policy:stale_email]`）、无 email/订单引用、开关关闭等 → `failed`（不设单独 retrying 挂起时长上限；`retrying_started_at` 仅作审计）。
 
 **后续可选（Phase B）**：合并为单一 `sweep-order-actions` cron，替代上述两条补偿 job。
 
@@ -267,7 +267,7 @@ cd <仓库根>\mail-guide-ai-main\scripts\selfhosted
 
 | 链路 | 首次（`kind`） | 末次（`kind`） |
 |------|----------------|----------------|
-| 自动拦截 | `auto_failed_first`：首次 ERP/流程失败进入 `retrying` 或 `process-email` 调 `risk-intercept` HTTP 失败 | `auto_failed_final`：补偿 20 次用尽、4h retrying 超时、超 12h、开关关闭等终态 `failed` |
+| 自动拦截 | `auto_failed_first`：首次 ERP/流程失败进入 `retrying` 或 `process-email` 调 `risk-intercept` HTTP 失败 | `auto_failed_final`：补偿 20 次用尽、超 12h、开关关闭等终态 `failed` |
 | 自动关联 | `auto_association_first`：收信查单未命中且已创建 `order_compensation_tasks` | `auto_association_final`：补偿 20 次仍无订单、`manual_unlink`、超 12h 停止等 |
 
 - 标题含 **`[首次]`** / **`[末次]`** 便于运营告警页区分。

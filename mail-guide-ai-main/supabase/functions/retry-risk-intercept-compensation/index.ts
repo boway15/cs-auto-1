@@ -27,51 +27,6 @@ function mergeErrorMessage(msg: string | null | undefined, tag: string): string 
   return `${m} ${t}`;
 }
 
-const STALE_RETRYING_MS = 4 * 60 * 60 * 1000;
-
-/** 补充拦截任务每次执行时：将「仍处于 retrying 且可自动补偿、已超过 4 小时」的记录置为失败 */
-async function closeStaleRetryingLogs(admin: ReturnType<typeof createClient>): Promise<number> {
-  const threshold = Date.now() - STALE_RETRYING_MS;
-  const { data: rows, error } = await admin
-    .from("risk_intercept_logs")
-    .select("id, email_id, order_id, referenced_order_no, error_message, retrying_started_at, created_at")
-    .eq("status", "retrying")
-    .eq("auto_compensation_eligible", true);
-  if (error) throw error;
-  let closed = 0;
-  for (const row of rows ?? []) {
-    const r = row as {
-      id: string;
-      error_message?: string | null;
-      retrying_started_at?: string | null;
-      created_at?: string | null;
-    };
-    // 不得以 updated_at 为起点：每次补偿失败落库都会触发 trg 刷新 updated_at，计时永远无法超过 4h
-    const startRaw = r.retrying_started_at ?? r.created_at;
-    if (!startRaw) continue;
-    const startMs = new Date(startRaw).getTime();
-    if (!Number.isFinite(startMs) || startMs > threshold) continue;
-    const { error: upErr } = await admin
-      .from("risk_intercept_logs")
-      .update({
-        status: "failed",
-        auto_compensation_eligible: false,
-        next_compensation_at: null,
-        retrying_started_at: null,
-        error_message: mergeErrorMessage(r.error_message, "[policy:retrying_timeout_4h]"),
-      })
-      .eq("id", r.id);
-    if (!upErr) {
-      closed++;
-      await notifyAutoInterceptFinalFromLogRow(admin, {
-        ...r,
-        error_message: mergeErrorMessage(r.error_message, "[policy:retrying_timeout_4h]"),
-      }, "retrying_timeout_4h");
-    }
-  }
-  return closed;
-}
-
 async function failLogWithPolicyTag(
   admin: ReturnType<typeof createClient>,
   log: {
@@ -135,8 +90,6 @@ Deno.serve(async (req) => {
         headers: corsJsonHeaders,
       });
     }
-
-    const staleRetryingClosed = await closeStaleRetryingLogs(admin);
 
     const nowIso = new Date().toISOString();
     const { data: logs, error: logErr } = await admin
@@ -228,7 +181,7 @@ Deno.serve(async (req) => {
     }
 
     return new Response(
-      JSON.stringify({ ok: true, stale_retrying_closed: staleRetryingClosed, processed: results.length, results }),
+      JSON.stringify({ ok: true, processed: results.length, results }),
       { headers: corsJsonHeaders },
     );
   } catch (e) {

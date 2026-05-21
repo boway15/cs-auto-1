@@ -201,7 +201,7 @@
 | **首次** | `trigger_source=auto` 首次失败进入 `retrying` | `auto_failed_first` | `risk-intercept` `persistRiskInterceptFailure` |
 | **首次** | `process-email` 调 `risk-intercept` **HTTP 失败**（与上同幂等键族，避免重复） | `auto_failed_first` | `notifyAutoInterceptFirstFailure` |
 | **末次** | 补偿 **20 次**用尽 → `status=failed` | `auto_failed_final` | `risk-intercept`（`reason: max_retries`） |
-| **末次（策略）** | 4h retrying 超时、超 12h、无 email/订单引用、开关关闭等 | `auto_failed_final` | `retry-risk-intercept-compensation` |
+| **末次（策略）** | 补偿 20 次用尽、超 12h、无 email/订单引用、开关关闭等 | `auto_failed_final` | `retry-risk-intercept-compensation` |
 
 标题示例：`[首次] 自动拦截失败`、`[末次] 自动拦截失败（已结束重试）`。
 **人工**拦截失败仍用 `kind: failed` 单次告警。

@@ -56,7 +56,7 @@ export interface RiskInterceptLog {
   auto_compensation_eligible?: boolean;
   compensation_attempts_done?: number;
   next_compensation_at?: string | null;
-  /** 首次进入自动补偿 retrying 的时间；补偿任务据此判断超 4h 超时 */
+  /** 首次进入自动补偿 retrying 的时间（审计/排障；终态由 20 次补偿或 12h 发件窗决定） */
   retrying_started_at?: string | null;
   created_at: string;
   updated_at: string;
