@@ -17,6 +17,11 @@ import {
   isEmailWithinCustomerAutomationAge,
   nextCompensationRunAtIso,
 } from "../_shared/auto-risk-intercept-policy.ts";
+import {
+  assertStaffCanAccessEmail,
+  getStaffActor,
+  isServiceRoleToken,
+} from "../_shared/mailbox-access.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -916,7 +921,23 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
+  const admin = createClient(SUPABASE_URL, SERVICE_KEY);
+  const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
+
   try {
+    const authHeader = req.headers.get("Authorization") ?? "";
+    const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+    const isService = isServiceRoleToken(token, SERVICE_KEY, Deno.env.get("CRON_SERVICE_ROLE_KEY"));
+    let actor: { userId: string; isService: boolean } | null = null;
+    if (!isService) {
+      actor = await getStaffActor(req, admin, {
+        supabaseUrl: SUPABASE_URL,
+        anonKey: ANON_KEY,
+        serviceKey: SERVICE_KEY,
+        cronKey: Deno.env.get("CRON_SERVICE_ROLE_KEY"),
+      });
+    }
+
     const body = await req.json();
     const emailIds = Array.isArray(body.email_ids) ? body.email_ids : [body.email_id].filter(Boolean);
     if (emailIds.length === 0) {
@@ -934,6 +955,9 @@ Deno.serve(async (req) => {
     }
     const results = [];
     for (const emailId of emailIds) {
+      if (actor && !actor.isService) {
+        await assertStaffCanAccessEmail(admin, actor, emailId);
+      }
       results.push({
         email_id: emailId,
         ...(await processEmail(emailId, { analyzeOnly })),
@@ -943,6 +967,7 @@ Deno.serve(async (req) => {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (error) {
+    if (error instanceof Response) return error;
     console.error("process-email error:", error);
     return new Response(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }), {
       status: 500,

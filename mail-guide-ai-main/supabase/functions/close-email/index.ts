@@ -3,6 +3,7 @@
 // 要求 staff 鉴权；写入 email_processing_events + audit_logs
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { assertStaffCanAccessEmail, getStaffActor } from "../_shared/mailbox-access.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -13,27 +14,16 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 
-async function getStaffActor(req: Request, admin: any) {
-  const authHeader = req.headers.get("Authorization") ?? "";
-  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
-  if (!token) throw new Response(JSON.stringify({ error: "未授权" }), { status: 401, headers: corsHeaders });
-  if (token === SERVICE_KEY) return { userId: null, isService: true };
-  const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
-  const { data } = await userClient.auth.getUser();
-  if (!data.user) throw new Response(JSON.stringify({ error: "未登录" }), { status: 401, headers: corsHeaders });
-  const { data: isStaff } = await admin.rpc("is_staff", { _user_id: data.user.id });
-  if (!isStaff) throw new Response(JSON.stringify({ error: "权限不足" }), { status: 403, headers: corsHeaders });
-  return { userId: data.user.id, isService: false };
-}
-
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   const admin = createClient(SUPABASE_URL, SERVICE_KEY);
   try {
-    const actor = await getStaffActor(req, admin);
+    const actor = await getStaffActor(req, admin, {
+      supabaseUrl: SUPABASE_URL,
+      anonKey: ANON_KEY,
+      serviceKey: SERVICE_KEY,
+    });
     const { email_id, reason } = await req.json();
     if (!email_id) {
       return new Response(JSON.stringify({ error: "缺少 email_id" }), {
@@ -41,6 +31,8 @@ Deno.serve(async (req) => {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
+
+    await assertStaffCanAccessEmail(admin, actor, email_id);
 
     const { data: before } = await admin
       .from("emails")
@@ -66,7 +58,7 @@ Deno.serve(async (req) => {
         status: "replied",
         processing_status: "manual_closed",
         closed_at: nowIso,
-        closed_by: actor.userId,
+        closed_by: actor.isService ? null : actor.userId,
         sla_bucket: null,
       })
       .eq("id", email_id)

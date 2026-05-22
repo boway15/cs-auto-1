@@ -15,6 +15,7 @@ import { RefreshCw, Search, Eye, CheckCircle2, XCircle, Download } from "lucide-
 import { formatDistanceToNow } from "date-fns";
 import { zhCN } from "date-fns/locale";
 import { toast } from "sonner";
+import { useAuth } from "@/hooks/useAuth";
 
 type Log = {
   id: string;
@@ -55,6 +56,7 @@ function templateCodeFromLog(log: Log): string | null {
 }
 
 export default function SendLogs() {
+  const { hasMailboxAccess, grantsLoading } = useAuth();
   const [logs, setLogs] = useState<Log[]>([]);
   const [listTotal, setListTotal] = useState(0);
   const [listPage, setListPage] = useState(0);
@@ -125,15 +127,28 @@ export default function SendLogs() {
       if (error) throw error;
       setListTotal(count ?? 0);
 
-      const orderIds = Array.from(new Set((data ?? []).map((log) => log.order_id).filter(Boolean)));
-      let orderNoById = new Map<string, string>();
+      const rows = (data ?? []).map((log) => {
+        const meta = (log.metadata ?? null) as Record<string, unknown> | null;
+        return {
+          ...log,
+          metadata: meta,
+          order_no: orderNoFromLog({ ...log, metadata: meta }),
+        };
+      });
 
-      if (orderIds.length > 0) {
+      const orderIdsNeedingLookup = Array.from(
+        new Set(
+          rows
+            .filter((log) => log.order_id && !log.order_no)
+            .map((log) => log.order_id as string),
+        ),
+      );
+      let orderNoById = new Map<string, string>();
+      if (orderIdsNeedingLookup.length > 0) {
         const { data: orders, error: ordersError } = await supabase
           .from("orders")
           .select("id, order_no")
-          .in("id", orderIds);
-
+          .in("id", orderIdsNeedingLookup);
         if (ordersError) {
           console.warn("Failed to load send log orders", ordersError);
         } else {
@@ -141,19 +156,14 @@ export default function SendLogs() {
         }
       }
 
-      const rows = (data ?? []).map((log) => {
-        const meta = (log.metadata ?? null) as Record<string, unknown> | null;
-        const fromMeta = meta && typeof meta.order_no === "string" ? meta.order_no : null;
-        return {
-          ...log,
-          metadata: meta,
-          order_no: fromMeta ?? (log.order_id ? orderNoById.get(log.order_id) ?? null : null),
-        };
-      });
+      const enriched = rows.map((log) => ({
+        ...log,
+        order_no: log.order_no ?? (log.order_id ? orderNoById.get(log.order_id) ?? null : null),
+      }));
       const q = searchDebounced.toLowerCase();
       setLogs(
         q
-          ? rows.filter((l) => {
+          ? enriched.filter((l) => {
               const tc = templateCodeFromLog(l)?.toLowerCase() ?? "";
               return (
                 l.order_no?.toLowerCase().includes(q) ||
@@ -164,7 +174,7 @@ export default function SendLogs() {
                 l.send_no?.toLowerCase().includes(q)
               );
             })
-          : rows,
+          : enriched,
       );
     } catch (error) {
       const message = typeof error === "object" && error && "message" in error
@@ -232,6 +242,12 @@ export default function SendLogs() {
           </Button>
         </div>
       </div>
+
+      {!hasMailboxAccess && !grantsLoading && (
+        <Card className="p-3 mb-4 text-sm text-muted-foreground border-warning/40 bg-warning/10">
+          当前账号未分配授权邮箱，仅显示空列表。请联系管理员配置邮箱授权。
+        </Card>
+      )}
 
       <div className="grid grid-cols-3 gap-3 mb-4">
         <Card className="p-4">

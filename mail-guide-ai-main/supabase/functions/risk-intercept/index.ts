@@ -10,6 +10,15 @@ import {
   MAX_COMPENSATION_ATTEMPTS,
   nextCompensationRunAtIso,
 } from "../_shared/auto-risk-intercept-policy.ts";
+import {
+  assertStaffCanAccessEmail,
+  assertStaffCanAccessEmailOrderContext,
+  assertStaffCanAccessOrder,
+  getStaffActor,
+  isUserAdmin,
+  mailboxAccessCorsJsonHeaders,
+  type StaffActor,
+} from "../_shared/mailbox-access.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -265,19 +274,6 @@ async function persistRiskInterceptFailure(admin: any, opts: {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
-
-async function getActor(req: Request, admin: any) {
-  const authHeader = req.headers.get("Authorization") ?? "";
-  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
-  if (token === SERVICE_KEY) return { userId: null, isService: true };
-  if (!token) throw new Response(JSON.stringify({ error: "未授权" }), { status: 401, headers: corsJsonHeaders });
-  const userClient = createClient(SUPABASE_URL, ANON_KEY, { global: { headers: { Authorization: `Bearer ${token}` } } });
-  const { data } = await userClient.auth.getUser();
-  if (!data.user) throw new Response(JSON.stringify({ error: "未登录" }), { status: 401, headers: corsJsonHeaders });
-  const { data: isStaff } = await admin.rpc("is_staff", { _user_id: data.user.id });
-  if (!isStaff) throw new Response(JSON.stringify({ error: "权限不足" }), { status: 403, headers: corsJsonHeaders });
-  return { userId: data.user.id, isService: false };
-}
 
 /** 第三方打标：Shopify 已停用；仅本地 `orders` 状态由 runInterceptLinkedOrder 更新，ERP 见 docs/erp-api-requirements.md */
 async function applyShopifyTag(_admin: any, _order: any, _action: "hold" | "release", _reason?: string, _category?: string) {
@@ -723,7 +719,7 @@ async function runInterceptEmailProvidedOrderNo(payload: any, actor: { userId: s
   }
 }
 
-async function runIntercept(payload: any, actor: { userId: string | null }, admin: any) {
+async function runIntercept(payload: any, actor: StaffActor, admin: any) {
   const action = payload.action ?? "hold";
   if (!["hold", "release"].includes(action)) throw new Error("参数错误");
 
@@ -733,9 +729,27 @@ async function runIntercept(payload: any, actor: { userId: string | null }, admi
   const orderNoFromPayload = String(payload.order_no ?? "").trim();
   const emailIdRaw = payload.email_id != null ? String(payload.email_id).trim() : "";
   const email_id = emailIdRaw && isUuid(emailIdRaw) ? emailIdRaw : null;
+  const trigger_source = String(payload.trigger_source ?? "manual");
 
   if (orderId) {
-    return await runInterceptLinkedOrder({ ...payload, order_id: orderId, email_id: email_id ?? payload.email_id }, actor, admin);
+    if (!actor.isService && actor.userId) {
+      const adminUser = await isUserAdmin(admin, actor.userId);
+      if (trigger_source === "manual" && !adminUser && !email_id) {
+        throw new Response(JSON.stringify({ error: "人工风控操作需要提供 email_id" }), {
+          status: 403,
+          headers: mailboxAccessCorsJsonHeaders,
+        });
+      }
+      await assertStaffCanAccessOrder(admin, actor, orderId);
+      if (email_id && trigger_source === "manual" && !adminUser) {
+        await assertStaffCanAccessEmailOrderContext(admin, actor, email_id, orderId);
+      }
+    }
+    return await runInterceptLinkedOrder(
+      { ...payload, order_id: orderId, email_id: email_id ?? payload.email_id },
+      actor,
+      admin,
+    );
   }
 
   if (action === "release") {
@@ -754,7 +768,11 @@ Deno.serve(async (req) => {
 
   const admin = createClient(SUPABASE_URL, SERVICE_KEY);
   try {
-    const actor = await getActor(req, admin);
+    const actor = await getStaffActor(req, admin, {
+      supabaseUrl: SUPABASE_URL,
+      anonKey: ANON_KEY,
+      serviceKey: SERVICE_KEY,
+    });
     const payload = await req.json();
     const trigger_source = String(payload.trigger_source ?? "manual");
 
@@ -767,6 +785,10 @@ Deno.serve(async (req) => {
 
     const emailIdRaw = payload.email_id != null ? String(payload.email_id).trim() : "";
     const eligibleEmailId = emailIdRaw && isUuid(emailIdRaw) ? emailIdRaw : null;
+
+    if (!actor.isService && eligibleEmailId) {
+      await assertStaffCanAccessEmail(admin, actor, eligibleEmailId);
+    }
 
     if (trigger_source === "auto" || trigger_source === "retry") {
       const pol = await assertAutoRiskInterceptAllowed(admin, eligibleEmailId);

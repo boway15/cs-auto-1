@@ -43,6 +43,7 @@ function decodeRfc2047(s: string | null): string | null {
   return text || s;
 }
 import { supabase } from "@/lib/supabase";
+import { fetchAccessibleMailboxes } from "@/lib/accessible-mailboxes";
 import { invokeGetOrderByEmail } from "@/lib/invoke-get-order-by-email";
 import { formatFunctionsInvokeError, formatInvokeBodyField } from "@/lib/format-functions-invoke-error";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -110,6 +111,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "@/hooks/useAuth";
 
 type Email = any;
 type Order = any;
@@ -125,6 +127,14 @@ function normalizeEmailAddress(s: string | null | undefined): string {
 
 export default function Workbench() {
   const navigate = useNavigate();
+  const {
+    hasAllMailboxAccess,
+    hasMailboxAccess,
+    allowedMailboxIds,
+    grantsLoading,
+    authGateLoading,
+  } = useAuth();
+  const canOperate = hasMailboxAccess && !grantsLoading;
   const [emails, setEmails] = useState<Email[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
@@ -473,14 +483,16 @@ export default function Workbench() {
   }, [listFilters, listPage, loadEmails]);
 
   useEffect(() => {
-    supabase
-      .from("mailboxes")
-      .select("id, email_address, display_name")
-      .eq("is_active", true)
-      .then(({ data }) => {
-        setMailboxes(data ?? []);
-      });
-  }, []);
+    if (authGateLoading) return;
+    void fetchAccessibleMailboxes().then(setMailboxes);
+  }, [authGateLoading]);
+
+  useEffect(() => {
+    if (mailboxFilter === "all") return;
+    if (!mailboxes.some((m) => m.id === mailboxFilter)) {
+      setMailboxFilter("all");
+    }
+  }, [mailboxes, mailboxFilter]);
 
   useEffect(() => {
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -674,12 +686,7 @@ export default function Workbench() {
   }
 
   async function openLinkDialog() {
-    const { data } = await supabase
-      .from("orders")
-      .select("*")
-      .order("updated_at", { ascending: false })
-      .limit(200);
-    setAllOrders(data ?? []);
+    setAllOrders([]);
     setErpPullOrderNo("");
     setErpPullEmail(selected?.from_email ?? "");
     setLinkDialogOpen(true);
@@ -688,7 +695,10 @@ export default function Workbench() {
   async function pullOrderFromErp() {
     setErpPulling(true);
     try {
-      const r = await invokeGetOrderByEmail(erpPullOrderNo, erpPullEmail, { refresh: false });
+      const r = await invokeGetOrderByEmail(erpPullOrderNo, erpPullEmail, {
+        refresh: false,
+        emailId: selectedId ?? undefined,
+      });
       if (r.kind === "auth") {
         toast.error("请先登录");
         return;
@@ -708,12 +718,10 @@ export default function Workbench() {
         return;
       }
       toast.success(r.source === "erp_oms" ? "已从 OMS 拉取并写入本地" : "已在本地找到该订单");
-      const { data: refreshed } = await supabase
-        .from("orders")
-        .select("*")
-        .order("updated_at", { ascending: false })
-        .limit(200);
-      setAllOrders(refreshed ?? []);
+      if (r.orderId) {
+        const { data: orderRow } = await supabase.from("orders").select("*").eq("id", r.orderId).maybeSingle();
+        if (orderRow) setAllOrders([orderRow as Order]);
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "拉取失败");
     } finally {
@@ -731,7 +739,10 @@ export default function Workbench() {
     }
     setOrderRefreshId(id);
     try {
-      const r = await invokeGetOrderByEmail(orderNo, String(o.customer_email ?? "").trim(), { refresh: true });
+      const r = await invokeGetOrderByEmail(orderNo, String(o.customer_email ?? "").trim(), {
+        refresh: true,
+        emailId: selectedId ?? undefined,
+      });
       if (r.kind === "auth") {
         toast.error("请先登录");
         return;
@@ -951,17 +962,9 @@ export default function Workbench() {
     setSyncing(true);
     const MAX_ROUNDS = 20;
     try {
-      const { data: activeMbs, error: listErr } = await supabase
-        .from("mailboxes")
-        .select("id, email_address")
-        .eq("is_active", true);
-      if (listErr) {
-        toast.error("读取邮箱列表失败：" + listErr.message);
-        return;
-      }
-      const rows = activeMbs ?? [];
+      const rows = await fetchAccessibleMailboxes();
       if (rows.length === 0) {
-        toast.message("没有启用的邮箱");
+        toast.message(hasMailboxAccess ? "没有启用的邮箱" : "未分配授权邮箱，请联系管理员");
         return;
       }
 
@@ -1123,7 +1126,7 @@ export default function Workbench() {
               variant="outline"
               className="h-7 px-2 text-xs shrink-0"
               onClick={syncMailboxes}
-              disabled={syncing}
+              disabled={syncing || !hasMailboxAccess || grantsLoading}
             >
               <RefreshCw className={`w-3 h-3 mr-1 ${syncing ? "animate-spin" : ""}`} />
               {syncing ? "同步中" : "同步邮箱"}
@@ -1253,10 +1256,22 @@ export default function Workbench() {
           )}
         </div>
 
+        {!hasMailboxAccess && !grantsLoading && (
+          <div className="mx-3 mb-2 p-3 rounded-md border border-warning/40 bg-warning/10 text-xs text-muted-foreground">
+            当前账号未分配授权邮箱，无法查看或处理邮件。请联系管理员在用户管理中配置。
+          </div>
+        )}
+
         <ScrollArea className="flex-1 min-h-0">
           {listEmails.length === 0 ? (
             <div className="p-8 text-center text-muted-foreground text-sm">
-              {listLoading ? "加载中…" : "当前条件下暂无邮件"}
+              {grantsLoading || authGateLoading
+                ? "加载权限…"
+                : !hasMailboxAccess
+                  ? "暂无授权邮箱"
+                  : listLoading
+                    ? "加载中…"
+                    : "当前条件下暂无邮件"}
             </div>
           ) : (
             listEmails.map((email) => {
@@ -1675,7 +1690,7 @@ export default function Workbench() {
                       <div className="rounded-md border p-3 space-y-2 bg-muted/30 text-xs">
                         <div className="font-medium text-foreground">从 ERP（OMS）拉取到本地</div>
                         <p className="text-muted-foreground">
-                          下方列表只展示本地已存在的订单。若为空，请填写<strong>订单号或买家邮箱至少一项</strong>（可同时填）后从 OMS 拉取。
+                          请填写<strong>订单号或买家邮箱至少一项</strong>后从 OMS 拉取；拉取成功后可在此关联到当前邮件（不会展示全库订单列表）。
                         </p>
                         <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-center">
                           <Input
@@ -1897,7 +1912,7 @@ export default function Workbench() {
                       className="text-sm"
                     />
                   </div>
-                  <Button onClick={generateDraft} disabled={generating} className="w-full">
+                  <Button onClick={generateDraft} disabled={!canOperate || generating} className="w-full">
                     <Sparkles className="w-4 h-4 mr-2" />
                     {generating
                       ? "AI 生成中..."
@@ -1972,7 +1987,7 @@ export default function Workbench() {
                   className="text-sm font-mono"
                 />
                 <div className="flex justify-end mt-2">
-                  <Button onClick={sendReply} disabled={!replyContent.trim() || sending}>
+                  <Button onClick={sendReply} disabled={!canOperate || !replyContent.trim() || sending}>
                     <Send className="w-4 h-4 mr-2" /> {sending ? "发送中..." : "发送回复"}
                   </Button>
                 </div>

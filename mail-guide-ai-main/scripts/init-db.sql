@@ -280,3 +280,15 @@ CREATE INDEX IF NOT EXISTS idx_risk_logs_created ON risk_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_order_no ON orders(order_no);
 CREATE INDEX IF NOT EXISTS idx_user_roles_user ON user_roles(user_id);
 CREATE INDEX IF NOT EXISTS idx_order_compensation_due ON order_compensation_tasks(status, next_run_at);
+
+-- 15. 用户邮箱授权（Supabase 部署见 migrations/20260522140000_user_mailbox_grants_rls.sql）
+CREATE TABLE IF NOT EXISTS user_mailbox_grants (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL,
+  mailbox_id  UUID NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+  granted_by  UUID,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (user_id, mailbox_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_mailbox_grants_user ON user_mailbox_grants(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_mailbox_grants_mailbox ON user_mailbox_grants(mailbox_id);

@@ -888,6 +888,38 @@ export type Database = {
         }
         Relationships: []
       }
+      user_mailbox_grants: {
+        Row: {
+          created_at: string
+          granted_by: string | null
+          id: string
+          mailbox_id: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          granted_by?: string | null
+          id?: string
+          mailbox_id: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          granted_by?: string | null
+          id?: string
+          mailbox_id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "user_mailbox_grants_mailbox_id_fkey"
+            columns: ["mailbox_id"]
+            isOneToOne: false
+            referencedRelation: "mailboxes"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       user_roles: {
         Row: {
           created_at: string
@@ -914,6 +946,27 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      can_access_email: {
+        Args: { _email_id: string; _user_id: string }
+        Returns: boolean
+      }
+      can_access_mailbox: {
+        Args: { _mailbox_id: string; _user_id: string }
+        Returns: boolean
+      }
+      can_access_order: {
+        Args: { _order_id: string; _user_id: string }
+        Returns: boolean
+      }
+      list_accessible_mailboxes: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          id: string
+          email_address: string
+          display_name: string | null
+          is_active: boolean
+        }[]
+      }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]

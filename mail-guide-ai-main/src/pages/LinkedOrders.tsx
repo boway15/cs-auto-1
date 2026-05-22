@@ -27,6 +27,7 @@ import { RefreshCw, Eye } from "lucide-react";
 import { toast } from "sonner";
 import { Link } from "react-router-dom";
 import { TableListPagination } from "@/components/TableListPagination";
+import { useAuth } from "@/hooks/useAuth";
 import { ADMIN_LIST_PAGE_SIZE, clampListPage, listPageCount, listPageRange } from "@/lib/list-pagination";
 
 const FETCH_LIMIT = 500;
@@ -534,6 +535,7 @@ function LinkRecordDataSection({ row }: { row: LinkedOrderRow }) {
 }
 
 export default function LinkedOrders() {
+  const { hasMailboxAccess, grantsLoading } = useAuth();
   const [loading, setLoading] = useState(true);
   const [linkedRows, setLinkedRows] = useState<LinkedOrderRow[]>([]);
   const [unlinkedEmails, setUnlinkedEmails] = useState<EmailRow[]>([]);
@@ -774,7 +776,7 @@ export default function LinkedOrders() {
   const showAssocColumn = associationMode === "all";
   const tableColSpan = showAssocColumn ? 11 : 10;
 
-  async function refreshLinkedOrder(order: OrderRow) {
+  async function refreshLinkedOrder(order: OrderRow, emailId?: string) {
     const id = String(order.id ?? "").trim();
     const orderNo = String(order.order_no ?? "").trim();
     if (!id) return;
@@ -784,7 +786,10 @@ export default function LinkedOrders() {
     }
     setOrderRefreshId(id);
     try {
-      const r = await invokeGetOrderByEmail(orderNo, String(order.customer_email ?? "").trim(), { refresh: true });
+      const r = await invokeGetOrderByEmail(orderNo, String(order.customer_email ?? "").trim(), {
+        refresh: true,
+        emailId,
+      });
       if (r.kind === "auth") {
         toast.error("请先登录");
         return;
@@ -847,6 +852,12 @@ export default function LinkedOrders() {
           </Button>
         </div>
       </div>
+
+      {!hasMailboxAccess && !grantsLoading && (
+        <div className="mx-4 mt-3 p-3 rounded-md border border-warning/40 bg-warning/10 text-xs text-muted-foreground shrink-0">
+          当前账号未分配授权邮箱，列表仅显示空数据。请联系管理员配置邮箱授权。
+        </div>
+      )}
 
       <div className="p-4 border-b bg-muted/20 shrink-0 flex flex-wrap gap-2 items-end">
         <div className="space-y-1">
@@ -1019,7 +1030,7 @@ export default function LinkedOrders() {
                                 size="sm"
                                 className="h-7 text-[11px]"
                                 disabled={orderRefreshId === String(row.order.id)}
-                                onClick={() => void refreshLinkedOrder(row.order)}
+                                onClick={() => void refreshLinkedOrder(row.order, String(row.email.id))}
                               >
                                 <RefreshCw
                                   className={`w-3 h-3 mr-1 ${orderRefreshId === String(row.order.id) ? "animate-spin" : ""}`}

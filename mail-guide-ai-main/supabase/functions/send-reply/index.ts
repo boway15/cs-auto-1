@@ -2,6 +2,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { sendMail } from "../_shared/smtp.ts";
 import { appendMailboxSignature } from "../_shared/mail-signature.ts";
+import { assertCanAccessEmail } from "../_shared/mailbox-access.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -38,6 +39,12 @@ Deno.serve(async (req) => {
     }
 
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    try {
+      await assertCanAccessEmail(admin, userData.user.id, email_id);
+    } catch (e) {
+      if (e instanceof Response) return e;
+      throw e;
+    }
 
     const { data: email, error: emailErr } = await admin
       .from("emails")

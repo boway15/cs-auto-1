@@ -55,7 +55,7 @@ const STATUS_CLS: Record<string, string> = {
 };
 
 export default function Alerts() {
-  const { isAdmin } = useAuth();
+  const { isAdmin, hasMailboxAccess, grantsLoading } = useAuth();
   const [rows, setRows] = useState<AlertRow[]>([]);
   const [listTotal, setListTotal] = useState(0);
   const [listPage, setListPage] = useState(0);
@@ -265,6 +265,12 @@ export default function Alerts() {
           </Button>
         </div>
       </div>
+
+      {!hasMailboxAccess && !grantsLoading && (
+        <Card className="mx-3 p-3 text-xs text-muted-foreground border-warning/40 bg-warning/10 shrink-0">
+          当前账号未分配授权邮箱；与邮件相关的告警将不可见。请联系管理员配置邮箱授权。
+        </Card>
+      )}
 
       <Dialog open={configOpen} onOpenChange={setConfigOpen}>
         <DialogContent className="sm:max-w-md">

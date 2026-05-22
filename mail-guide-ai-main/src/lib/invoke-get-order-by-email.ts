@@ -4,6 +4,7 @@ export type GetOrderApiJson = {
   error?: string;
   found?: boolean;
   source?: string;
+  order_id?: string;
   erp_message?: string;
   erp_error?: string;
 };
@@ -13,7 +14,24 @@ export type InvokeGetOrderByEmailResult =
   | { kind: "bad_request"; message: string }
   | { kind: "error"; message: string }
   | { kind: "not_found"; description?: string }
-  | { kind: "success"; source?: string };
+  | { kind: "success"; source?: string; orderId?: string };
+
+/** 构造 get-order-by-email 请求 URL（便于单测） */
+export function buildGetOrderByEmailUrl(
+  base: string,
+  orderNo: string,
+  buyerEmail: string,
+  opts?: { refresh?: boolean; emailId?: string },
+): string {
+  const on = orderNo.trim();
+  const em = buyerEmail.trim();
+  const u = new URL(`${base.replace(/\/+$/, "")}/functions/v1/get-order-by-email`);
+  if (on) u.searchParams.set("order_no", on);
+  if (em) u.searchParams.set("email", em);
+  if (opts?.emailId) u.searchParams.set("email_id", opts.emailId);
+  if (opts?.refresh) u.searchParams.set("refresh", "1");
+  return u.toString();
+}
 
 /**
  * 调用 Edge `get-order-by-email`：默认先本地后 OMS；`refresh: true` 时在已配置 OMS 下强制走查询并回写本地。
@@ -21,7 +39,7 @@ export type InvokeGetOrderByEmailResult =
 export async function invokeGetOrderByEmail(
   orderNo: string,
   buyerEmail: string,
-  opts?: { refresh?: boolean },
+  opts?: { refresh?: boolean; emailId?: string },
 ): Promise<InvokeGetOrderByEmailResult> {
   const on = orderNo.trim();
   const em = buyerEmail.trim();
@@ -34,12 +52,9 @@ export async function invokeGetOrderByEmail(
 
   const base = import.meta.env.VITE_SUPABASE_URL as string;
   const anon = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
-  const u = new URL(`${base.replace(/\/+$/, "")}/functions/v1/get-order-by-email`);
-  if (on) u.searchParams.set("order_no", on);
-  if (em) u.searchParams.set("email", em);
-  if (opts?.refresh) u.searchParams.set("refresh", "1");
+  const url = buildGetOrderByEmailUrl(base, on, em, opts);
 
-  const res = await fetch(u.toString(), {
+  const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}`, apikey: anon },
   });
   const json = (await res.json()) as GetOrderApiJson;
@@ -51,5 +66,5 @@ export async function invokeGetOrderByEmail(
       description: json.erp_message || json.erp_error || "本地与 OMS 均无有效记录，或 ERP 未配置",
     };
   }
-  return { kind: "success", source: json.source };
+  return { kind: "success", source: json.source, orderId: json.order_id };
 }

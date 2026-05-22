@@ -13,6 +13,10 @@ import {
 } from "../_shared/mime-parse.ts";
 import { getMailTlsCaCerts } from "../_shared/mail-tls-ca.ts";
 import { sanitizeDisplayName } from "../_shared/display-name.ts";
+import {
+  assertCanAccessMailbox,
+  isServiceRoleToken,
+} from "../_shared/mailbox-access.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -859,13 +863,16 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
-    // 鉴权：允许 (a) 服务角色（pg_cron 调用） 或 (b) 已登录的 admin/leader/agent 员工
     const authHeader = req.headers.get("Authorization") ?? "";
     const token = authHeader.replace(/^Bearer\s+/i, "").trim();
-    const isServiceRole = token && (
-      token === SUPABASE_SERVICE_ROLE_KEY ||
-      (CRON_SERVICE_ROLE_KEY ? token === CRON_SERVICE_ROLE_KEY : false)
+    const isServiceRole = isServiceRoleToken(
+      token,
+      SUPABASE_SERVICE_ROLE_KEY,
+      CRON_SERVICE_ROLE_KEY,
     );
+
+    const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    let manualUserId: string | null = null;
 
     if (!isServiceRole) {
       if (!token) {
@@ -884,18 +891,15 @@ Deno.serve(async (req) => {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-      // 必须是员工（admin/leader/agent）
-      const adminClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-      const { data: isStaff } = await adminClient.rpc("is_staff", { _user_id: userData.user.id });
+      const { data: isStaff } = await admin.rpc("is_staff", { _user_id: userData.user.id });
       if (!isStaff) {
         return new Response(JSON.stringify({ error: "权限不足" }), {
           status: 403,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
+      manualUserId = userData.user.id;
     }
-
-    const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
     let mailboxId: string | undefined;
     let forceBulk = false;
@@ -907,10 +911,38 @@ Deno.serve(async (req) => {
       } catch { /* ignore */ }
     }
 
+    if (manualUserId && mailboxId) {
+      try {
+        await assertCanAccessMailbox(admin, manualUserId, mailboxId);
+      } catch (e) {
+        if (e instanceof Response) return e;
+        throw e;
+      }
+    }
+
     const query = admin.from("mailboxes").select("*").eq("is_active", true);
     if (mailboxId) query.eq("id", mailboxId);
-    const { data: mailboxes, error: mbErr } = await query;
+    let { data: mailboxes, error: mbErr } = await query;
     if (mbErr) throw mbErr;
+
+    if (manualUserId && mailboxes && mailboxes.length > 0) {
+      const { data: isAdmin } = await admin.rpc("has_role", {
+        _user_id: manualUserId,
+        _role: "admin",
+      });
+      if (!isAdmin) {
+        const allowed: typeof mailboxes = [];
+        for (const mb of mailboxes) {
+          const { data: ok } = await admin.rpc("can_access_mailbox", {
+            _user_id: manualUserId,
+            _mailbox_id: mb.id,
+          });
+          if (ok) allowed.push(mb);
+        }
+        mailboxes = allowed;
+      }
+    }
+
     if (!mailboxes || mailboxes.length === 0) {
       return new Response(JSON.stringify({ message: "无启用邮箱", results: [] }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },

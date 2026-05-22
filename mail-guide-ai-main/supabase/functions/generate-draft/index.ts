@@ -10,6 +10,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { buildLocalDraft, callDifyDraftWorkflow, insertDraft } from "../_shared/draft.ts";
+import { assertCanAccessEmail } from "../_shared/mailbox-access.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -68,6 +69,14 @@ Deno.serve(async (req) => {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
+    }
+
+    const admin = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    try {
+      await assertCanAccessEmail(admin, userData.user.id, email_id);
+    } catch (e) {
+      if (e instanceof Response) return e;
+      throw e;
     }
 
     const { data: email, error: emailErr } = await supabase
@@ -175,6 +184,7 @@ Deno.serve(async (req) => {
       { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   } catch (e) {
+    if (e instanceof Response) return e;
     console.error("generate-draft error:", e);
     return new Response(
       JSON.stringify({ error: e instanceof Error ? e.message : "未知错误" }),
