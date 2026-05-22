@@ -70,6 +70,10 @@ Deno.serve(async (req) => {
           status: "failed",
           last_error: "[policy:stale_email] 发件已超过 12 小时，停止订单关联补偿",
         }).eq("id", task.id);
+        await admin.from("emails").update({
+          association_status: "not_found",
+          priority: "high",
+        }).eq("id", task.email_id);
         await notifyAutoAssociationFinalFailure(admin, {
           email_id: task.email_id,
           order_no: task.order_no,
@@ -191,7 +195,7 @@ Deno.serve(async (req) => {
       }).eq("id", task.id);
       if (failed) {
         await admin.from("emails").update({
-          association_status: "not_provided",
+          association_status: "not_found",
           priority: "high",
         }).eq("id", task.email_id);
         await notifyAutoAssociationFinalFailure(admin, {
@@ -200,7 +204,7 @@ Deno.serve(async (req) => {
           task_id: task.id,
           retry_count: retryCount,
           reason: "max_retries",
-          message: `订单号 ${task.order_no} 已重试 ${retryCount} 次仍未查到，邮件关联状态已置为未提供。`,
+          message: `订单号 ${task.order_no} 已重试 ${retryCount} 次仍未查到，邮件关联状态已置为未找到。`,
         });
       }
       results.push({ id: task.id, status: failed ? "failed" : "pending", retry_count: retryCount });

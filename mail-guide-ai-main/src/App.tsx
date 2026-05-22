@@ -9,6 +9,7 @@ import AuthPage from "./pages/Auth";
 import Workbench from "./pages/Workbench";
 import Mailboxes from "./pages/Mailboxes";
 import Templates from "./pages/Templates";
+import ErpNotifyTemplates from "./pages/ErpNotifyTemplates";
 import Users from "./pages/Users";
 import SendLogs from "./pages/SendLogs";
 import LinkedOrders from "./pages/LinkedOrders";
@@ -32,6 +33,7 @@ const App = () => (
             <Route path="/linked-orders" element={<LinkedOrders />} />
             <Route path="/mailboxes" element={<ProtectedRoute adminOnly><Mailboxes /></ProtectedRoute>} />
             <Route path="/templates" element={<ProtectedRoute adminOnly><Templates /></ProtectedRoute>} />
+            <Route path="/erp-notify-templates" element={<ProtectedRoute adminOnly><ErpNotifyTemplates /></ProtectedRoute>} />
             <Route path="/users" element={<ProtectedRoute adminOnly><Users /></ProtectedRoute>} />
             <Route path="/send-logs" element={<SendLogs />} />
             <Route path="/risk-logs" element={<RiskLogs />} />

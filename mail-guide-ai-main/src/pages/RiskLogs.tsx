@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { TableListPagination } from "@/components/TableListPagination";
+import { clampListPage, listPageCount, listPageRange } from "@/lib/list-pagination";
 import { useAuth } from "@/hooks/useAuth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,26 +30,84 @@ const statusMap: Record<string, string> = {
 export default function RiskLogs() {
   const { isAdmin } = useAuth();
   const [logs, setLogs] = useState<RiskLog[]>([]);
+  const [listTotal, setListTotal] = useState(0);
+  const [listPage, setListPage] = useState(0);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("all");
   const [search, setSearch] = useState("");
+  const [searchDebounced, setSearchDebounced] = useState("");
   const [detail, setDetail] = useState<RiskLog | null>(null);
   const [riskAutoInterceptEnabled, setRiskAutoInterceptEnabled] = useState(false);
   const [riskSettingLoaded, setRiskSettingLoaded] = useState(false);
   const [savingRiskSetting, setSavingRiskSetting] = useState(false);
+  const [statusStats, setStatusStats] = useState<Record<string, number>>({});
 
-  async function load() {
+  useEffect(() => {
+    const t = setTimeout(() => setSearchDebounced(search.trim()), 400);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  useEffect(() => {
+    setListPage(0);
+  }, [status, searchDebounced]);
+
+  const load = useCallback(async () => {
     setLoading(true);
-    const { data } = await supabase
-      .from("risk_intercept_logs")
-      .select("*, orders(order_no, customer_email), emails(subject, from_email)")
-      .order("created_at", { ascending: false })
-      .limit(200);
-    setLogs(data ?? []);
-    setLoading(false);
-  }
+    try {
+      const statKeys = ["success", "failed", "retrying", "pending"] as const;
+      const statEntries = await Promise.all(
+        statKeys.map(async (key) => {
+          const { count, error } = await supabase
+            .from("risk_intercept_logs")
+            .select("*", { count: "exact", head: true })
+            .eq("status", key);
+          if (error) throw error;
+          return [key, count ?? 0] as const;
+        }),
+      );
+      setStatusStats(Object.fromEntries(statEntries));
 
-  useEffect(() => { load(); }, []);
+      let query = supabase
+        .from("risk_intercept_logs")
+        .select("*, orders(order_no, customer_email), emails(subject, from_email)", { count: "exact" });
+      if (status !== "all") query = query.eq("status", status);
+      if (searchDebounced) {
+        const s = `%${searchDebounced}%`;
+        query = query.or(
+          `intercept_no.ilike.${s},referenced_order_no.ilike.${s},intercept_reason.ilike.${s},orders.order_no.ilike.${s},orders.customer_email.ilike.${s},emails.subject.ilike.${s},emails.from_email.ilike.${s}`,
+        );
+      }
+      const { from, to } = listPageRange(listPage);
+      const { data, error, count } = await query
+        .order("created_at", { ascending: false })
+        .range(from, to);
+      if (error) throw error;
+      setLogs(data ?? []);
+      setListTotal(count ?? 0);
+    } catch (error) {
+      const message = typeof error === "object" && error && "message" in error
+        ? String((error as { message: string }).message)
+        : "请稍后重试";
+      toast.error(`拦截记录加载失败：${message}`);
+      setLogs([]);
+      setListTotal(0);
+    } finally {
+      setLoading(false);
+    }
+  }, [status, searchDebounced, listPage]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const listPageCountVal = listPageCount(listTotal);
+  const listPageSafe = clampListPage(listPage, listPageCountVal);
+
+  useEffect(() => {
+    if (listPage > 0 && listPage >= listPageCountVal) {
+      setListPage(Math.max(0, listPageCountVal - 1));
+    }
+  }, [listPage, listPageCountVal]);
 
   useEffect(() => {
     if (!isAdmin) {
@@ -94,21 +154,6 @@ export default function RiskLogs() {
     toast.success("自动拦截设置已保存");
   }
 
-  const filtered = logs.filter((log) => {
-    if (status !== "all" && log.status !== status) return false;
-    if (!search) return true;
-    const haystack = [
-      log.intercept_no,
-      log.orders?.order_no,
-      log.referenced_order_no,
-      log.orders?.customer_email,
-      log.emails?.subject,
-      log.emails?.from_email,
-      log.intercept_reason,
-    ].join(" ").toLowerCase();
-    return haystack.includes(search.toLowerCase());
-  });
-
   return (
     <div className="h-screen flex flex-col p-6 overflow-hidden">
       <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
@@ -132,7 +177,7 @@ export default function RiskLogs() {
               />
             </div>
           )}
-          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
             <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} />刷新
           </Button>
         </div>
@@ -142,7 +187,7 @@ export default function RiskLogs() {
         {(["success", "failed", "retrying", "pending"] as const).map((key) => (
           <Card key={key} className="p-4">
             <div className="text-xs text-muted-foreground">{statusMap[key]}</div>
-            <div className="text-2xl font-semibold mt-1">{logs.filter((l) => l.status === key).length}</div>
+            <div className="text-2xl font-semibold mt-1">{statusStats[key] ?? 0}</div>
           </Card>
         ))}
       </div>
@@ -164,8 +209,8 @@ export default function RiskLogs() {
         </Select>
       </div>
 
-      <Card className="flex-1 overflow-hidden">
-        <ScrollArea className="h-full">
+      <Card className="flex-1 overflow-hidden flex flex-col min-h-0">
+        <ScrollArea className="flex-1 min-h-0">
           <Table>
             <TableHeader className="sticky top-0 bg-background">
               <TableRow>
@@ -179,9 +224,9 @@ export default function RiskLogs() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.length === 0 ? (
-                <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground py-8">暂无记录</TableCell></TableRow>
-              ) : filtered.map((log) => (
+              {logs.length === 0 ? (
+                <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground py-8">{loading ? "加载中…" : "暂无记录"}</TableCell></TableRow>
+              ) : logs.map((log) => (
                 <TableRow key={log.id}>
                   <TableCell className="font-mono text-xs">{log.intercept_no}</TableCell>
                   <TableCell>
@@ -227,6 +272,12 @@ export default function RiskLogs() {
             </TableBody>
           </Table>
         </ScrollArea>
+        <TableListPagination
+          page={listPageSafe}
+          total={listTotal}
+          loading={loading}
+          onPageChange={setListPage}
+        />
       </Card>
 
       <Dialog open={!!detail} onOpenChange={(open) => !open && setDetail(null)}>

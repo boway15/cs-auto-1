@@ -52,5 +52,9 @@ LOVABLE_API_KEY=
 # ERP_USERNAME=
 # ERP_PASSWORD=
 # ERP_CLIENT_ID=ERP
+
+# --- ERP 拦截客户通知（erp-notify-customer，勿提交 Git）---
+# 生成：openssl rand -base64 32
+# ERP_NOTIFY_API_KEY=
 # 测试联调用 pw 时：ERP_TOKEN_PASSWORD_FIELD=pw
 # ERP_TOKEN_PASSWORD_FIELD=password

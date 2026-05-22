@@ -1,4 +1,5 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import type { LucideIcon } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/lib/supabase";
 import { Button } from "@/components/ui/button";
@@ -11,7 +12,7 @@ import {
 import {
   Inbox,
   Mail,
-  Settings,
+  MessageSquare,
   Users,
   LogOut,
   Headphones,
@@ -22,22 +23,57 @@ import {
   PanelLeft,
   Link2,
   CircleHelp,
+  FileText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
 
-const navItems = [
-  { to: "/", label: "工作台", icon: Inbox, end: true },
-  { to: "/linked-orders", label: "邮件订单", icon: Link2 },
-  { to: "/send-logs", label: "发送日志", icon: Send },
-  { to: "/risk-logs", label: "拦截记录", icon: ShieldAlert },
-  { to: "/alerts", label: "运营告警", icon: BellRing },
-  { to: "/help", label: "帮助中心", icon: CircleHelp },
-  { to: "/mailboxes", label: "邮箱配置", icon: Mail, adminOnly: true },
-  // Shopify 入口暂时关闭，订单主链路走 ERP。
-  // { to: "/shops", label: "Shopify 店铺", icon: Store, adminOnly: true },
-  { to: "/templates", label: "回复模板", icon: Settings, adminOnly: true },
-  { to: "/users", label: "用户管理", icon: Users, adminOnly: true },
+type NavItem = {
+  to: string;
+  label: string;
+  icon: LucideIcon;
+  end?: boolean;
+  adminOnly?: boolean;
+};
+
+type NavGroup = {
+  title: string;
+  adminOnly?: boolean;
+  items: NavItem[];
+};
+
+const navGroups: NavGroup[] = [
+  {
+    title: "日常作业",
+    items: [
+      { to: "/", label: "工作台", icon: Inbox, end: true },
+      { to: "/linked-orders", label: "订单关联", icon: Link2 },
+    ],
+  },
+  {
+    title: "记录与监控",
+    items: [
+      { to: "/send-logs", label: "发送日志", icon: Send },
+      { to: "/risk-logs", label: "拦截记录", icon: ShieldAlert },
+      { to: "/alerts", label: "运营告警", icon: BellRing },
+    ],
+  },
+  {
+    title: "系统配置",
+    adminOnly: true,
+    items: [
+      { to: "/mailboxes", label: "邮箱配置", icon: Mail, adminOnly: true },
+      // Shopify 入口暂时关闭，订单主链路走 ERP。
+      // { to: "/shops", label: "Shopify 店铺", icon: Store, adminOnly: true },
+      { to: "/templates", label: "自动回邮模板", icon: MessageSquare, adminOnly: true },
+      { to: "/erp-notify-templates", label: "迅捷回邮模板", icon: FileText, adminOnly: true },
+      { to: "/users", label: "用户管理", icon: Users, adminOnly: true },
+    ],
+  },
+  {
+    title: "其它",
+    items: [{ to: "/help", label: "帮助中心", icon: CircleHelp }],
+  },
 ];
 
 export default function AppLayout() {
@@ -50,7 +86,47 @@ export default function AppLayout() {
     navigate("/auth", { replace: true });
   }
 
-  const filteredItems = navItems.filter((it) => !it.adminOnly || isAdmin);
+  const visibleGroups = navGroups
+    .filter((g) => !g.adminOnly || isAdmin)
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((it) => !it.adminOnly || isAdmin),
+    }))
+    .filter((g) => g.items.length > 0);
+
+  function renderNavItem(item: NavItem) {
+    const link = (
+      <NavLink
+        key={item.to}
+        to={item.to}
+        end={item.end}
+        className={({ isActive }) =>
+          cn(
+            "flex items-center gap-2 px-2.5 py-2 rounded text-sm transition-colors",
+            collapsed ? "justify-center px-2" : "",
+            isActive
+              ? "bg-sidebar-primary text-sidebar-primary-foreground"
+              : "hover:bg-sidebar-accent text-sidebar-foreground/80",
+          )
+        }
+      >
+        <item.icon className="w-4 h-4 shrink-0" />
+        {!collapsed && item.label}
+      </NavLink>
+    );
+
+    if (collapsed) {
+      return (
+        <Tooltip key={item.to} delayDuration={300}>
+          <TooltipTrigger asChild>{link}</TooltipTrigger>
+          <TooltipContent side="right" className="ml-1">
+            {item.label}
+          </TooltipContent>
+        </Tooltip>
+      );
+    }
+    return link;
+  }
 
   return (
     <div className="flex h-screen bg-background">
@@ -114,40 +190,27 @@ export default function AppLayout() {
         )}
 
         {/* Navigation */}
-        <nav className="flex-1 p-1.5 space-y-0.5 overflow-y-auto">
-          {filteredItems.map((item) => {
-            const link = (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end as any}
-                className={({ isActive }) =>
-                  cn(
-                    "flex items-center gap-2 px-2.5 py-2 rounded text-sm transition-colors",
-                    collapsed ? "justify-center px-2" : "",
-                    isActive
-                      ? "bg-sidebar-primary text-sidebar-primary-foreground"
-                      : "hover:bg-sidebar-accent text-sidebar-foreground/80",
-                  )
-                }
-              >
-                <item.icon className="w-4 h-4 shrink-0" />
-                {!collapsed && item.label}
-              </NavLink>
-            );
-
-            if (collapsed) {
-              return (
-                <Tooltip key={item.to} delayDuration={300}>
-                  <TooltipTrigger asChild>{link}</TooltipTrigger>
-                  <TooltipContent side="right" className="ml-1">
-                    {item.label}
-                  </TooltipContent>
-                </Tooltip>
-              );
-            }
-            return link;
-          })}
+        <nav className="flex-1 p-1.5 overflow-y-auto">
+          {visibleGroups.map((group, groupIndex) => (
+            <div
+              key={group.title}
+              className={cn(
+                groupIndex > 0 && "mt-1 pt-1 border-t border-sidebar-border/50",
+              )}
+            >
+              {!collapsed && (
+                <div
+                  className={cn(
+                    "text-[10px] text-sidebar-foreground/50 px-2.5 pb-0.5",
+                    groupIndex === 0 ? "pt-0" : "pt-2",
+                  )}
+                >
+                  {group.title}
+                </div>
+              )}
+              <div className="space-y-0.5">{group.items.map(renderNavItem)}</div>
+            </div>
+          ))}
         </nav>
 
         {/* User section */}

@@ -357,6 +357,48 @@ export type Database = {
         }
         Relationships: []
       }
+      erp_notify_templates: {
+        Row: {
+          body_template: string
+          created_at: string
+          id: string
+          is_active: boolean
+          name: string
+          sender_email: string | null
+          subject_template: string
+          template_code: string
+          updated_at: string
+          updated_by: string | null
+          variables: Json
+        }
+        Insert: {
+          body_template?: string
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          name: string
+          sender_email?: string | null
+          subject_template?: string
+          template_code: string
+          updated_at?: string
+          updated_by?: string | null
+          variables?: Json
+        }
+        Update: {
+          body_template?: string
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          name?: string
+          sender_email?: string | null
+          subject_template?: string
+          template_code?: string
+          updated_at?: string
+          updated_by?: string | null
+          variables?: Json
+        }
+        Relationships: []
+      }
       mailboxes: {
         Row: {
           auth_password: string
@@ -379,6 +421,8 @@ export type Database = {
           last_test_result: Json | null
           last_uid: number
           protocol: string
+          signature_enabled: boolean
+          signature_text: string | null
           smtp_host: string | null
           smtp_port: number | null
           updated_at: string
@@ -405,6 +449,8 @@ export type Database = {
           last_test_result?: Json | null
           last_uid?: number
           protocol?: string
+          signature_enabled?: boolean
+          signature_text?: string | null
           smtp_host?: string | null
           smtp_port?: number | null
           updated_at?: string
@@ -431,6 +477,8 @@ export type Database = {
           last_test_result?: Json | null
           last_uid?: number
           protocol?: string
+          signature_enabled?: boolean
+          signature_text?: string | null
           smtp_host?: string | null
           smtp_port?: number | null
           updated_at?: string

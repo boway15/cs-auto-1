@@ -1,0 +1,59 @@
+# Apifox 导入 cURL：项目 → 导入 → cURL（可多次导入，每次粘贴一条）
+# 使用前请将 YOUR_ERP_NOTIFY_API_KEY 替换为 supabase-selfhost/.env.functions 中的 ERP_NOTIFY_API_KEY
+# 将 your-test@example.com 替换为真实测试收件邮箱
+# 本地 baseUrl：http://localhost:8000
+
+# ---------- 1. Shopify 风控 - 发送通知 ----------
+curl --location --request POST 'http://localhost:8000/functions/v1/erp-notify-customer' \
+--header 'Authorization: Bearer YOUR_ERP_NOTIFY_API_KEY' \
+--header 'Content-Type: application/json' \
+--data-raw '{
+  "template_code": "risk_shopify",
+  "order_no": "SO-TEST-20260521-001",
+  "to_email": "your-test@example.com",
+  "idempotency_key": "risk_shopify-SO-TEST-20260521-001-evt-001"
+}'
+
+# ---------- 2. Payoneer 风控 - 发送通知 ----------
+curl --location --request POST 'http://localhost:8000/functions/v1/erp-notify-customer' \
+--header 'Authorization: Bearer YOUR_ERP_NOTIFY_API_KEY' \
+--header 'Content-Type: application/json' \
+--data-raw '{
+  "template_code": "risk_payoneer",
+  "order_no": "SO-TEST-20260521-002",
+  "to_email": "your-test@example.com",
+  "idempotency_key": "risk_payoneer-SO-TEST-20260521-002-evt-001"
+}'
+
+# ---------- 3. 购买数量≥4 - 发送通知 ----------
+curl --location --request POST 'http://localhost:8000/functions/v1/erp-notify-customer' \
+--header 'Authorization: Bearer YOUR_ERP_NOTIFY_API_KEY' \
+--header 'Content-Type: application/json' \
+--data-raw '{
+  "template_code": "risk_qty_ge_4",
+  "order_no": "SO-TEST-20260521-003",
+  "to_email": "your-test@example.com",
+  "idempotency_key": "risk_qty_ge_4-SO-TEST-20260521-003-evt-001"
+}'
+
+# ---------- 4. 鉴权失败（错误 Key，应 401）----------
+curl --location --request POST 'http://localhost:8000/functions/v1/erp-notify-customer' \
+--header 'Authorization: Bearer wrong-api-key' \
+--header 'Content-Type: application/json' \
+--data-raw '{
+  "template_code": "risk_shopify",
+  "order_no": "SO-TEST-401",
+  "to_email": "your-test@example.com",
+  "idempotency_key": "test-unauthorized-001"
+}'
+
+# ---------- 5. 幂等重试（与第 1 条相同 idempotency_key，第二次应 deduped:true）----------
+curl --location --request POST 'http://localhost:8000/functions/v1/erp-notify-customer' \
+--header 'Authorization: Bearer YOUR_ERP_NOTIFY_API_KEY' \
+--header 'Content-Type: application/json' \
+--data-raw '{
+  "template_code": "risk_shopify",
+  "order_no": "SO-TEST-20260521-001",
+  "to_email": "your-test@example.com",
+  "idempotency_key": "risk_shopify-SO-TEST-20260521-001-evt-001"
+}'

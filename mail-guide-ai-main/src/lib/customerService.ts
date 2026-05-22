@@ -62,17 +62,26 @@ export function associationStatusLabel(value: string | null | undefined): string
   return ASSOCIATION_LABEL_MAP[value] ?? value;
 }
 
-/** 存在 email_order_links 时一律视为已关联（库字段未回写时列表/筛选仍正确） */
+export type CompensationTaskHint = { status: string } | null | undefined;
+
+/** 存在 email_order_links 时一律视为已关联；补偿任务已失败时展示未找到（非补偿中） */
 export function effectiveAssociationStatus(
   email: {
     association_status?: string | null;
     email_order_links?: { id?: string }[] | null;
+    ai_entities?: Record<string, unknown> | null;
   } | null | undefined,
+  compensationTask?: CompensationTaskHint,
 ): string {
   if (!email) return "unlinked";
   const links = email.email_order_links;
   const n = Array.isArray(links) ? links.length : 0;
   if (n > 0) return "linked";
+
+  const taskStatus = compensationTask?.status;
+  if (taskStatus === "failed") return "not_found";
+  if (taskStatus === "pending") return "compensating";
+
   const s = String(email.association_status ?? "unlinked").trim();
   return s || "unlinked";
 }

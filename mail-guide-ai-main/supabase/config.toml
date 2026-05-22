@@ -29,3 +29,6 @@ verify_jwt = false
 
 [functions.retry-risk-intercept-compensation]
 verify_jwt = false
+
+[functions.erp-notify-customer]
+verify_jwt = false

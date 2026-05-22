@@ -26,6 +26,8 @@ import { EmailBody } from "@/components/EmailBody";
 import { RefreshCw, Eye } from "lucide-react";
 import { toast } from "sonner";
 import { Link } from "react-router-dom";
+import { TableListPagination } from "@/components/TableListPagination";
+import { ADMIN_LIST_PAGE_SIZE, clampListPage, listPageCount, listPageRange } from "@/lib/list-pagination";
 
 const FETCH_LIMIT = 500;
 const RISK_LOG_CHUNK = 100;
@@ -540,6 +542,7 @@ export default function LinkedOrders() {
   const [associationMode, setAssociationMode] = useState<AssociationMode>("all");
   const [interceptFilter, setInterceptFilter] = useState<InterceptFilter>("all");
   const [keyword, setKeyword] = useState("");
+  const [listPage, setListPage] = useState(0);
 
   const [detailRow, setDetailRow] = useState<MailOrderDisplayRow | null>(null);
   const [holdLogs, setHoldLogs] = useState<HoldLogRow[]>([]);
@@ -750,6 +753,24 @@ export default function LinkedOrders() {
     return [...linkedFiltered, ...unlinkedAsRows];
   }, [associationMode, linkedFiltered, unlinkedForDisplay]);
 
+  useEffect(() => {
+    setListPage(0);
+  }, [associationMode, interceptFilter, keyword]);
+
+  const listPageCountVal = listPageCount(displayRows.length, ADMIN_LIST_PAGE_SIZE);
+  const listPageSafe = clampListPage(listPage, listPageCountVal);
+
+  useEffect(() => {
+    if (listPage > 0 && listPage >= listPageCountVal) {
+      setListPage(Math.max(0, listPageCountVal - 1));
+    }
+  }, [listPage, listPageCountVal]);
+
+  const displayRowsPage = useMemo(() => {
+    const { from, to } = listPageRange(listPageSafe, ADMIN_LIST_PAGE_SIZE);
+    return displayRows.slice(from, to + 1);
+  }, [displayRows, listPageSafe]);
+
   const showAssocColumn = associationMode === "all";
   const tableColSpan = showAssocColumn ? 11 : 10;
 
@@ -806,7 +827,7 @@ export default function LinkedOrders() {
       <div className="border-b bg-card px-4 py-3 shrink-0">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h1 className="text-lg font-semibold">邮件订单</h1>
+            <h1 className="text-lg font-semibold">订单关联</h1>
             <p className="text-xs text-muted-foreground mt-0.5 max-w-3xl">
               已关联列表最多 {FETCH_LIMIT} 条；未关联邮件在排除已有 <span className="font-mono">email_order_links</span>{" "}
               后从最近邮件取最多 {FETCH_LIMIT} 条。列表展示<strong>解析单号</strong>（
@@ -875,7 +896,7 @@ export default function LinkedOrders() {
 
       <ScrollArea className="flex-1">
         <div className="p-4">
-          <Card className="overflow-hidden">
+          <Card className="overflow-hidden flex flex-col">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -905,7 +926,7 @@ export default function LinkedOrders() {
                     </TableCell>
                   </TableRow>
                 ) : (
-                  displayRows.map((row, idx) => {
+                  displayRowsPage.map((row, idx) => {
                     const key =
                       row.kind === "linked"
                         ? `l-${row.link_id}`
@@ -1014,6 +1035,12 @@ export default function LinkedOrders() {
                 )}
               </TableBody>
             </Table>
+            <TableListPagination
+              page={listPageSafe}
+              total={displayRows.length}
+              loading={loading}
+              onPageChange={setListPage}
+            />
           </Card>
         </div>
       </ScrollArea>

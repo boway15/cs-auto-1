@@ -1,0 +1,82 @@
+{
+  "info": {
+    "name": "ERP拦截客户通知",
+    "description": "导入 Apifox：项目设置 → 导入 → Postman。环境变量 baseUrl、erpNotifyApiKey、testToEmail。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8000" },
+    { "key": "erpNotifyApiKey", "value": "请填写.env.functions中的ERP_NOTIFY_API_KEY" },
+    { "key": "testToEmail", "value": "your-test@example.com" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{erpNotifyApiKey}}", "type": "string" }]
+  },
+  "item": [
+    {
+      "name": "发送通知 - Shopify风控",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"template_code\": \"risk_shopify\",\n  \"order_no\": \"SO-TEST-001\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"risk_shopify-SO-TEST-001-{{$timestamp}}\"\n}"
+        },
+        "url": "{{baseUrl}}/functions/v1/erp-notify-customer"
+      }
+    },
+    {
+      "name": "发送通知 - Payoneer风控",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"template_code\": \"risk_payoneer\",\n  \"order_no\": \"SO-TEST-002\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"risk_payoneer-SO-TEST-002-{{$timestamp}}\"\n}"
+        },
+        "url": "{{baseUrl}}/functions/v1/erp-notify-customer"
+      }
+    },
+    {
+      "name": "发送通知 - 数量≥4",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"template_code\": \"risk_qty_ge_4\",\n  \"order_no\": \"SO-TEST-003\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"risk_qty_ge_4-SO-TEST-003-{{$timestamp}}\"\n}"
+        },
+        "url": "{{baseUrl}}/functions/v1/erp-notify-customer"
+      }
+    },
+    {
+      "name": "鉴权失败测试（错误Key）",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [{ "key": "token", "value": "wrong-key", "type": "string" }]
+        },
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"template_code\": \"risk_shopify\",\n  \"order_no\": \"SO-TEST-001\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"test-401\"\n}"
+        },
+        "url": "{{baseUrl}}/functions/v1/erp-notify-customer"
+      }
+    },
+    {
+      "name": "幂等重试（固定idempotency_key，第二次应deduped）",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"template_code\": \"risk_shopify\",\n  \"order_no\": \"SO-TEST-IDEM\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"risk_shopify-SO-TEST-IDEM-fixed\"\n}"
+        },
+        "url": "{{baseUrl}}/functions/v1/erp-notify-customer"
+      }
+    }
+  ]
+}

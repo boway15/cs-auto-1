@@ -293,7 +293,7 @@ export default function TemplatesPage() {
   return (
     <div className="p-6 h-full overflow-auto">
       <div className="mb-4">
-        <h1 className="text-xl font-semibold">回复模板</h1>
+        <h1 className="text-xl font-semibold">自动回邮模板</h1>
         <p className="text-sm text-muted-foreground mt-1">
           系统固定两条自动回邮模板，不支持新建或删除。每条可单独配置首封窗口、主题/正文、适用意图及「自动回复」。
         </p>

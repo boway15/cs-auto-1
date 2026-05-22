@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { TableListPagination } from "@/components/TableListPagination";
+import { clampListPage, listPageCount, listPageRange } from "@/lib/list-pagination";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -55,8 +57,11 @@ const STATUS_CLS: Record<string, string> = {
 export default function Alerts() {
   const { isAdmin } = useAuth();
   const [rows, setRows] = useState<AlertRow[]>([]);
+  const [listTotal, setListTotal] = useState(0);
+  const [listPage, setListPage] = useState(0);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
+  const [searchDebounced, setSearchDebounced] = useState("");
   const [severity, setSeverity] = useState<string>("all");
   const [status, setStatus] = useState<string>("open");
 
@@ -150,24 +155,58 @@ export default function Alerts() {
     void loadOpsAlertSummary();
   }
 
-  async function load() {
-    setLoading(true);
-    const { data, error } = await supabase
-      .from("ops_alerts")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(500);
-    setLoading(false);
-    if (error) {
-      toast.error("加载告警失败：" + error.message);
-      return;
-    }
-    setRows((data ?? []) as AlertRow[]);
-  }
+  useEffect(() => {
+    const t = setTimeout(() => setSearchDebounced(search.trim()), 400);
+    return () => clearTimeout(t);
+  }, [search]);
 
   useEffect(() => {
-    load();
-  }, []);
+    setListPage(0);
+  }, [severity, status, searchDebounced]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      let query = supabase.from("ops_alerts").select("*", { count: "exact" });
+      if (severity !== "all") query = query.eq("severity", severity);
+      if (status !== "all") query = query.eq("status", status);
+      if (searchDebounced) {
+        const s = `%${searchDebounced}%`;
+        query = query.or(
+          `title.ilike.${s},message.ilike.${s},source.ilike.${s},idempotency_key.ilike.${s}`,
+        );
+      }
+      const { from, to } = listPageRange(listPage);
+      const { data, error, count } = await query
+        .order("created_at", { ascending: false })
+        .range(from, to);
+      if (error) throw error;
+      setRows((data ?? []) as AlertRow[]);
+      setListTotal(count ?? 0);
+    } catch (error) {
+      const message = typeof error === "object" && error && "message" in error
+        ? String((error as { message: string }).message)
+        : "请稍后重试";
+      toast.error("加载告警失败：" + message);
+      setRows([]);
+      setListTotal(0);
+    } finally {
+      setLoading(false);
+    }
+  }, [severity, status, searchDebounced, listPage]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const listPageCountVal = listPageCount(listTotal);
+  const listPageSafe = clampListPage(listPage, listPageCountVal);
+
+  useEffect(() => {
+    if (listPage > 0 && listPage >= listPageCountVal) {
+      setListPage(Math.max(0, listPageCountVal - 1));
+    }
+  }, [listPage, listPageCountVal]);
 
   useEffect(() => {
     void loadOpsAlertSummary();
@@ -186,23 +225,6 @@ export default function Alerts() {
     toast.success(targetStatus === "resolved" ? "已标记为已处理" : "已改回处理中");
     load();
   }
-
-  const filtered = useMemo(() => {
-    return rows.filter((r) => {
-      if (severity !== "all" && r.severity !== severity) return false;
-      if (status !== "all" && r.status !== status) return false;
-      if (search) {
-        const s = search.toLowerCase();
-        return (
-          r.title.toLowerCase().includes(s) ||
-          (r.message ?? "").toLowerCase().includes(s) ||
-          r.source.toLowerCase().includes(s) ||
-          (r.idempotency_key ?? "").toLowerCase().includes(s)
-        );
-      }
-      return true;
-    });
-  }, [rows, search, severity, status]);
 
   return (
     <div className="h-screen flex flex-col">
@@ -237,7 +259,7 @@ export default function Alerts() {
               告警通知配置
             </Button>
           )}
-          <Button size="sm" variant="outline" onClick={load} disabled={loading}>
+          <Button size="sm" variant="outline" onClick={() => void load()} disabled={loading}>
             <RefreshCw className={`w-3.5 h-3.5 mr-1 ${loading ? "animate-spin" : ""}`} />
             刷新
           </Button>
@@ -326,8 +348,8 @@ export default function Alerts() {
         </Select>
       </div>
 
-      <ScrollArea className="flex-1">
-        <Card className="m-3 p-0 overflow-hidden">
+      <ScrollArea className="flex-1 min-h-0">
+        <Card className="m-3 p-0 overflow-hidden flex flex-col">
           <Table>
             <TableHeader>
               <TableRow>
@@ -340,14 +362,14 @@ export default function Alerts() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.length === 0 && (
+              {rows.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={6} className="text-center text-sm text-muted-foreground py-10">
-                    暂无告警
+                    {loading ? "加载中…" : "暂无告警"}
                   </TableCell>
                 </TableRow>
               )}
-              {filtered.map((row) => (
+              {rows.map((row) => (
                 <TableRow key={row.id}>
                   <TableCell>
                     <Badge variant="outline" className={SEVERITY_CLS[row.severity] ?? ""}>
@@ -405,6 +427,13 @@ export default function Alerts() {
               ))}
             </TableBody>
           </Table>
+          <TableListPagination
+            page={listPageSafe}
+            total={listTotal}
+            loading={loading}
+            onPageChange={setListPage}
+            className="rounded-b-lg"
+          />
         </Card>
       </ScrollArea>
     </div>

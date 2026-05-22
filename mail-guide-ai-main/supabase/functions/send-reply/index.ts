@@ -1,6 +1,7 @@
 // SMTP 发件 Edge Function（Deno 原生实现，不依赖 nodemailer）
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { sendMail } from "../_shared/smtp.ts";
+import { appendMailboxSignature } from "../_shared/mail-signature.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -73,11 +74,13 @@ Deno.serve(async (req) => {
 
     let messageId = "";
     let sendError: string | null = null;
+    const bodyWithSignature = appendMailboxSignature(content, mb);
+
     try {
       messageId = await sendMail(mb, {
         to: email.from_email,
         subject: replySubject,
-        text: content,
+        text: bodyWithSignature,
         inReplyTo: email.message_id ?? undefined,
         references: email.message_id ?? undefined,
       });
@@ -93,7 +96,7 @@ Deno.serve(async (req) => {
       to_email: email.from_email,
       from_email: mb.email_address,
       subject: replySubject,
-      content,
+      content: bodyWithSignature,
       send_type: "manual",
       status: sendError ? "failed" : "sent",
       error_message: sendError,

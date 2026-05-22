@@ -8,6 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 import { Plus, Trash2, Mail, RefreshCw, PlugZap, AlertTriangle, CheckCircle2, Edit3 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -148,6 +149,8 @@ const EMPTY_FORM = {
   auth_password: "",
   smtp_host: "",
   smtp_port: 465,
+  signature_enabled: false,
+  signature_text: "",
 };
 
 export default function MailboxesPage() {
@@ -274,6 +277,8 @@ export default function MailboxesPage() {
       auth_password: "",
       smtp_host: mb.smtp_host ?? "",
       smtp_port: mb.smtp_port ?? 465,
+      signature_enabled: !!mb.signature_enabled,
+      signature_text: mb.signature_text ?? "",
     });
     setTestResult({ ok: true, message: "编辑现有配置，可直接保存；如修改服务器或授权码建议重新测试。" });
     setOpen(true);
@@ -372,6 +377,21 @@ export default function MailboxesPage() {
               <div><Label>SMTP 服务器（发件）</Label><Input value={form.smtp_host} onChange={(e) => setForm({ ...form, smtp_host: e.target.value })} placeholder="smtp.gmail.com" />{presetLabel() && <span className="text-[10px] text-muted-foreground mt-0.5 block">按照 {presetLabel()} 预设</span>}</div>
               <div><Label>SMTP 端口</Label><Input type="number" value={form.smtp_port} onChange={(e) => setForm({ ...form, smtp_port: +e.target.value })} /></div>
               <div className="col-span-2"><Label>授权码 / 应用专用密码</Label><Input type="password" value={form.auth_password} onChange={(e) => setForm({ ...form, auth_password: e.target.value })} placeholder={editingId ? "留空则保持原授权码；修改时请重新填写" : "非邮箱登录密码，需到邮箱后台生成应用专用密码"} /></div>
+              <div className="col-span-2 flex items-center gap-2 pt-1">
+                <Switch checked={form.signature_enabled} onCheckedChange={(v) => setForm({ ...form, signature_enabled: v })} />
+                <Label>发信时追加邮箱签名</Label>
+              </div>
+              {form.signature_enabled && (
+                <div className="col-span-2">
+                  <Label>签名内容（纯文本）</Label>
+                  <Textarea
+                    className="mt-1 min-h-[80px] text-sm"
+                    value={form.signature_text}
+                    onChange={(e) => setForm({ ...form, signature_text: e.target.value })}
+                    placeholder="例如：Best regards,&#10;Customer Support Team"
+                  />
+                </div>
+              )}
             </div>
 
             {testResult && (
@@ -409,6 +429,7 @@ export default function MailboxesPage() {
                 <div className="text-sm text-muted-foreground truncate">{mb.email_address} · {mb.protocol} · {mb.incoming_host}:{mb.incoming_port}</div>
                 <div className="text-xs text-muted-foreground mt-1">
                   {mb.last_synced_at ? `上次同步：${new Date(mb.last_synced_at).toLocaleString("zh-CN")}` : "尚未同步"}
+                  {mb.signature_enabled ? " · 已启用签名" : ""}
                 </div>
               </div>
               <Badge variant={mb.is_active ? "default" : "secondary"}>{mb.is_active ? "启用中" : "已停用"}</Badge>

@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { TableListPagination } from "@/components/TableListPagination";
+import { clampListPage, listPageCount, listPageRange } from "@/lib/list-pagination";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,35 +31,99 @@ type Log = {
   message_id: string | null;
   order_id: string | null;
   order_no?: string | null;
+  metadata?: Record<string, unknown> | null;
 };
 
 const sendTypeMap: Record<string, { label: string; cls: string }> = {
   manual: { label: "手工回复", cls: "bg-primary/15 text-primary border-primary/30" },
   ai_draft: { label: "AI 草稿", cls: "bg-accent text-accent-foreground border-border" },
   auto_template: { label: "自动模板", cls: "bg-warning/15 text-warning border-warning/30" },
+  erp_notify: { label: "ERP 拦截通知", cls: "bg-info/15 text-info border-info/30" },
 };
+
+function orderNoFromLog(log: Log): string | null {
+  if (log.order_no) return log.order_no;
+  const meta = log.metadata;
+  if (meta && typeof meta.order_no === "string") return meta.order_no;
+  return null;
+}
+
+function templateCodeFromLog(log: Log): string | null {
+  const meta = log.metadata;
+  if (meta && typeof meta.template_code === "string") return meta.template_code;
+  return null;
+}
 
 export default function SendLogs() {
   const [logs, setLogs] = useState<Log[]>([]);
+  const [listTotal, setListTotal] = useState(0);
+  const [listPage, setListPage] = useState(0);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
+  const [searchDebounced, setSearchDebounced] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "sent" | "failed">("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [fromFilter, setFromFilter] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [detail, setDetail] = useState<Log | null>(null);
+  const [fromOptions, setFromOptions] = useState<string[]>([]);
+  const [stats, setStats] = useState({ total: 0, sent: 0, failed: 0 });
 
-  async function load() {
+  useEffect(() => {
+    const t = setTimeout(() => setSearchDebounced(search.trim()), 400);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  useEffect(() => {
+    setListPage(0);
+  }, [statusFilter, typeFilter, fromFilter, dateFrom, dateTo, searchDebounced]);
+
+  const load = useCallback(async () => {
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from("email_send_logs")
-        .select("*")
+      const [sentRes, failedRes, totalRes, fromRes] = await Promise.all([
+        supabase.from("email_send_logs").select("*", { count: "exact", head: true }).eq("status", "sent"),
+        supabase.from("email_send_logs").select("*", { count: "exact", head: true }).eq("status", "failed"),
+        supabase.from("email_send_logs").select("*", { count: "exact", head: true }),
+        supabase
+          .from("email_send_logs")
+          .select("from_email")
+          .not("from_email", "is", null)
+          .order("created_at", { ascending: false })
+          .limit(300),
+      ]);
+      setStats({
+        total: totalRes.count ?? 0,
+        sent: sentRes.count ?? 0,
+        failed: failedRes.count ?? 0,
+      });
+      const fromSet = new Set<string>();
+      for (const row of fromRes.data ?? []) {
+        if (row.from_email) fromSet.add(row.from_email);
+      }
+      setFromOptions([...fromSet]);
+
+      let query = supabase.from("email_send_logs").select("*", { count: "exact" });
+      if (statusFilter !== "all") query = query.eq("status", statusFilter);
+      if (typeFilter !== "all") query = query.eq("send_type", typeFilter);
+      if (fromFilter) query = query.eq("from_email", fromFilter);
+      if (dateFrom) query = query.gte("created_at", new Date(dateFrom).toISOString());
+      if (dateTo) query = query.lte("created_at", new Date(`${dateTo}T23:59:59`).toISOString());
+      if (searchDebounced) {
+        const s = `%${searchDebounced}%`;
+        query = query.or(
+          `to_email.ilike.${s},from_email.ilike.${s},subject.ilike.${s},send_no.ilike.${s}`,
+        );
+      }
+
+      const { from, to } = listPageRange(listPage);
+      const { data, error, count } = await query
         .order("created_at", { ascending: false })
-        .limit(200);
+        .range(from, to);
 
       if (error) throw error;
+      setListTotal(count ?? 0);
 
       const orderIds = Array.from(new Set((data ?? []).map((log) => log.order_id).filter(Boolean)));
       let orderNoById = new Map<string, string>();
@@ -75,10 +141,31 @@ export default function SendLogs() {
         }
       }
 
-      setLogs((data ?? []).map((log) => ({
-        ...log,
-        order_no: log.order_id ? orderNoById.get(log.order_id) ?? null : null,
-      })));
+      const rows = (data ?? []).map((log) => {
+        const meta = (log.metadata ?? null) as Record<string, unknown> | null;
+        const fromMeta = meta && typeof meta.order_no === "string" ? meta.order_no : null;
+        return {
+          ...log,
+          metadata: meta,
+          order_no: fromMeta ?? (log.order_id ? orderNoById.get(log.order_id) ?? null : null),
+        };
+      });
+      const q = searchDebounced.toLowerCase();
+      setLogs(
+        q
+          ? rows.filter((l) => {
+              const tc = templateCodeFromLog(l)?.toLowerCase() ?? "";
+              return (
+                l.order_no?.toLowerCase().includes(q) ||
+                tc.includes(q) ||
+                l.to_email?.toLowerCase().includes(q) ||
+                l.from_email?.toLowerCase().includes(q) ||
+                l.subject?.toLowerCase().includes(q) ||
+                l.send_no?.toLowerCase().includes(q)
+              );
+            })
+          : rows,
+      );
     } catch (error) {
       const message = typeof error === "object" && error && "message" in error
         ? String(error.message)
@@ -86,39 +173,28 @@ export default function SendLogs() {
       console.error("Failed to load send logs", error);
       toast.error(`发送日志加载失败：${message}`);
       setLogs([]);
+      setListTotal(0);
     } finally {
       setLoading(false);
     }
-  }
+  }, [statusFilter, typeFilter, fromFilter, dateFrom, dateTo, searchDebounced, listPage]);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
-  const filtered = logs.filter((l) => {
-    if (statusFilter !== "all" && l.status !== statusFilter) return false;
-    if (typeFilter !== "all" && l.send_type !== typeFilter) return false;
-    if (fromFilter && l.from_email !== fromFilter) return false;
-    if (dateFrom && l.created_at < new Date(dateFrom).toISOString()) return false;
-    if (dateTo && l.created_at > new Date(`${dateTo}T23:59:59`).toISOString()) return false;
-    if (search) {
-      const s = search.toLowerCase();
-      return (
-        l.to_email?.toLowerCase().includes(s) ||
-        l.from_email?.toLowerCase().includes(s) ||
-        l.subject?.toLowerCase().includes(s) ||
-        l.order_no?.toLowerCase().includes(s)
-      );
+  const listPageCountVal = listPageCount(listTotal);
+  const listPageSafe = clampListPage(listPage, listPageCountVal);
+
+  useEffect(() => {
+    if (listPage > 0 && listPage >= listPageCountVal) {
+      setListPage(Math.max(0, listPageCountVal - 1));
     }
-    return true;
-  });
-
-  const total = logs.length;
-  const sentCount = logs.filter((l) => l.status === "sent").length;
-  const failedCount = logs.filter((l) => l.status === "failed").length;
-  const fromOptions = Array.from(new Set(logs.map((l) => l.from_email).filter(Boolean)));
+  }, [listPage, listPageCountVal]);
 
   function exportCsv() {
     const header = ["时间", "发送编号", "类型", "状态", "发件人", "收件人", "订单号", "主题", "SMTP响应", "错误"];
-    const rows = filtered.map((l) => [
+    const rows = logs.map((l) => [
       new Date(l.created_at).toLocaleString("zh-CN"),
       l.send_no ?? l.id,
       sendTypeMap[l.send_type]?.label ?? l.send_type,
@@ -151,7 +227,7 @@ export default function SendLogs() {
           <Button variant="outline" size="sm" onClick={exportCsv}>
             <Download className="w-4 h-4 mr-2" />导出 CSV
           </Button>
-          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
             <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} />刷新
           </Button>
         </div>
@@ -160,19 +236,19 @@ export default function SendLogs() {
       <div className="grid grid-cols-3 gap-3 mb-4">
         <Card className="p-4">
           <div className="text-xs text-muted-foreground">总发送</div>
-          <div className="text-2xl font-semibold mt-1">{total}</div>
+          <div className="text-2xl font-semibold mt-1">{stats.total}</div>
         </Card>
         <Card className="p-4">
           <div className="text-xs text-muted-foreground flex items-center gap-1">
             <CheckCircle2 className="w-3 h-3 text-success" /> 成功
           </div>
-          <div className="text-2xl font-semibold mt-1 text-success">{sentCount}</div>
+          <div className="text-2xl font-semibold mt-1 text-success">{stats.sent}</div>
         </Card>
         <Card className="p-4">
           <div className="text-xs text-muted-foreground flex items-center gap-1">
             <XCircle className="w-3 h-3 text-destructive" /> 失败
           </div>
-          <div className="text-2xl font-semibold mt-1 text-destructive">{failedCount}</div>
+          <div className="text-2xl font-semibold mt-1 text-destructive">{stats.failed}</div>
         </Card>
       </div>
 
@@ -209,15 +285,14 @@ export default function SendLogs() {
         <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="h-8 w-36 text-xs" />
       </div>
 
-      <Card className="flex-1 overflow-hidden">
-        <ScrollArea className="h-full">
-          <Table>
+      <Card className="flex-1 overflow-hidden flex flex-col min-h-0">
+        <ScrollArea className="flex-1 min-h-0">
+          <Table className="table-fixed w-full">
             <TableHeader className="sticky top-0 bg-background">
               <TableRow>
                 <TableHead className="w-32">时间</TableHead>
-                <TableHead className="w-24">类型</TableHead>
+                <TableHead className="w-36 min-w-[9rem]">类型</TableHead>
                 <TableHead className="w-20">状态</TableHead>
-                <TableHead className="w-32">订单</TableHead>
                 <TableHead>发件人</TableHead>
                 <TableHead>收件人</TableHead>
                 <TableHead>主题</TableHead>
@@ -225,17 +300,17 @@ export default function SendLogs() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.length === 0 ? (
-                <TableRow><TableCell colSpan={8} className="text-center text-muted-foreground py-8">暂无记录</TableCell></TableRow>
-              ) : filtered.map((l) => {
+              {logs.length === 0 ? (
+                <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground py-8">{loading ? "加载中…" : "暂无记录"}</TableCell></TableRow>
+              ) : logs.map((l) => {
                 const t = sendTypeMap[l.send_type] ?? { label: l.send_type, cls: "" };
                 return (
                   <TableRow key={l.id}>
                     <TableCell className="text-xs text-muted-foreground">
                       {formatDistanceToNow(new Date(l.created_at), { addSuffix: true, locale: zhCN })}
                     </TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className={`text-[10px] py-0 h-5 ${t.cls}`}>{t.label}</Badge>
+                    <TableCell className="whitespace-nowrap w-36 min-w-[9rem]">
+                      <Badge variant="outline" className={`text-[10px] py-0 h-5 whitespace-nowrap ${t.cls}`}>{t.label}</Badge>
                     </TableCell>
                     <TableCell>
                       {l.status === "sent" ? (
@@ -244,7 +319,6 @@ export default function SendLogs() {
                         <Badge variant="outline" className="text-[10px] py-0 h-5 bg-destructive/15 text-destructive border-destructive/30">失败</Badge>
                       )}
                     </TableCell>
-                    <TableCell className="text-xs font-mono">{l.order_no ?? "—"}</TableCell>
                     <TableCell className="text-sm truncate max-w-[200px]">{l.from_email || "—"}</TableCell>
                     <TableCell className="text-sm truncate max-w-[200px]">{l.to_email}</TableCell>
                     <TableCell className="text-sm truncate max-w-[300px]">{l.subject || "(无主题)"}</TableCell>
@@ -259,6 +333,12 @@ export default function SendLogs() {
             </TableBody>
           </Table>
         </ScrollArea>
+        <TableListPagination
+          page={listPageSafe}
+          total={listTotal}
+          loading={loading}
+          onPageChange={setListPage}
+        />
       </Card>
 
       <Dialog open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>
@@ -276,7 +356,10 @@ export default function SendLogs() {
                 <div className="col-span-2"><span className="text-muted-foreground">时间：</span>{new Date(detail.created_at).toLocaleString("zh-CN")}</div>
                 <div className="col-span-2"><span className="text-muted-foreground">Message-ID：</span><span className="font-mono text-xs">{detail.message_id || "—"}</span></div>
                 <div><span className="text-muted-foreground">发送编号：</span>{detail.send_no || "—"}</div>
-                <div><span className="text-muted-foreground">订单号：</span>{detail.order_no || "—"}</div>
+                <div><span className="text-muted-foreground">订单号：</span>{orderNoFromLog(detail) || "—"}</div>
+                {templateCodeFromLog(detail) && (
+                  <div><span className="text-muted-foreground">ERP 场景：</span>{templateCodeFromLog(detail)}</div>
+                )}
                 <div className="col-span-2"><span className="text-muted-foreground">SMTP响应：</span>{detail.smtp_response || "—"}</div>
               </div>
               <div>

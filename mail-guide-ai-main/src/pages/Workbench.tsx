@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 
 // 前端 RFC 2047 解码兜底：解决服务端同步时未解码的 =?utf-8?B?xxx?= 字符串
 function decodeRfc2047(s: string | null): string | null {
@@ -60,6 +60,14 @@ import {
   type BusinessIntent,
   type SlaBucket,
 } from "@/lib/customerService";
+import {
+  fetchWorkbenchEmailList,
+  WORKBENCH_LIST_DAYS_ALL,
+  WORKBENCH_LIST_DAYS_OPTIONS,
+  WORKBENCH_LIST_PAGE_SIZE,
+  workbenchListDaysLabel,
+  type WorkbenchListFilters,
+} from "@/lib/workbench-email-list";
 import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -119,7 +127,13 @@ export default function Workbench() {
   const navigate = useNavigate();
   const [emails, setEmails] = useState<Email[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
+  const [listDays, setListDays] = useState(30);
+  const [listPage, setListPage] = useState(0);
+  const [listTotal, setListTotal] = useState(0);
+  const [listLoading, setListLoading] = useState(false);
+  const [selectedEmailDetail, setSelectedEmailDetail] = useState<Email | null>(null);
   const [filter, setFilter] = useState<"all" | "pending" | "processing" | "replied">("all");
   const [intentFilter, setIntentFilter] = useState<string>("all");
   const [updatingStatus, setUpdatingStatus] = useState(false);
@@ -138,6 +152,8 @@ export default function Workbench() {
   const [conversationLoading, setConversationLoading] = useState(false);
   const [conversationCollapsed, setConversationCollapsed] = useState(true);
   const [timelineCollapsed, setTimelineCollapsed] = useState(true);
+  /** 更多查询（时间/意图/关联/分类/时效），默认收起；上行邮箱、中行状态、下行搜索+更多查询 */
+  const [listFiltersCollapsed, setListFiltersCollapsed] = useState(true);
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
   const [guidance, setGuidance] = useState("");
   const [generating, setGenerating] = useState(false);
@@ -184,7 +200,19 @@ export default function Workbench() {
   /** 私有桶 email-attachments：按 storage_path 生成的短期签名 URL（索引 → url） */
   const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
 
-  const selected = emails.find((e) => e.id === selectedId);
+  /** 订单补偿任务状态（用于 compensating ↔ not_found 展示） */
+  const [compensationByEmailId, setCompensationByEmailId] = useState<
+    Record<string, { status: string }>
+  >({});
+
+  const selectedListRow = emails.find((e) => e.id === selectedId);
+  const selected =
+    selectedEmailDetail?.id === selectedId ? selectedEmailDetail : selectedListRow;
+
+  function compensationHint(emailId: string | null | undefined) {
+    if (!emailId) return undefined;
+    return compensationByEmailId[emailId];
+  }
 
   function normalizeOrderNoForCompare(s: string | null | undefined) {
     return String(s ?? "").trim().toUpperCase();
@@ -200,21 +228,114 @@ export default function Workbench() {
     orders.length === 1 &&
     normalizeOrderNoForCompare(orders[0]?.order_no) === normalizeOrderNoForCompare(emailProvidedOrderNo);
 
-  const loadEmails = useCallback(async (): Promise<Email[]> => {
-    const { data } = await supabase
-      .from("emails")
-      .select("*, email_order_links ( id )")
-      .order("received_at", { ascending: false });
-    const list = (data ?? []) as Email[];
-    setEmails(list);
-    if (list.length > 0 && !selectedId) {
-      setSelectedId(list[0].id);
+  const loadCompensationHints = useCallback(async (list: Email[]) => {
+    const ids = list
+      .filter((e) => {
+        const linked = (e.email_order_links?.length ?? 0) > 0;
+        if (linked) return false;
+        const st = String(e.association_status ?? "").trim();
+        return st === "compensating" || st === "not_provided" || st === "not_found";
+      })
+      .map((e) => e.id);
+    if (ids.length === 0) {
+      setCompensationByEmailId({});
+      return;
     }
-    return list;
-  }, [selectedId]);
+    const { data: tasks } = await supabase
+      .from("order_compensation_tasks")
+      .select("email_id, status, updated_at")
+      .in("email_id", ids)
+      .order("updated_at", { ascending: false });
+    const map: Record<string, { status: string }> = {};
+    for (const row of tasks ?? []) {
+      if (!map[row.email_id]) map[row.email_id] = { status: row.status };
+    }
+    setCompensationByEmailId(map);
+  }, []);
+
+  const listFilters = useMemo((): WorkbenchListFilters => {
+    const mb =
+      mailboxFilter !== "all"
+        ? mailboxes.find((m) => m.id === mailboxFilter)
+        : undefined;
+    return {
+      listDays,
+      status: filter,
+      mailboxId: mailboxFilter,
+      mailboxToEmail: mb?.email_address ?? null,
+      category: categoryFilter,
+      association: associationFilter,
+      intent: intentFilter,
+      slaBucket: timeFilter,
+      search,
+    };
+  }, [
+    listDays,
+    filter,
+    mailboxFilter,
+    mailboxes,
+    categoryFilter,
+    associationFilter,
+    intentFilter,
+    timeFilter,
+    search,
+  ]);
+
+  const loadEmails = useCallback(
+    async (opts?: { keepSelection?: boolean }): Promise<Email[]> => {
+      setListLoading(true);
+      try {
+        const { rows, total } = await fetchWorkbenchEmailList(
+          supabase,
+          listFilters,
+          listPage,
+        );
+        const list = rows as Email[];
+        setEmails(list);
+        setListTotal(total);
+        await loadCompensationHints(list);
+        if (!opts?.keepSelection) {
+          if (list.length === 0) {
+            setSelectedId(null);
+            setSelectedEmailDetail(null);
+          } else if (!selectedId || !list.some((e) => e.id === selectedId)) {
+            setSelectedId(list[0].id);
+          }
+        }
+        return list;
+      } catch (error) {
+        const message =
+          typeof error === "object" && error && "message" in error
+            ? String((error as { message: string }).message)
+            : "请稍后重试";
+        console.error("Failed to load workbench email list", error);
+        toast.error(`邮件列表加载失败：${message}`);
+        setEmails([]);
+        setListTotal(0);
+        return [];
+      } finally {
+        setListLoading(false);
+      }
+    },
+    [listFilters, listPage, loadCompensationHints, selectedId],
+  );
+
+  const loadEmailsRef = useRef(loadEmails);
+  loadEmailsRef.current = loadEmails;
 
   const loadDetail = useCallback(async (email: Email) => {
     const emailId = email.id;
+
+    const { data: fullRow, error: fullErr } = await supabase
+      .from("emails")
+      .select("*")
+      .eq("id", emailId)
+      .maybeSingle();
+    if (fullErr) {
+      console.warn("[loadDetail full email]", fullErr.message);
+    } else if (fullRow) {
+      setSelectedEmailDetail(fullRow as Email);
+    }
 
     setConversationLoading(true);
     if (email.from_email && email.to_email) {
@@ -240,6 +361,41 @@ export default function Workbench() {
     setOrders(
       linkRows.map((l: any) => ({ ...l.orders, _link_id: l.id, _link_source: l.link_source }))
     );
+
+    const { data: compTask } = await supabase
+      .from("order_compensation_tasks")
+      .select("id, status")
+      .eq("email_id", emailId)
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (compTask?.status) {
+      setCompensationByEmailId((prev) => ({
+        ...prev,
+        [emailId]: { status: compTask.status },
+      }));
+    }
+
+    // 补偿已失败但 emails 仍为 compensating / not_provided 时回写为 not_found
+    if (
+      linkRows.length === 0 &&
+      compTask?.status === "failed" &&
+      ["compensating", "not_provided"].includes(String(email.association_status ?? "").trim())
+    ) {
+      const { error: repairFailedErr } = await supabase
+        .from("emails")
+        .update({ association_status: "not_found" } as any)
+        .eq("id", emailId);
+      if (!repairFailedErr) {
+        setEmails((prev) =>
+          prev.map((row) =>
+            row.id === emailId ? { ...row, association_status: "not_found" } : row,
+          ),
+        );
+      } else {
+        console.warn("[association_status repair failed task]", repairFailedErr.message);
+      }
+    }
 
     // 已有订单关联行但 emails.association_status 未回写时，对齐为 linked（历史数据 / 更新被拒等）
     if (linkRows.length > 0 && String(email.association_status ?? "").trim() !== "linked") {
@@ -300,21 +456,47 @@ export default function Workbench() {
   }, []);
 
   useEffect(() => {
-    loadEmails();
-    supabase.from("mailboxes").select("id, email_address, display_name").eq("is_active", true).then(({ data }) => {
-      setMailboxes(data ?? []);
-    });
+    const t = setTimeout(() => setSearch(searchInput.trim()), 400);
+    return () => clearTimeout(t);
+  }, [searchInput]);
 
-    // Realtime：监听 emails 表变更，自动刷新列表
+  const prevListFilters = useRef(listFilters);
+  useEffect(() => {
+    if (prevListFilters.current !== listFilters) {
+      prevListFilters.current = listFilters;
+      if (listPage !== 0) {
+        setListPage(0);
+        return;
+      }
+    }
+    void loadEmails();
+  }, [listFilters, listPage, loadEmails]);
+
+  useEffect(() => {
+    supabase
+      .from("mailboxes")
+      .select("id, email_address, display_name")
+      .eq("is_active", true)
+      .then(({ data }) => {
+        setMailboxes(data ?? []);
+      });
+  }, []);
+
+  useEffect(() => {
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
     const channel = supabase
       .channel("workbench-emails-realtime")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "emails" },
-        () => { loadEmails(); },
-      )
+      .on("postgres_changes", { event: "*", schema: "public", table: "emails" }, () => {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          void loadEmailsRef.current({ keepSelection: true });
+        }, 1500);
+      })
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
+    return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   useEffect(() => {
@@ -360,13 +542,16 @@ export default function Workbench() {
     };
   }, [selected?.id, selected?.attachments]);
 
+  // 仅随选中邮件 id 拉详情，避免 loadDetail 更新 selectedEmailDetail 后 selected 引用变化导致反复加载、历史邮件计数闪烁
   useEffect(() => {
-    if (selected) {
-      loadDetail(selected);
-      // 标记已读
-      supabase.from("emails").update({ is_read: true }).eq("id", selected.id).then();
-    }
-  }, [selected, loadDetail]);
+    if (!selectedListRow) return;
+    void loadDetail(selectedListRow);
+  }, [selectedListRow?.id, loadDetail]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    void supabase.from("emails").update({ is_read: true }).eq("id", selectedId);
+  }, [selectedId]);
 
   async function generateDraft() {
     if (!selectedId) return;
@@ -395,7 +580,7 @@ export default function Workbench() {
       toast.success("草稿已生成（本地）");
     }
     if (selected) loadDetail(selected);
-    loadEmails();
+    void loadEmails({ keepSelection: true });
   }
 
   /** 仅重跑邮件智能分析（Dify 工作流 / 本地兜底），不触发关联订单、风控、自动回复 */
@@ -424,7 +609,7 @@ export default function Workbench() {
     }
     const src = row.routed === "analyze_only" ? "已更新摘要与意图" : "分析已完成";
     toast.success(src);
-    const list = await loadEmails();
+    const list = await loadEmails({ keepSelection: true });
     const cur = list.find((e) => e.id === selectedId);
     if (cur) await loadDetail(cur);
   }
@@ -457,7 +642,7 @@ export default function Workbench() {
 
     toast.success(targetStatus === "replied" ? "已标记为已回复" : "已改回处理中");
     if (selected) loadDetail(selected);
-    loadEmails();
+    void loadEmails({ keepSelection: true });
   }
 
   async function updateBusinessIntent(value: BusinessIntent) {
@@ -485,7 +670,7 @@ export default function Workbench() {
     setSavingIntent(false);
     toast.success("意图已更新");
     if (selected) loadDetail(selected);
-    loadEmails();
+    void loadEmails({ keepSelection: true });
   }
 
   async function openLinkDialog() {
@@ -598,7 +783,7 @@ export default function Workbench() {
     else toast.success("已关联订单");
     setLinkDialogOpen(false);
     if (selected) loadDetail(selected);
-    loadEmails();
+    void loadEmails({ keepSelection: true });
   }
 
   async function acceptRecommendation(rec: any) {
@@ -633,7 +818,7 @@ export default function Workbench() {
     if (stErr) toast.error("关联已写入，但更新邮件状态失败：" + stErr.message);
     else toast.success("已关联推荐订单");
     if (selected) loadDetail(selected);
-    loadEmails();
+    void loadEmails({ keepSelection: true });
   }
 
   function chooseDraft(draft: Draft) {
@@ -672,7 +857,7 @@ export default function Workbench() {
       toast.success("已解除该条关联");
     }
     if (selected) loadDetail(selected);
-    loadEmails();
+    void loadEmails({ keepSelection: true });
   }
 
   function openHoldDialog(order: Order) {
@@ -827,7 +1012,7 @@ export default function Workbench() {
       } else if (failures.length === 0) {
         toast.success("同步完成，共新增 0 封邮件");
       }
-      await loadEmails();
+      await loadEmails({ keepSelection: true });
     } finally {
       setSyncing(false);
     }
@@ -850,7 +1035,7 @@ export default function Workbench() {
     }
     if (data?.warning) toast.warning(data.warning);
     else toast.success("邮件已发送");
-    loadEmails();
+    void loadEmails({ keepSelection: true });
     if (selected) loadDetail(selected);
   }
 
@@ -867,7 +1052,7 @@ export default function Workbench() {
       .eq("id", email.id);
     if (error) {
       toast.error("自动更新处理中失败：" + error.message);
-      loadEmails();
+      void loadEmails({ keepSelection: true });
       return;
     }
 
@@ -880,72 +1065,69 @@ export default function Workbench() {
       metadata: { before: "pending", after: "processing", trigger: "open_email" },
     } as any);
 
-    loadEmails();
+    void loadEmails({ keepSelection: true });
   }
 
-  const filteredEmails = emails.filter((e) => {
-    if (filter !== "all") {
-      if (filter === "replied") {
-        if (e.status !== "replied") return false;
-      } else if (e.status !== filter) {
-        return false;
-      }
-    }
-    if (mailboxFilter !== "all") {
-      const selMb = mailboxes.find((m) => m.id === mailboxFilter);
-      const selAddr = selMb ? normalizeEmailAddress(selMb.email_address) : "";
-      const matchesMailbox =
-        e.mailbox_id === mailboxFilter ||
-        (!!selAddr && normalizeEmailAddress(e.to_email) === selAddr);
-      if (!matchesMailbox) return false;
-    }
-    if (categoryFilter !== "all" && e.category !== categoryFilter) return false;
-    if (associationFilter !== "all" && effectiveAssociationStatus(e) !== associationFilter) return false;
-    if (intentFilter !== "all" && e.business_intent !== intentFilter) return false;
-    if (timeFilter !== "all") {
-      if (computeSlaBucket(e.received_at) !== timeFilter) return false;
-    }
-    if (search) {
-      const s = search.toLowerCase();
-      const mid = (e.message_id ?? "").trim().toLowerCase();
-      return (
-        e.from_email?.toLowerCase().includes(s) ||
-        e.subject?.toLowerCase().includes(s) ||
-        e.body_text?.toLowerCase().includes(s) ||
-        mid.includes(s) ||
-        JSON.stringify(e.ai_entities ?? {}).toLowerCase().includes(s)
-      );
-    }
-    return true;
-  });
+  /** 关联筛选含补偿任务语义时，在当前页做二次过滤 */
+  const listEmails = useMemo(() => {
+    if (associationFilter === "all") return emails;
+    return emails.filter(
+      (e) =>
+        effectiveAssociationStatus(e, compensationHint(e.id)) === associationFilter,
+    );
+  }, [emails, associationFilter, compensationByEmailId]);
 
   const categories = Array.from(new Set(emails.map((e) => e.category).filter(Boolean)));
+
+  const activeMoreFilterSummary = useMemo(() => {
+    const parts: string[] = [];
+    if (listDays !== 14) parts.push(workbenchListDaysLabel(listDays));
+    if (intentFilter !== "all") {
+      const o = BUSINESS_INTENT_OPTIONS.find((x) => x.value === intentFilter);
+      parts.push(o?.label ?? intentFilter);
+    }
+    if (associationFilter !== "all") {
+      const o = ASSOCIATION_FILTER_OPTIONS.find((x) => x.value === associationFilter);
+      parts.push(o?.label ?? associationFilter);
+    }
+    if (categoryFilter !== "all") parts.push(String(categoryFilter));
+    if (timeFilter !== "all") parts.push(SLA_BUCKET_LABEL[timeFilter] ?? timeFilter);
+    return parts;
+  }, [listDays, intentFilter, associationFilter, categoryFilter, timeFilter]);
+
+  const listPageCount = Math.max(1, Math.ceil(listTotal / WORKBENCH_LIST_PAGE_SIZE));
+  const listPageSafe = Math.min(listPage, listPageCount - 1);
+
+  useEffect(() => {
+    if (listPage > 0 && listPage >= listPageCount) {
+      setListPage(Math.max(0, listPageCount - 1));
+    }
+  }, [listPage, listPageCount]);
 
   return (
     <div className="h-screen flex">
       {/* 邮件列表 */}
       <div className="w-80 border-r flex flex-col bg-card">
         <div className="p-3 border-b space-y-2">
-          <div className="flex items-center justify-between">
-            <h2 className="font-semibold text-sm">邮件队列</h2>
-            <div className="flex gap-1">
-              <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={syncMailboxes} disabled={syncing}>
-                <RefreshCw className={`w-3 h-3 mr-1 ${syncing ? "animate-spin" : ""}`} />
-                {syncing ? "同步中" : "同步邮箱"}
-              </Button>
-              <Button size="icon" variant="ghost" className="h-7 w-7" onClick={loadEmails}>
-                <RefreshCw className="w-3.5 h-3.5" />
-              </Button>
+          <div className="flex items-center justify-between gap-1">
+            <div className="min-w-0">
+              <h2 className="font-semibold text-sm">邮件队列</h2>
+              <p className="text-[10px] text-muted-foreground truncate">
+                {listLoading
+                  ? "加载中…"
+                  : `${workbenchListDaysLabel(listDays)} · 共 ${listTotal} 封 · 第 ${listPageSafe + 1}/${listPageCount} 页`}
+              </p>
             </div>
-          </div>
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              placeholder="搜索发件人、主题、正文、Message-ID…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="pl-7 h-8 text-sm"
-            />
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 px-2 text-xs shrink-0"
+              onClick={syncMailboxes}
+              disabled={syncing}
+            >
+              <RefreshCw className={`w-3 h-3 mr-1 ${syncing ? "animate-spin" : ""}`} />
+              {syncing ? "同步中" : "同步邮箱"}
+            </Button>
           </div>
           <Select value={mailboxFilter} onValueChange={setMailboxFilter}>
             <SelectTrigger className="h-8 text-xs">
@@ -961,44 +1143,6 @@ export default function Workbench() {
               ))}
             </SelectContent>
           </Select>
-          <div className="grid grid-cols-2 gap-1">
-            <Select value={intentFilter} onValueChange={setIntentFilter}>
-              <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="意图" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部意图</SelectItem>
-                {BUSINESS_INTENT_OPTIONS.map((o) => (
-                  <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={associationFilter} onValueChange={setAssociationFilter}>
-              <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {ASSOCIATION_FILTER_OPTIONS.map((o) => (
-                  <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="grid grid-cols-2 gap-1">
-            <Select value={categoryFilter} onValueChange={setCategoryFilter}>
-              <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="分类" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部分类</SelectItem>
-                {categories.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
-              </SelectContent>
-            </Select>
-            <Select value={timeFilter} onValueChange={(v) => setTimeFilter(v as "all" | SlaBucket)}>
-              <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部时间</SelectItem>
-                <SelectItem value="within_24h">&lt;24h</SelectItem>
-                <SelectItem value="within_48h">24-48h</SelectItem>
-                <SelectItem value="within_72h">48-72h</SelectItem>
-                <SelectItem value="over_72h">72h+</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
           <div className="flex gap-1 flex-wrap">
             {(["all", "pending", "processing", "replied"] as const).map((f) => (
               <Button
@@ -1015,13 +1159,107 @@ export default function Workbench() {
               </Button>
             ))}
           </div>
+          <div className="flex items-center gap-1.5">
+            <div className="relative flex-1 min-w-0">
+              <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                placeholder="搜索发件人、主题、摘要、Message-ID…"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                className="pl-7 h-8 text-sm"
+              />
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 px-2 text-xs shrink-0 gap-0.5"
+              onClick={() => setListFiltersCollapsed(!listFiltersCollapsed)}
+            >
+              {listFiltersCollapsed ? "更多查询" : "收起"}
+              {listFiltersCollapsed ? (
+                <ChevronDown className="w-3 h-3 opacity-70" />
+              ) : (
+                <ChevronDown className="w-3 h-3 opacity-70 rotate-180" />
+              )}
+            </Button>
+          </div>
+          {listFiltersCollapsed && activeMoreFilterSummary.length > 0 && (
+            <p className="text-[10px] text-muted-foreground leading-snug truncate" title={activeMoreFilterSummary.join(" · ")}>
+              已选：{activeMoreFilterSummary.join(" · ")}
+            </p>
+          )}
+          {!listFiltersCollapsed && (
+            <>
+              <Select
+                value={String(listDays)}
+                onValueChange={(v) => setListDays(Number(v))}
+              >
+                <SelectTrigger className="h-8 text-xs">
+                  <SelectValue placeholder="时间范围" />
+                </SelectTrigger>
+                <SelectContent>
+                  {WORKBENCH_LIST_DAYS_OPTIONS.map((o) => (
+                    <SelectItem key={o.value} value={String(o.value)}>
+                      {o.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {listDays === WORKBENCH_LIST_DAYS_ALL && (
+                <p className="text-[10px] text-muted-foreground leading-snug">
+                  全部历史按收信时间倒序分页；超过 90 天的邮件请选此项或「近 1 年」，建议配合搜索缩小范围。
+                </p>
+              )}
+              <div className="grid grid-cols-2 gap-1">
+                <Select value={intentFilter} onValueChange={setIntentFilter}>
+                  <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="意图" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部意图</SelectItem>
+                    {BUSINESS_INTENT_OPTIONS.map((o) => (
+                      <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select value={associationFilter} onValueChange={setAssociationFilter}>
+                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {ASSOCIATION_FILTER_OPTIONS.map((o) => (
+                      <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid grid-cols-2 gap-1">
+                <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+                  <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="分类" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部分类</SelectItem>
+                    {categories.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                <Select value={timeFilter} onValueChange={(v) => setTimeFilter(v as "all" | SlaBucket)}>
+                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部时间</SelectItem>
+                    <SelectItem value="within_24h">&lt;24h</SelectItem>
+                    <SelectItem value="within_48h">24-48h</SelectItem>
+                    <SelectItem value="within_72h">48-72h</SelectItem>
+                    <SelectItem value="over_72h">72h+</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </>
+          )}
         </div>
 
-        <ScrollArea className="flex-1">
-          {filteredEmails.length === 0 ? (
-            <div className="p-8 text-center text-muted-foreground text-sm">暂无邮件</div>
+        <ScrollArea className="flex-1 min-h-0">
+          {listEmails.length === 0 ? (
+            <div className="p-8 text-center text-muted-foreground text-sm">
+              {listLoading ? "加载中…" : "当前条件下暂无邮件"}
+            </div>
           ) : (
-            filteredEmails.map((email) => {
+            listEmails.map((email) => {
               const statusBar =
                 email.status === "pending" ? "bg-warning"
                 : email.status === "processing" ? "bg-primary"
@@ -1044,8 +1282,8 @@ export default function Workbench() {
                     </div>
                   </div>
                   <div className="text-xs truncate text-foreground/80">{decodeRfc2047(email.subject) || "(无主题)"}</div>
-                  <div className="text-xs text-muted-foreground mt-0.5 max-h-5 overflow-hidden leading-5">
-                    <EmailBody content={email.body_text} className="text-xs truncate" />
+                  <div className="text-xs text-muted-foreground mt-0.5 max-h-5 overflow-hidden leading-5 line-clamp-1">
+                    {email.ai_summary?.trim() || "(无摘要)"}
                   </div>
                   <div className="flex items-start mt-1.5 gap-1 min-w-0">
                     <span className="text-[10px] text-muted-foreground shrink-0 pt-[1px]">
@@ -1076,14 +1314,20 @@ export default function Workbench() {
                         </Badge>
                       )}
                       <Badge
-                        variant={effectiveAssociationStatus(email) === "unlinked" ? "outline" : "secondary"}
+                        variant={
+                          effectiveAssociationStatus(email, compensationHint(email.id)) === "unlinked"
+                            ? "outline"
+                            : "secondary"
+                        }
                         className={`text-[10px] py-0.5 h-auto whitespace-normal break-words ${
-                          effectiveAssociationStatus(email) === "unlinked"
+                          effectiveAssociationStatus(email, compensationHint(email.id)) === "unlinked"
                             ? "text-muted-foreground border-muted-foreground/30"
                             : ""
                         }`}
                       >
-                        {associationStatusLabel(effectiveAssociationStatus(email))}
+                        {associationStatusLabel(
+                          effectiveAssociationStatus(email, compensationHint(email.id)),
+                        )}
                       </Badge>
                     </div>
                   </div>
@@ -1092,6 +1336,33 @@ export default function Workbench() {
             })
           )}
         </ScrollArea>
+        {listTotal > WORKBENCH_LIST_PAGE_SIZE && (
+          <div className="p-2 border-t shrink-0 flex items-center justify-between gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs flex-1"
+              disabled={listPageSafe <= 0 || listLoading}
+              onClick={() => setListPage(listPageSafe - 1)}
+            >
+              上一页
+            </Button>
+            <span className="text-[10px] text-muted-foreground shrink-0">
+              {listPageSafe + 1} / {listPageCount}
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs flex-1"
+              disabled={listPageSafe >= listPageCount - 1 || listLoading}
+              onClick={() => setListPage(listPageSafe + 1)}
+            >
+              下一页
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* 邮件详情 */}
@@ -1166,7 +1437,12 @@ export default function Workbench() {
                     <div className="text-muted-foreground">关联状态</div>
                     <div className="mt-1">
                       {associationStatusLabel(
-                        orders.length > 0 ? "linked" : effectiveAssociationStatus(selected),
+                        orders.length > 0
+                          ? "linked"
+                          : effectiveAssociationStatus(
+                              selected,
+                              compensationHint(selected?.id),
+                            ),
                       )}
                     </div>
                   </Card>
@@ -1335,7 +1611,7 @@ export default function Workbench() {
                     <ChevronDown className="w-4 h-4 text-muted-foreground" />
                   )}
                   <MailIcon className="w-4 h-4" /> 同发件人与收件人历史邮件（最近 10 封）
-                  {!conversationLoading && conversationEmails.length > 0 && (
+                  {conversationEmails.length > 0 && (
                     <span className="text-xs text-muted-foreground font-normal">
                       （{conversationEmails.length} 封）
                     </span>
@@ -1479,7 +1755,7 @@ export default function Workbench() {
                         type="button"
                         size="sm"
                         variant="outline"
-                        className="h-8 shrink-0 border-warning/40 text-warning-foreground hover:bg-warning/10"
+                        className="h-8 shrink-0"
                         onClick={() => openHoldEmailProvidedHoldDialog(emailProvidedOrderNo)}
                       >
                         <PauseCircle className="w-3.5 h-3.5 mr-1" />
@@ -1488,13 +1764,17 @@ export default function Workbench() {
                     </div>
                   </Card>
                 )}
-                {orders.length === 0 && effectiveAssociationStatus(selected) === "not_provided" && (
+                {orders.length === 0 &&
+                  effectiveAssociationStatus(selected, compensationHint(selected?.id)) ===
+                    "not_provided" && (
                   <Card className="p-2 mb-3 bg-warning/10 border-warning/30 text-xs text-warning">
                     客户未提供订单号且未关联任何订单：本系统不再展示推荐订单；请客户补充单号或人工关联订单后，可由系统或您手动发起拦截。
                   </Card>
                 )}
                 {recommendations.length > 0 &&
-                  (orders.length > 0 || effectiveAssociationStatus(selected) !== "not_provided") && (
+                  (orders.length > 0 ||
+                    effectiveAssociationStatus(selected, compensationHint(selected?.id)) !==
+                      "not_provided") && (
                   <div className="mb-3 space-y-2">
                     <div className="text-xs text-muted-foreground">系统推荐订单</div>
                     {recommendations.map((rec) => {

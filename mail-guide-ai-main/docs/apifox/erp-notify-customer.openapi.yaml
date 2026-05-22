@@ -1,0 +1,278 @@
+openapi: 3.0.3
+info:
+  title: 客服系统 - ERP 拦截客户通知
+  description: |
+    ERP 在订单拦截后调用本接口，由客服系统按场景模板向客户发送通知邮件。
+
+    **本地 Docker 默认地址**：`http://localhost:8000`
+
+    **鉴权**：Header `Authorization: Bearer {ERP_NOTIFY_API_KEY}`，密钥见 `supabase-selfhost/.env.functions`。
+
+    **Apifox 环境变量建议**：
+    - `baseUrl` = `http://localhost:8000`
+    - `erpNotifyApiKey` = 与 `.env.functions` 中 `ERP_NOTIFY_API_KEY` 一致
+    - `testToEmail` = 你的测试收件邮箱
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8000
+    description: 本地自建 Supabase Kong
+  - url: https://your-production-api.example.com
+    description: 生产环境（请替换为实际 Kong/API 地址）
+
+tags:
+  - name: ERP通知
+    description: ERP 订单拦截客户邮件通知
+
+paths:
+  /functions/v1/erp-notify-customer:
+    post:
+      tags:
+        - ERP通知
+      summary: 发送拦截通知邮件
+      description: |
+        按 `template_code` 选择模板，将 `order_no` 填入主题/正文后 SMTP 发信。
+        相同 `idempotency_key` 且已成功发送时返回 `deduped: true`，不重复发信。
+      operationId: erpNotifyCustomer
+      security:
+        - ErpNotifyBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ErpNotifyRequest'
+            examples:
+              risk_shopify:
+                summary: Shopify 风控
+                value:
+                  template_code: risk_shopify
+                  order_no: SO-TEST-20260521-001
+                  to_email: customer@example.com
+                  idempotency_key: risk_shopify-SO-TEST-20260521-001-evt-001
+              risk_payoneer:
+                summary: Payoneer 风控
+                value:
+                  template_code: risk_payoneer
+                  order_no: SO-TEST-20260521-002
+                  to_email: customer@example.com
+                  idempotency_key: risk_payoneer-SO-TEST-20260521-002-evt-001
+              risk_qty_ge_4:
+                summary: 购买数量≥4
+                value:
+                  template_code: risk_qty_ge_4
+                  order_no: SO-TEST-20260521-003
+                  to_email: customer@example.com
+                  idempotency_key: risk_qty_ge_4-SO-TEST-20260521-003-evt-001
+      responses:
+        '200':
+          description: 发信成功或幂等命中（已成功发过）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErpNotifySuccess'
+              examples:
+                sent:
+                  summary: 首次发送成功
+                  value:
+                    success: true
+                    deduped: false
+                    send_log_id: 550e8400-e29b-41d4-a716-446655440000
+                    send_no: SND-20260521-A1B2C3D4
+                    template_code: risk_shopify
+                    order_no: SO-TEST-20260521-001
+                    from_email: notify@yourbrand.com
+                    to_email: customer@example.com
+                    subject: Regarding your order SO-TEST-20260521-001
+                    message_id: <uuid@yourbrand.com>
+                deduped:
+                  summary: 幂等重复（不重复发信）
+                  value:
+                    success: true
+                    deduped: true
+                    send_log_id: 550e8400-e29b-41d4-a716-446655440000
+                    send_no: SND-20260521-A1B2C3D4
+                    template_code: risk_shopify
+                    order_no: SO-TEST-20260521-001
+                    from_email: notify@yourbrand.com
+                    to_email: customer@example.com
+                    subject: Regarding your order SO-TEST-20260521-001
+                    message_id: <uuid@yourbrand.com>
+        '400':
+          description: 参数错误或 template_code 无效
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErpNotifyError'
+              examples:
+                invalid_request:
+                  value:
+                    success: false
+                    error:
+                      code: INVALID_REQUEST
+                      message: 缺少必填字段
+                invalid_template:
+                  value:
+                    success: false
+                    error:
+                      code: INVALID_TEMPLATE
+                      message: template_code 无效
+        '401':
+          description: 鉴权失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErpNotifyError'
+              example:
+                success: false
+                error:
+                  code: UNAUTHORIZED
+                  message: 鉴权失败
+        '404':
+          description: 模板已停用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErpNotifyError'
+              example:
+                success: false
+                error:
+                  code: TEMPLATE_DISABLED
+                  message: 模板已停用
+        '422':
+          description: 发件邮箱未配置或 SMTP 不可用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErpNotifyError'
+              examples:
+                sender_not_configured:
+                  value:
+                    success: false
+                    error:
+                      code: SENDER_NOT_CONFIGURED
+                      message: 该场景未配置发件邮箱
+                smtp_missing:
+                  value:
+                    success: false
+                    error:
+                      code: MAILBOX_SMTP_MISSING
+                      message: 发件邮箱未配置 SMTP
+        '500':
+          description: SMTP 发信失败（可能含 send_log_id）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErpNotifySmtpFailed'
+              example:
+                success: false
+                send_log_id: 550e8400-e29b-41d4-a716-446655440000
+                error:
+                  code: SMTP_SEND_FAILED
+                  message: SMTP connection timeout
+
+components:
+  securitySchemes:
+    ErpNotifyBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: API Key
+      description: |
+        填写 `ERP_NOTIFY_API_KEY` 的值（不含 "Bearer " 前缀，Apifox 会自动加）。
+        本地见 `supabase-selfhost/.env.functions`。
+
+  schemas:
+    ErpNotifyRequest:
+      type: object
+      required:
+        - template_code
+        - order_no
+        - to_email
+        - idempotency_key
+      properties:
+        template_code:
+          type: string
+          enum:
+            - risk_shopify
+            - risk_payoneer
+            - risk_qty_ge_4
+          description: |
+            通知场景：
+            - risk_shopify：Shopify 风控订单
+            - risk_payoneer：Payoneer 风控订单
+            - risk_qty_ge_4：单订单购买数量≥4
+        order_no:
+          type: string
+          description: 订单号，用于替换模板中的 {{order_no}}
+          example: SO20240315001
+        to_email:
+          type: string
+          format: email
+          description: 客户收件邮箱（由 ERP 传入，客服系统不查单）
+          example: customer@example.com
+        idempotency_key:
+          type: string
+          maxLength: 128
+          description: 幂等键，建议 `{template_code}-{order_no}-{事件ID}`
+          example: risk_shopify-SO20240315001-evt-001
+
+    ErpNotifySuccess:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        deduped:
+          type: boolean
+          description: true 表示此前已成功发送，本次未重复发信
+        send_log_id:
+          type: string
+          format: uuid
+        send_no:
+          type: string
+          nullable: true
+        template_code:
+          type: string
+        order_no:
+          type: string
+        from_email:
+          type: string
+        to_email:
+          type: string
+        subject:
+          type: string
+        message_id:
+          type: string
+          nullable: true
+
+    ErpNotifyError:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+    ErpNotifySmtpFailed:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        send_log_id:
+          type: string
+          format: uuid
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: SMTP_SEND_FAILED
+            message:
+              type: string

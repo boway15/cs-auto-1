@@ -1,5 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { sendMail } from "../_shared/smtp.ts";
+import { appendMailboxSignature } from "../_shared/mail-signature.ts";
 import { createAlertAndNotify } from "../_shared/ops-notify.ts";
 import { notifyAutoInterceptFirstFailure } from "../_shared/automation-intercept-alerts.ts";
 import { notifyAutoAssociationFirstFailure } from "../_shared/automation-association-alerts.ts";
@@ -442,7 +443,8 @@ async function sendAutoReplyBySlot(
   if (!mailbox?.smtp_host || !mailbox?.smtp_port) return false;
 
   const subject = renderTemplate(template.subject_template || `Re: ${email.subject ?? ""}`, email, analysis);
-  const content = renderTemplate(template.body_template, email, analysis);
+  let content = renderTemplate(template.body_template, email, analysis);
+  content = appendMailboxSignature(content, mailbox);
   let messageId = "";
   let sendError: string | null = null;
   try {

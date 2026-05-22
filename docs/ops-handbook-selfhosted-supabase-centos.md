@@ -325,15 +325,31 @@ ORDER BY jobname;
 
 ## 五、日常发版（栈已在跑）
 
-先执行 **§2.0** `git pull`，再按变更类型选做：
+后端发版优先使用固定清单与统一脚本，详见 [`backend-release-automation.md`](./backend-release-automation.md)。
+
+研发每次只维护：
+
+```text
+mail-guide-ai-main/deploy/backend-release.env
+```
+
+线上 Jenkins / 运维固定执行：
+
+```bash
+bash /data/temp/mail-guide-ai-main/scripts/linux/selfhosted/apply-backend-release.sh \
+  /data/temp/mail-guide-ai-main \
+  /data/service/supabase-selfhost \
+  /data/temp/mail-guide-ai-main/deploy/backend-release.env
+```
+
+该脚本会自动完成：按清单执行本次新增 SQL、按需执行 `apply-vault-and-cron.sh`、备份并同步 Edge Functions、重建 `functions` 容器。发布 Functions 时保留 `hello`、`main`，其它业务函数目录按整目录替换。
 
 | 变更 | 操作 |
 |------|------|
-| 仅有新 SQL 迁移 | 重复 **§4.1**，再执行 **§4.2** |
-| 仅有 Functions 代码 | **§4.4** 前两行（sync + 重建 `functions`） |
+| 后端 Functions / 新 SQL / cron 变更 | 更新 `deploy/backend-release.env`，执行 `apply-backend-release.sh` |
 | 仅改 `.env.functions` | `cd supabase-selfhost` → `docker compose up -d --force-recreate --no-deps functions` |
 | 仅改前端 `VITE_*` | **§3.2** 重新 `build` + `up -d` |
-| 研发未说明类型 | 按顺序：**§4.1 → §4.2 → §4.4 → §3.2**（无对应变更可跳过） |
+| 研发未说明类型 | 先要求补齐 `deploy/backend-release.env`，再发布 |
 
 ---
 
