@@ -46,7 +46,20 @@ import { supabase } from "@/lib/supabase";
 import { fetchAccessibleMailboxes } from "@/lib/accessible-mailboxes";
 import { invokeGetOrderByEmail } from "@/lib/invoke-get-order-by-email";
 import { formatFunctionsInvokeError, formatInvokeBodyField } from "@/lib/format-functions-invoke-error";
+import { runPhasedMailboxSync } from "@/lib/sync-mailbox-phased";
+import {
+  BODY_REPAIR_COOLDOWN_MS,
+  deriveBodyRepairUiStatusFromTask,
+  fetchBodyRepairTaskStatus,
+  formatBodyRepairTaskHint,
+  invokeProcessEmailAfterBodyRepair,
+  invokeRepairEmailBody,
+  isEmailBodyEmpty,
+  normalizeEmailBodyForDisplay,
+  type BodyRepairUiStatus,
+} from "@/lib/email-body";
 import { StatusBadge } from "@/components/StatusBadge";
+import { TableListPagination } from "@/components/TableListPagination";
 import { EmailBody } from "@/components/EmailBody";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -155,11 +168,20 @@ export default function Workbench() {
   const [mailboxes, setMailboxes] = useState<{ id: string; email_address: string; display_name: string | null }[]>([]);
 
   const [orders, setOrders] = useState<Order[]>([]);
+  const linkedOrderIds = useMemo(() => new Set(orders.map((o) => o.id)), [orders]);
   const [recommendations, setRecommendations] = useState<any[]>([]);
   const [timeline, setTimeline] = useState<any[]>([]);
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [conversationEmails, setConversationEmails] = useState<Email[]>([]);
   const [conversationLoading, setConversationLoading] = useState(false);
+  const [bodyRepairingId, setBodyRepairingId] = useState<string | null>(null);
+  const [bodyRepairUiStatus, setBodyRepairUiStatus] = useState<BodyRepairUiStatus>("idle");
+  const [refreshingEmailDetail, setRefreshingEmailDetail] = useState(false);
+  const bodyRepairInFlightRef = useRef<string | null>(null);
+  const bodyRepairCooldownUntilRef = useRef<Map<string, number>>(new Map());
+  const repairEmailBodyIfNeededRef = useRef<(emailId: string, force?: boolean) => void>(() => {});
+  const missingAnalysisInFlightRef = useRef<string | null>(null);
+  const [bodyRepairTaskHint, setBodyRepairTaskHint] = useState<string | null>(null);
   const [conversationCollapsed, setConversationCollapsed] = useState(true);
   const [timelineCollapsed, setTimelineCollapsed] = useState(true);
   /** 更多查询（时间/意图/关联/分类/时效），默认收起；上行邮箱、中行状态、下行搜索+更多查询 */
@@ -333,7 +355,26 @@ export default function Workbench() {
   const loadEmailsRef = useRef(loadEmails);
   loadEmailsRef.current = loadEmails;
 
-  const loadDetail = useCallback(async (email: Email) => {
+  const triggerMissingAnalysisIfNeeded = useCallback(async (emailId: string, emailRow: Email) => {
+    if (missingAnalysisInFlightRef.current === emailId) return;
+    if (isEmailBodyEmpty(emailRow) || emailRow.ai_analyzed_at) return;
+    missingAnalysisInFlightRef.current = emailId;
+    try {
+      const r = await invokeProcessEmailAfterBodyRepair(emailId);
+      if (!r.ok) {
+        console.warn("[triggerMissingAnalysis]", r.error);
+      }
+    } finally {
+      if (missingAnalysisInFlightRef.current === emailId) {
+        missingAnalysisInFlightRef.current = null;
+      }
+    }
+  }, []);
+
+  const loadDetail = useCallback(async (
+    email: Email,
+    options?: { skipBodyRepair?: boolean; skipAnalysisCompensation?: boolean },
+  ) => {
     const emailId = email.id;
 
     const { data: fullRow, error: fullErr } = await supabase
@@ -345,6 +386,15 @@ export default function Workbench() {
       console.warn("[loadDetail full email]", fullErr.message);
     } else if (fullRow) {
       setSelectedEmailDetail(fullRow as Email);
+      setEmails((prev) =>
+        prev.map((row) => (row.id === emailId ? { ...row, ...(fullRow as Email) } : row)),
+      );
+      if (!options?.skipBodyRepair && isEmailBodyEmpty(fullRow as Email)) {
+        setBodyRepairUiStatus("idle");
+        void repairEmailBodyIfNeededRef.current(emailId);
+      } else if (!options?.skipAnalysisCompensation && !isEmailBodyEmpty(fullRow as Email) && !fullRow.ai_analyzed_at) {
+        void triggerMissingAnalysisIfNeeded(emailId, fullRow as Email);
+      }
     }
 
     setConversationLoading(true);
@@ -463,7 +513,193 @@ export default function Workbench() {
       setSelectedDraftId(null);
     }
     setGuidance("");
-  }, []);
+  }, [triggerMissingAnalysisIfNeeded]);
+
+  /** 局部刷新当前邮件：正文、AI、订单、时间线、列表行；不重置列表筛选与选中项 */
+  const refreshSelectedEmail = useCallback(
+    async (opts?: { silent?: boolean; showToast?: boolean }) => {
+      if (!selectedId) return false;
+      const base =
+        selectedEmailDetail?.id === selectedId
+          ? selectedEmailDetail
+          : emails.find((e) => e.id === selectedId);
+      if (!base) return false;
+      if (!opts?.silent) setRefreshingEmailDetail(true);
+      try {
+        await loadDetail(base as Email, { skipBodyRepair: true });
+        if (opts?.showToast) {
+          toast.message("已刷新本邮件", {
+            description: "正文、AI 分析、订单关联与时间线已更新。",
+          });
+        }
+        return true;
+      } catch (e) {
+        console.warn("[refreshSelectedEmail]", e);
+        return false;
+      } finally {
+        if (!opts?.silent) setRefreshingEmailDetail(false);
+      }
+    },
+    [selectedId, selectedEmailDetail, emails, loadDetail],
+  );
+
+  const repairEmailBodyIfNeeded = useCallback(async (emailId: string, force = false) => {
+    if (bodyRepairInFlightRef.current === emailId) return;
+    const cooldownUntil = bodyRepairCooldownUntilRef.current.get(emailId) ?? 0;
+    if (!force && Date.now() < cooldownUntil) return;
+
+    bodyRepairInFlightRef.current = emailId;
+    setBodyRepairingId(emailId);
+    setBodyRepairUiStatus("quick");
+    try {
+      const r = await invokeRepairEmailBody(emailId);
+      if (r.ok && r.repaired) {
+        setBodyRepairUiStatus("done");
+        bodyRepairCooldownUntilRef.current.set(emailId, Date.now() + BODY_REPAIR_COOLDOWN_MS);
+        const base =
+          selectedEmailDetail?.id === emailId
+            ? selectedEmailDetail
+            : emails.find((e) => e.id === emailId);
+        if (base) {
+          await loadDetail(base as Email, { skipBodyRepair: true });
+        }
+        return;
+      }
+      if (r.ok && "queued" in r && r.queued) {
+        setBodyRepairUiStatus("queued");
+        bodyRepairCooldownUntilRef.current.set(emailId, Date.now() + BODY_REPAIR_COOLDOWN_MS);
+        const task = await fetchBodyRepairTaskStatus(emailId);
+        setBodyRepairTaskHint(formatBodyRepairTaskHint(task));
+        toast.message("正文补拉已加入后台队列", {
+          description: formatBodyRepairTaskHint(task) ?? "后台约每 3 分钟处理；本页约每 10 秒自动局部刷新。",
+        });
+        return;
+      }
+      if (r.ok && r.skipped) {
+        const { data: row } = await supabase
+          .from("emails")
+          .select("ai_analyzed_at, body_text, body_html")
+          .eq("id", emailId)
+          .maybeSingle();
+        if (row && !isEmailBodyEmpty(row as Email) && !row.ai_analyzed_at) {
+          setBodyRepairUiStatus("done");
+          const base =
+            selectedEmailDetail?.id === emailId
+              ? selectedEmailDetail
+              : emails.find((e) => e.id === emailId);
+          if (base) await loadDetail(base as Email, { skipBodyRepair: true });
+        } else {
+          setBodyRepairUiStatus("idle");
+        }
+        return;
+      }
+      if (!r.ok) {
+        const task = await fetchBodyRepairTaskStatus(emailId);
+        const ui = r.terminal ? "failed_terminal" : deriveBodyRepairUiStatusFromTask(task);
+        setBodyRepairUiStatus(ui === "idle" ? "failed" : ui);
+        setBodyRepairTaskHint(formatBodyRepairTaskHint(task) ?? r.errorMessage);
+        bodyRepairCooldownUntilRef.current.set(emailId, Date.now() + BODY_REPAIR_COOLDOWN_MS);
+        if (r.terminal) {
+          toast.message("无法补拉正文", { description: r.errorMessage });
+        } else {
+          toast.message("正文补拉失败", { description: r.errorMessage });
+        }
+      }
+    } finally {
+      if (bodyRepairInFlightRef.current === emailId) {
+        bodyRepairInFlightRef.current = null;
+      }
+      setBodyRepairingId((cur) => (cur === emailId ? null : cur));
+    }
+  }, [selectedEmailDetail, emails, loadDetail]);
+
+  useEffect(() => {
+    repairEmailBodyIfNeededRef.current = (id, force) => {
+      void repairEmailBodyIfNeeded(id, force);
+    };
+  }, [repairEmailBodyIfNeeded]);
+
+  useEffect(() => {
+    if (bodyRepairUiStatus !== "queued" || !selectedId) return;
+    let cancelled = false;
+
+    const poll = async () => {
+      const task = await fetchBodyRepairTaskStatus(selectedId);
+      if (cancelled) return;
+      setBodyRepairTaskHint(formatBodyRepairTaskHint(task));
+      const ui = deriveBodyRepairUiStatusFromTask(task);
+      if (task?.status === "failed") {
+        setBodyRepairUiStatus("failed_terminal");
+        toast.message("无法补拉正文", {
+          description: task.last_error ?? "邮箱中可能已找不到该邮件",
+        });
+        return;
+      }
+      if (ui === "queued" || ui === "not_found_retrying") {
+        setBodyRepairUiStatus(ui);
+        return;
+      }
+      if (task?.status !== "resolved" && task?.status !== "skipped") return;
+
+      await refreshSelectedEmail({ silent: true });
+      const { data: row } = await supabase
+        .from("emails")
+        .select("ai_analyzed_at, body_text, body_html")
+        .eq("id", selectedId)
+        .maybeSingle();
+      if (cancelled) return;
+
+      const hasBody = row ? !isEmailBodyEmpty(row as Email) : false;
+      const analyzed = Boolean(row?.ai_analyzed_at);
+      if (!hasBody) {
+        setBodyRepairUiStatus("failed");
+        return;
+      }
+      if (analyzed || task.post_processed_at) {
+        setBodyRepairUiStatus("done");
+        toast.message("本邮件已更新", {
+          description: "正文与 AI/订单信息已自动刷新。",
+        });
+      }
+    };
+
+    void poll();
+    const timer = window.setInterval(() => void poll(), 10_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [bodyRepairUiStatus, selectedId, refreshSelectedEmail]);
+
+  useEffect(() => {
+    if (bodyRepairUiStatus !== "done" || !selectedId) return;
+    const base = selectedEmailDetail?.id === selectedId ? selectedEmailDetail : null;
+    if (!base || isEmailBodyEmpty(base) || base.ai_analyzed_at) return;
+
+    let cancelled = false;
+    let attempts = 0;
+    const poll = async () => {
+      attempts += 1;
+      await refreshSelectedEmail({ silent: true });
+      const { data: row } = await supabase
+        .from("emails")
+        .select("ai_analyzed_at")
+        .eq("id", selectedId)
+        .maybeSingle();
+      if (cancelled) return;
+      if (row?.ai_analyzed_at) {
+        toast.message("AI 分析已完成", { description: "摘要与订单信息已自动刷新。" });
+      } else if (attempts >= 18) {
+        toast.message("分析仍在进行", { description: "可点击「刷新本邮件」查看最新结果。" });
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 10_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [bodyRepairUiStatus, selectedId, selectedEmailDetail?.ai_analyzed_at, refreshSelectedEmail]);
 
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput.trim()), 400);
@@ -692,6 +928,44 @@ export default function Workbench() {
     setLinkDialogOpen(true);
   }
 
+  async function markEmailLinked(emailId: string): Promise<string | null> {
+    const { error: stErr } = await supabase
+      .from("emails")
+      .update({
+        association_status: "linked",
+        processing_status: "associated",
+      } as any)
+      .eq("id", emailId);
+    return stErr?.message ?? null;
+  }
+
+  /** 幂等写入邮件-订单关联；已存在时返回 exists（不报错） */
+  async function ensureEmailOrderLink(
+    emailId: string,
+    orderId: string,
+    payload: Record<string, unknown>,
+  ): Promise<"created" | "exists" | "error"> {
+    const { data: existing } = await supabase
+      .from("email_order_links")
+      .select("id")
+      .eq("email_id", emailId)
+      .eq("order_id", orderId)
+      .maybeSingle();
+    if (existing) return "exists";
+
+    const { error } = await supabase.from("email_order_links").insert({
+      email_id: emailId,
+      order_id: orderId,
+      ...payload,
+    } as any);
+    if (error) {
+      if (error.code === "23505") return "exists";
+      toast.error(error.message);
+      return "error";
+    }
+    return "created";
+  }
+
   async function pullOrderFromErp() {
     setErpPulling(true);
     try {
@@ -717,10 +991,25 @@ export default function Workbench() {
         });
         return;
       }
-      toast.success(r.source === "erp_oms" ? "已从 OMS 拉取并写入本地" : "已在本地找到该订单");
+      const linkedViaApi = Boolean(selectedId && r.orderId);
+      toast.success(
+        linkedViaApi
+          ? r.source === "erp_oms"
+            ? "已从 OMS 拉取并已关联到当前邮件"
+            : "已在本地找到该订单并已关联到当前邮件"
+          : r.source === "erp_oms"
+            ? "已从 OMS 拉取并写入本地"
+            : "已在本地找到该订单",
+      );
       if (r.orderId) {
         const { data: orderRow } = await supabase.from("orders").select("*").eq("id", r.orderId).maybeSingle();
         if (orderRow) setAllOrders([orderRow as Order]);
+      }
+      if (linkedViaApi && selected) {
+        const stMsg = await markEmailLinked(selected.id);
+        if (stMsg) toast.error("订单已关联，但更新邮件状态失败：" + stMsg);
+        await loadDetail(selected);
+        void loadEmails({ keepSelection: true });
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "拉取失败");
@@ -774,24 +1063,11 @@ export default function Workbench() {
 
   async function linkOrder(orderId: string) {
     if (!selectedId) return;
-    const { error } = await supabase.from("email_order_links").insert({
-      email_id: selectedId,
-      order_id: orderId,
-      link_source: "manual",
-    });
-    if (error) {
-      toast.error(error.message);
-      return;
-    }
-    const { error: stErr } = await supabase
-      .from("emails")
-      .update({
-        association_status: "linked",
-        processing_status: "associated",
-      } as any)
-      .eq("id", selectedId);
-    if (stErr) toast.error("关联已写入，但更新邮件状态失败：" + stErr.message);
-    else toast.success("已关联订单");
+    const linkResult = await ensureEmailOrderLink(selectedId, orderId, { link_source: "manual" });
+    if (linkResult === "error") return;
+    const stMsg = await markEmailLinked(selectedId);
+    if (stMsg) toast.error("关联已写入，但更新邮件状态失败：" + stMsg);
+    else toast.success(linkResult === "exists" ? "该订单已关联到此邮件" : "已关联订单");
     setLinkDialogOpen(false);
     if (selected) loadDetail(selected);
     void loadEmails({ keepSelection: true });
@@ -800,17 +1076,12 @@ export default function Workbench() {
   async function acceptRecommendation(rec: any) {
     if (!selectedId) return;
     const order = rec.orders;
-    const { error } = await supabase.from("email_order_links").insert({
-      email_id: selectedId,
-      order_id: order.id,
+    const linkResult = await ensureEmailOrderLink(selectedId, order.id, {
       link_source: "recommended",
       confidence: rec.score,
       metadata: { recommendation_id: rec.id, reason: rec.reason },
-    } as any);
-    if (error) {
-      toast.error(error.message);
-      return;
-    }
+    });
+    if (linkResult === "error") return;
     await supabase.from("email_order_recommendations").update({ status: "accepted" }).eq("id", rec.id);
     await supabase.from("email_processing_events").insert({
       email_id: selectedId,
@@ -819,15 +1090,9 @@ export default function Workbench() {
       title: `接受推荐订单 ${order.order_no}`,
       metadata: { recommendation_id: rec.id, order_id: order.id },
     } as any);
-    const { error: stErr } = await supabase
-      .from("emails")
-      .update({
-        association_status: "linked",
-        processing_status: "associated",
-      } as any)
-      .eq("id", selectedId);
-    if (stErr) toast.error("关联已写入，但更新邮件状态失败：" + stErr.message);
-    else toast.success("已关联推荐订单");
+    const stMsg = await markEmailLinked(selectedId);
+    if (stMsg) toast.error("关联已写入，但更新邮件状态失败：" + stMsg);
+    else toast.success(linkResult === "exists" ? "该推荐订单已关联" : "已关联推荐订单");
     if (selected) loadDetail(selected);
     void loadEmails({ keepSelection: true });
   }
@@ -960,12 +1225,6 @@ export default function Workbench() {
 
   async function syncMailboxes() {
     setSyncing(true);
-    const MAX_ROUNDS = 50;
-    const MAX_BATCHES = 10;
-    const ROUND_DELAY_MS = 1500;
-    const BATCH_DELAY_MS = 20000;
-    const WORKER_CANCEL_RETRY_DELAY_MS = 8000;
-    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     try {
       const rows = await fetchAccessibleMailboxes();
       if (rows.length === 0) {
@@ -974,85 +1233,54 @@ export default function Workbench() {
       }
 
       let grandTotalInserted = 0;
-      let grandRemaining = 0;
+      let grandHistoryRemaining = 0;
+      let grandEmptyBodyRemaining = 0;
+      let grandRepaired = 0;
       const failures: string[] = [];
 
       for (const mb of rows) {
         const label = mb.email_address ?? mb.id;
-        let totalRounds = 0;
-        let lastRemaining = 0;
-        let workerCancelRetries = 0;
-        let failed = false;
-        for (let batch = 1; batch <= MAX_BATCHES; batch++) {
-          let rounds = 0;
-          while (rounds < MAX_ROUNDS) {
-            rounds++;
-            totalRounds++;
-            const { data, error } = await supabase.functions.invoke("sync-mailbox", {
-              body: { mailbox_id: mb.id, force_bulk: true },
-            });
-            if (error) {
-              const detail = await formatFunctionsInvokeError(error);
-              if (
-                workerCancelRetries < 2 &&
-                /WorkerRequestCancelled|request has been cancelled/i.test(detail)
-              ) {
-                workerCancelRetries++;
-                rounds--;
-                totalRounds--;
-                toast.message(`[${label}] 同步运行时被回收，等待后自动重试 ${workerCancelRetries}/2`);
-                await wait(WORKER_CANCEL_RETRY_DELAY_MS);
-                continue;
-              }
-              failures.push(`${label}：${detail}`);
-              failed = true;
-              break;
-            }
-            if (data?.error) {
-              failures.push(`${label}：${data.error}`);
-              failed = true;
-              break;
-            }
-            const r = data?.results?.[0];
-            if (r?.error) {
-              failures.push(`${label}：${r.error}`);
-              failed = true;
-              break;
-            }
-            if (!r) {
-              failures.push(`${label}：未获取到同步结果`);
-              failed = true;
-              break;
-            }
-            const ins = r.inserted ?? 0;
-            lastRemaining = r.remaining ?? 0;
-            grandTotalInserted += ins;
-            toast.message(`[${label}] 第 ${batch} 批 / 总第 ${totalRounds} 轮：新增 ${ins} 封，剩余 ${lastRemaining} 封`);
-            if (!lastRemaining) break;
-            await wait(rounds % 10 === 0 ? WORKER_CANCEL_RETRY_DELAY_MS : ROUND_DELAY_MS);
-          }
-          if (failed || !lastRemaining) break;
-          if (batch < MAX_BATCHES) {
-            toast.message(`[${label}] 第 ${batch} 批完成，剩余 ${lastRemaining} 封，${Math.round(BATCH_DELAY_MS / 1000)} 秒后自动继续`);
-            await wait(BATCH_DELAY_MS);
-          }
+        const outcome = await runPhasedMailboxSync({
+          mailboxId: mb.id,
+          onProgress: (p) => {
+            const phaseLabel =
+              p.phase === "incremental" ? "增量" : p.phase === "historical" ? "历史" : "补正文";
+            const extra =
+              p.phase === "repair_body"
+                ? `已补 ${p.repaired ?? 0} 封，仍剩空正文约 ${p.emptyBodyRemaining ?? p.remaining} 封`
+                : `新增 ${p.inserted} 封，剩余 ${p.remaining} 封`;
+            toast.message(`[${label}] ${phaseLabel} 第 ${p.batch} 批 / 第 ${p.round} 轮：${extra}`);
+          },
+        });
+        if (outcome.failed) {
+          failures.push(`${label}：${outcome.errorMessage ?? "同步失败"}`);
+          continue;
         }
-        if (lastRemaining > 0) grandRemaining += lastRemaining;
+        grandTotalInserted += outcome.totalInserted;
+        grandHistoryRemaining += outcome.historyRemaining;
+        grandEmptyBodyRemaining += outcome.emptyBodyRemaining;
+        grandRepaired += outcome.totalRepaired;
       }
 
       if (failures.length > 0) {
         toast.error(failures.slice(0, 3).join("；") + (failures.length > 3 ? `…等 ${failures.length} 条` : ""));
       }
-      if (grandTotalInserted > 0) {
-        let message = `同步完成，共新增 ${grandTotalInserted} 封邮件`;
-        if (grandRemaining > 0) {
-          message = `本次自动续批新增 ${grandTotalInserted} 封，仍剩约 ${grandRemaining} 封，可再次点击继续`;
-        } else if (failures.length > 0) {
-          message = `同步结束，共新增 ${grandTotalInserted} 封邮件（部分邮箱失败见上方提示）`;
+      if (grandTotalInserted > 0 || grandRepaired > 0) {
+        let message = `同步完成：新增 ${grandTotalInserted} 封`;
+        if (grandRepaired > 0) message += `，补正文 ${grandRepaired} 封`;
+        if (grandHistoryRemaining > 0 || grandEmptyBodyRemaining > 0) {
+          const parts: string[] = [];
+          if (grandHistoryRemaining > 0) parts.push(`历史约 ${grandHistoryRemaining} 封`);
+          if (grandEmptyBodyRemaining > 0) parts.push(`空正文约 ${grandEmptyBodyRemaining} 封`);
+          message = `${message}；仍剩 ${parts.join("、")}，可再次点击继续`;
+        } else if (failures.length === 0) {
+          message += "（历史与空正文已处理完本轮）";
         }
         toast.success(message);
-      } else if (grandRemaining > 0 && failures.length === 0) {
-        toast.message(`本次未新增邮件，仍剩约 ${grandRemaining} 封历史邮件，可再次点击继续`);
+      } else if ((grandHistoryRemaining > 0 || grandEmptyBodyRemaining > 0) && failures.length === 0) {
+        toast.message(
+          `本次未新增邮件；仍剩历史约 ${grandHistoryRemaining} 封、空正文约 ${grandEmptyBodyRemaining} 封，可再次点击继续`,
+        );
       } else if (failures.length === 0) {
         toast.success("同步完成，共新增 0 封邮件");
       }
@@ -1392,33 +1620,15 @@ export default function Workbench() {
             })
           )}
         </ScrollArea>
-        {listTotal > WORKBENCH_LIST_PAGE_SIZE && (
-          <div className="p-2 border-t shrink-0 flex items-center justify-between gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-8 text-xs flex-1"
-              disabled={listPageSafe <= 0 || listLoading}
-              onClick={() => setListPage(listPageSafe - 1)}
-            >
-              上一页
-            </Button>
-            <span className="text-[10px] text-muted-foreground shrink-0">
-              {listPageSafe + 1} / {listPageCount}
-            </span>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-8 text-xs flex-1"
-              disabled={listPageSafe >= listPageCount - 1 || listLoading}
-              onClick={() => setListPage(listPageSafe + 1)}
-            >
-              下一页
-            </Button>
-          </div>
-        )}
+        <TableListPagination
+          page={listPage}
+          total={listTotal}
+          pageSize={WORKBENCH_LIST_PAGE_SIZE}
+          loading={listLoading}
+          onPageChange={setListPage}
+          showTotal={false}
+          className="px-2"
+        />
       </div>
 
       {/* 邮件详情 */}
@@ -1513,18 +1723,32 @@ export default function Workbench() {
                   </Card>
                 </div>
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="secondary"
-                    className="h-8 text-xs"
-                    disabled={!selectedId || reanalyzing}
-                    title="仅重跑 Dify/本地分析并更新摘要与意图；不会自动关联订单、风控或发信"
-                    onClick={reanalyzeEmail}
-                  >
-                    <RefreshCw className={reanalyzing ? "w-3.5 h-3.5 mr-1.5 animate-spin" : "w-3.5 h-3.5 mr-1.5"} />
-                    {reanalyzing ? "分析中…" : "再次分析"}
-                  </Button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      className="h-8 text-xs"
+                      disabled={!selectedId || reanalyzing}
+                      title="仅重跑 Dify/本地分析并更新摘要与意图；不会自动关联订单、风控或发信"
+                      onClick={reanalyzeEmail}
+                    >
+                      <RefreshCw className={reanalyzing ? "w-3.5 h-3.5 mr-1.5 animate-spin" : "w-3.5 h-3.5 mr-1.5"} />
+                      {reanalyzing ? "分析中…" : "再次分析"}
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 text-xs"
+                      disabled={!selectedId || refreshingEmailDetail}
+                      title="仅刷新当前邮件的正文、AI 摘要、订单关联与时间线，不刷新整页与邮件列表"
+                      onClick={() => void refreshSelectedEmail({ showToast: true })}
+                    >
+                      <RefreshCw className={refreshingEmailDetail ? "w-3.5 h-3.5 mr-1.5 animate-spin" : "w-3.5 h-3.5 mr-1.5"} />
+                      {refreshingEmailDetail ? "刷新中…" : "刷新本邮件"}
+                    </Button>
+                  </div>
                   <div className="flex flex-wrap items-center justify-end gap-2">
                     {(selected.status === "pending" || selected.status === "processing") && (
                       <Button
@@ -1580,15 +1804,77 @@ export default function Workbench() {
 
               {/* 正文 */}
               <div>
-                <h3 className="font-medium text-sm mb-2">邮件正文</h3>
+                <h3 className="font-medium text-sm mb-2 flex items-center gap-2 flex-wrap">
+                  <span>邮件正文</span>
+                  {bodyRepairingId === selected.id && (
+                    <span className="text-[10px] font-normal text-muted-foreground inline-flex items-center gap-1">
+                      <RefreshCw className="w-3 h-3 animate-spin" />
+                      正在快速补拉正文…
+                    </span>
+                  )}
+                  {(bodyRepairUiStatus === "queued" || bodyRepairUiStatus === "not_found_retrying") &&
+                    bodyRepairingId !== selected.id && (
+                    <span className="text-[10px] font-normal text-muted-foreground">
+                      {bodyRepairTaskHint ??
+                        (bodyRepairUiStatus === "not_found_retrying"
+                          ? "后台正在重新定位原邮件，请稍候"
+                          : "已加入后台队列，约每 3 分钟处理")}
+                    </span>
+                  )}
+                  {bodyRepairUiStatus === "failed_terminal" && isEmailBodyEmpty(selected) && (
+                    <span className="text-[10px] font-normal text-destructive max-w-md">
+                      {bodyRepairTaskHint ?? "邮箱中找不到该邮件，无法补拉正文"}
+                    </span>
+                  )}
+                  {(refreshingEmailDetail || bodyRepairUiStatus === "done") && bodyRepairingId !== selected.id && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="link"
+                      className="text-[10px] h-auto p-0"
+                      disabled={refreshingEmailDetail}
+                      onClick={() => void refreshSelectedEmail({ showToast: true })}
+                    >
+                      刷新本邮件
+                    </Button>
+                  )}
+                  {bodyRepairUiStatus === "failed" && isEmailBodyEmpty(selected) && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="link"
+                      className="text-[10px] h-auto p-0"
+                      onClick={() => void repairEmailBodyIfNeeded(selected.id, true)}
+                    >
+                      重新补拉正文
+                    </Button>
+                  )}
+                </h3>
                 <Card className="p-4 bg-muted/30 overflow-hidden">
-                  <EmailBody
-                    content={
-                      selected.body_html?.trim()
-                        ? selected.body_html
-                        : selected.body_text
-                    }
-                  />
+                  {isEmailBodyEmpty(selected) && bodyRepairingId !== selected.id &&
+                    bodyRepairUiStatus !== "queued" && bodyRepairUiStatus !== "not_found_retrying" &&
+                    bodyRepairUiStatus !== "failed_terminal" ? (
+                    <p className="text-xs text-muted-foreground">
+                      暂无正文。打开邮件时会自动尝试快速补拉；也可在邮箱设置中执行「同步邮箱」批量补拉。
+                    </p>
+                  ) : isEmailBodyEmpty(selected) &&
+                    (bodyRepairUiStatus === "queued" || bodyRepairUiStatus === "not_found_retrying") ? (
+                    <p className="text-xs text-muted-foreground">
+                      正文较大或邮箱响应较慢，后台正在补拉；完成后将自动更新本邮件，无需刷新整页。
+                    </p>
+                  ) : (
+                    <EmailBody
+                      content={
+                        (() => {
+                          const n = normalizeEmailBodyForDisplay(
+                            selected.body_text,
+                            selected.body_html,
+                          );
+                          return n.html ?? n.text;
+                        })()
+                      }
+                    />
+                  )}
                 </Card>
               </div>
 
@@ -1779,17 +2065,27 @@ export default function Workbench() {
                                 </div>
                               );
                             }
-                            return filtered.map((o) => (
-                              <div key={o.id} className="flex items-center justify-between p-2 hover:bg-accent rounded">
-                                <div className="text-sm">
-                                  <div className="font-medium">{o.order_no}</div>
-                                  <div className="text-xs text-muted-foreground">
-                                    {o.customer_name} · {o.product_summary}
+                            return filtered.map((o) => {
+                              const alreadyLinked = linkedOrderIds.has(o.id);
+                              return (
+                                <div key={o.id} className="flex items-center justify-between p-2 hover:bg-accent rounded">
+                                  <div className="text-sm">
+                                    <div className="font-medium">{o.order_no}</div>
+                                    <div className="text-xs text-muted-foreground">
+                                      {o.customer_name} · {o.product_summary}
+                                    </div>
                                   </div>
+                                  <Button
+                                    size="sm"
+                                    variant={alreadyLinked ? "secondary" : "default"}
+                                    disabled={alreadyLinked}
+                                    onClick={() => linkOrder(o.id)}
+                                  >
+                                    {alreadyLinked ? "已关联" : "关联"}
+                                  </Button>
                                 </div>
-                                <Button size="sm" onClick={() => linkOrder(o.id)}>关联</Button>
-                              </div>
-                            ));
+                              );
+                            });
                           })()
                         )}
                       </ScrollArea>

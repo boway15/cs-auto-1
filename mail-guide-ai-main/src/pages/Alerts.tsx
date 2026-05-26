@@ -40,7 +40,45 @@ type AlertRow = {
   email_send_error: string | null;
   created_at: string;
   resolved_at: string | null;
+  /** 由列表加载时从 metadata 或 emails 表解析 */
+  related_message_id?: string | null;
 };
+
+function readRelatedMessageIdFromMetadata(metadata: Record<string, unknown>): string | null {
+  const raw = metadata.related_message_id;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+}
+
+async function enrichAlertsWithMessageIds(rows: AlertRow[]): Promise<AlertRow[]> {
+  const missingEmailIds = [
+    ...new Set(
+      rows
+        .filter((r) => r.related_email_id && !readRelatedMessageIdFromMetadata(r.metadata))
+        .map((r) => r.related_email_id as string),
+    ),
+  ];
+  const messageIdByEmailId = new Map<string, string | null>();
+  if (missingEmailIds.length > 0) {
+    const { data: emails, error } = await supabase
+      .from("emails")
+      .select("id, message_id")
+      .in("id", missingEmailIds);
+    if (error) {
+      console.warn("load alert message_id:", error.message);
+    } else {
+      for (const row of emails ?? []) {
+        const mid = row.message_id;
+        messageIdByEmailId.set(row.id, typeof mid === "string" && mid.trim() ? mid.trim() : null);
+      }
+    }
+  }
+  return rows.map((row) => {
+    const fromMeta = readRelatedMessageIdFromMetadata(row.metadata);
+    const related_message_id = fromMeta
+      ?? (row.related_email_id ? messageIdByEmailId.get(row.related_email_id) ?? null : null);
+    return related_message_id ? { ...row, related_message_id } : row;
+  });
+}
 
 const SEVERITY_CLS: Record<string, string> = {
   info: "bg-muted text-foreground/80 border-border",
@@ -181,7 +219,8 @@ export default function Alerts() {
         .order("created_at", { ascending: false })
         .range(from, to);
       if (error) throw error;
-      setRows((data ?? []) as AlertRow[]);
+      const enriched = await enrichAlertsWithMessageIds((data ?? []) as AlertRow[]);
+      setRows(enriched);
       setListTotal(count ?? 0);
     } catch (error) {
       const message = typeof error === "object" && error && "message" in error
@@ -393,10 +432,22 @@ export default function Alerts() {
                     {row.message && (
                       <div className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{row.message}</div>
                     )}
-                    <div className="text-[10px] text-muted-foreground mt-1">
-                      {row.related_email_id && <span>邮件 {row.related_email_id.slice(0, 8)}…</span>}
-                      {row.related_email_id && row.related_order_id && <span> · </span>}
-                      {row.related_order_id && <span>订单 {row.related_order_id.slice(0, 8)}…</span>}
+                    <div className="text-[10px] text-muted-foreground mt-1 space-y-0.5">
+                      {row.related_email_id && (
+                        <div className="font-mono break-all">
+                          关联邮件：{row.related_email_id}
+                        </div>
+                      )}
+                      {row.related_message_id && (
+                        <div className="font-mono break-all" title={row.related_message_id}>
+                          Message-ID：{row.related_message_id}
+                        </div>
+                      )}
+                      {row.related_order_id && (
+                        <div className="font-mono break-all">
+                          关联订单：{row.related_order_id}
+                        </div>
+                      )}
                     </div>
                   </TableCell>
                   <TableCell>

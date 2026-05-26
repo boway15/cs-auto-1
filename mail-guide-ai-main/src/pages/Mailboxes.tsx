@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, Dialog
 import { Textarea } from "@/components/ui/textarea";
 import { Plus, Trash2, Mail, RefreshCw, PlugZap, AlertTriangle, CheckCircle2, Edit3 } from "lucide-react";
 import { toast } from "sonner";
+import { runPhasedMailboxSync } from "@/lib/sync-mailbox-phased";
 
 async function getFunctionErrorMessage(error: { message?: string; context?: Response } | null): Promise<string> {
   if (!error) return "未知错误";
@@ -305,62 +306,33 @@ export default function MailboxesPage() {
   }
   async function syncOne(id: string) {
     setSyncingId(id);
-    let totalInserted = 0;
-    let rounds = 0;
-    let lastRemaining = 0;
-    let workerCancelRetries = 0;
-    const MAX_ROUNDS = 50;
-    const MAX_BATCHES = 10;
-    const ROUND_DELAY_MS = 1500;
-    const BATCH_DELAY_MS = 20000;
-    const WORKER_CANCEL_RETRY_DELAY_MS = 8000;
-    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     try {
-      let failed = false;
-      for (let batch = 1; batch <= MAX_BATCHES; batch++) {
-        let batchRounds = 0;
-        while (batchRounds < MAX_ROUNDS) {
-          batchRounds++;
-          rounds++;
-          const { data, error } = await supabase.functions.invoke("sync-mailbox", { body: { mailbox_id: id, force_bulk: true } });
-          if (error) {
-            const message = await getFunctionErrorMessage(error);
-            if (
-              workerCancelRetries < 2 &&
-              /WorkerRequestCancelled|request has been cancelled/i.test(message)
-            ) {
-              workerCancelRetries++;
-              batchRounds--;
-              rounds--;
-              toast.message(`同步运行时被回收，等待后自动重试 ${workerCancelRetries}/2`);
-              await wait(WORKER_CANCEL_RETRY_DELAY_MS);
-              continue;
-            }
-            toast.error("同步失败：" + message);
-            failed = true;
-            break;
-          }
-          const r = data?.results?.[0];
-          if (r?.error) { toast.error("同步失败：" + r.error); failed = true; break; }
-          if (!r) { toast.error("同步异常：未获取到结果"); failed = true; break; }
-          totalInserted += r.inserted ?? 0;
-          lastRemaining = r.remaining ?? 0;
-          toast.message(`第 ${batch} 批 / 总第 ${rounds} 轮：新增 ${r.inserted ?? 0} 封，剩余 ${lastRemaining} 封`);
-          if (!lastRemaining) break;
-          await wait(batchRounds % 10 === 0 ? WORKER_CANCEL_RETRY_DELAY_MS : ROUND_DELAY_MS);
-        }
-        if (failed || !lastRemaining) break;
-        if (batch < MAX_BATCHES) {
-          toast.message(`第 ${batch} 批完成，剩余 ${lastRemaining} 封，${Math.round(BATCH_DELAY_MS / 1000)} 秒后自动继续`);
-          await wait(BATCH_DELAY_MS);
-        }
+      const outcome = await runPhasedMailboxSync({
+        mailboxId: id,
+        onProgress: (p) => {
+          const phaseLabel =
+            p.phase === "incremental" ? "增量" : p.phase === "historical" ? "历史" : "补正文";
+          const extra =
+            p.phase === "repair_body"
+              ? `已补 ${p.repaired ?? 0} 封，仍剩空正文约 ${p.emptyBodyRemaining ?? p.remaining} 封`
+              : `新增 ${p.inserted} 封，剩余 ${p.remaining} 封`;
+          toast.message(`${phaseLabel} 第 ${p.batch} 批 / 第 ${p.round} 轮：${extra}`);
+        },
+      });
+      if (outcome.failed) {
+        toast.error("同步失败：" + (outcome.errorMessage ?? "未知错误"));
+        return;
       }
-      if (!failed) {
+      const tail: string[] = [];
+      if (outcome.historyRemaining > 0) tail.push(`历史约 ${outcome.historyRemaining} 封`);
+      if (outcome.emptyBodyRemaining > 0) tail.push(`空正文约 ${outcome.emptyBodyRemaining} 封`);
+      const repairedNote = outcome.totalRepaired > 0 ? `，补正文 ${outcome.totalRepaired} 封` : "";
+      if (tail.length > 0) {
         toast.success(
-          lastRemaining > 0
-            ? `本次自动续批新增 ${totalInserted} 封，仍剩约 ${lastRemaining} 封，可再次点击继续`
-            : `同步完成，本次共新增 ${totalInserted} 封邮件（${rounds} 轮）`,
+          `本次新增 ${outcome.totalInserted} 封${repairedNote}；仍剩 ${tail.join("、")}，可再次点击继续`,
         );
+      } else {
+        toast.success(`同步完成：新增 ${outcome.totalInserted} 封${repairedNote}`);
       }
     } finally {
       setSyncingId(null);

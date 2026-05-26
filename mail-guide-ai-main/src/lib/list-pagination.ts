@@ -13,3 +13,12 @@ export function listPageRange(page: number, pageSize = ADMIN_LIST_PAGE_SIZE): { 
 export function clampListPage(page: number, pageCount: number): number {
   return Math.min(Math.max(0, page), Math.max(0, pageCount - 1));
 }
+
+/** 将用户输入的 1-based 页码转为 0-based 页索引；无效输入返回 null */
+export function parseListPageJumpInput(raw: string, pageCount: number): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const n = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(n) || n < 1) return null;
+  return clampListPage(n - 1, pageCount);
+}

@@ -1,5 +1,12 @@
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { ADMIN_LIST_PAGE_SIZE, clampListPage, listPageCount } from "@/lib/list-pagination";
+import { Input } from "@/components/ui/input";
+import {
+  ADMIN_LIST_PAGE_SIZE,
+  clampListPage,
+  listPageCount,
+  parseListPageJumpInput,
+} from "@/lib/list-pagination";
 
 type TableListPaginationProps = {
   page: number;
@@ -8,6 +15,8 @@ type TableListPaginationProps = {
   loading?: boolean;
   onPageChange: (page: number) => void;
   className?: string;
+  /** 为 false 时中间仅显示页码，不显示「共 N 条」 */
+  showTotal?: boolean;
 };
 
 /** 表格列表底部分页（样式与工作台邮件队列一致） */
@@ -18,11 +27,27 @@ export function TableListPagination({
   loading = false,
   onPageChange,
   className = "",
+  showTotal = true,
 }: TableListPaginationProps) {
-  if (total <= pageSize) return null;
-
   const pageCount = listPageCount(total, pageSize);
   const pageSafe = clampListPage(page, pageCount);
+  const [jumpDraft, setJumpDraft] = useState(String(pageSafe + 1));
+
+  useEffect(() => {
+    setJumpDraft(String(pageSafe + 1));
+  }, [pageSafe]);
+
+  if (total <= pageSize) return null;
+
+  const commitJump = () => {
+    const target = parseListPageJumpInput(jumpDraft, pageCount);
+    if (target == null) {
+      setJumpDraft(String(pageSafe + 1));
+      return;
+    }
+    if (target !== pageSafe) onPageChange(target);
+    else setJumpDraft(String(pageSafe + 1));
+  };
 
   return (
     <div
@@ -38,8 +63,38 @@ export function TableListPagination({
       >
         上一页
       </Button>
-      <span className="text-[10px] text-muted-foreground shrink-0">
-        共 {total} 条 · 第 {pageSafe + 1} / {pageCount} 页
+      <span className="text-[10px] text-muted-foreground shrink-0 flex items-center gap-1">
+        {showTotal ? <>共 {total} 条 · </> : null}
+        第
+        <Input
+          type="number"
+          min={1}
+          max={pageCount}
+          inputMode="numeric"
+          aria-label="跳转到页码"
+          className="h-6 w-11 px-1 text-center text-[10px] [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+          value={jumpDraft}
+          disabled={loading}
+          onChange={(e) => setJumpDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commitJump();
+            }
+          }}
+          onBlur={commitJump}
+        />
+        / {pageCount} 页
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-6 px-1.5 text-[10px] text-muted-foreground"
+          disabled={loading}
+          onClick={commitJump}
+        >
+          跳转
+        </Button>
       </span>
       <Button
         type="button"

@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { looksLikeHtmlEmailContent, normalizeEmailBodyContent } from "@/lib/email-body";
 
 /**
  * Decode HTML entities like &gt; &lt; &nbsp; &amp; to their text equivalents.
@@ -9,17 +10,6 @@ function decodeHtmlEntities(text: string): string {
   const txt = document.createElement("textarea");
   txt.innerHTML = text;
   return txt.value;
-}
-
-/**
- * Check if the text looks like it contains HTML markup.
- */
-function isHtmlContent(text: string): boolean {
-  if (!text) return false;
-  // Match opening HTML tags like <div>, <p>, <table>, <br>, etc.
-  return /<(html|head|body|div|p|table|tr|td|th|span|a|br|img|ul|ol|li|h[1-6]|blockquote|strong|em|pre|code|hr|style|meta|font|center)[\s>]/i.test(
-    text,
-  );
 }
 
 // Styles injected once for email content rendering
@@ -70,7 +60,9 @@ interface EmailBodyProps {
 }
 
 export function EmailBody({ content, className }: EmailBodyProps) {
-  if (!content) {
+  const normalized = normalizeEmailBodyContent(content);
+
+  if (!normalized.text && !normalized.html) {
     return (
       <div className={cn("text-sm text-muted-foreground italic", className)}>
         无正文内容
@@ -78,8 +70,15 @@ export function EmailBody({ content, className }: EmailBodyProps) {
     );
   }
 
-  // If it looks like an HTML email, render it as HTML
-  if (isHtmlContent(content)) {
+  const text = normalized.text;
+  const htmlToRender =
+    normalized.html && looksLikeHtmlEmailContent(normalized.html)
+      ? normalized.html
+      : looksLikeHtmlEmailContent(text)
+        ? text
+        : null;
+
+  if (htmlToRender) {
     injectEmailStyles();
     return (
       <div
@@ -87,14 +86,14 @@ export function EmailBody({ content, className }: EmailBodyProps) {
           "email-body-html text-sm break-words overflow-hidden",
           className,
         )}
-        dangerouslySetInnerHTML={{ __html: content }}
+        dangerouslySetInnerHTML={{ __html: htmlToRender }}
       />
     );
   }
 
   // Plain text email — decode HTML entities (like &gt; → >, &nbsp; → space)
   // and display with whitespace preserved
-  const decoded = decodeHtmlEntities(content);
+  const decoded = decodeHtmlEntities(text);
 
   return (
     <div

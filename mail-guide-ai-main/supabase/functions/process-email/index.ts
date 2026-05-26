@@ -493,9 +493,22 @@ async function sendAutoReplyBySlot(
   return true;
 }
 
-async function associateOrders(admin: any, email: any, analysis: Analysis) {
+type AssociateOrdersOptions = {
+  /** 正文补拉后处理：订单关联不受 12 小时发件窗口限制 */
+  ignoreCustomerAutomationWindowForAssociation?: boolean;
+};
+
+async function associateOrders(
+  admin: any,
+  email: any,
+  analysis: Analysis,
+  options?: AssociateOrdersOptions,
+) {
   const linkedOrders: any[] = [];
-  if (!isEmailWithinCustomerAutomationAge(email.received_at ?? null)) {
+  if (
+    !options?.ignoreCustomerAutomationWindowForAssociation &&
+    !isEmailWithinCustomerAutomationAge(email.received_at ?? null)
+  ) {
     return linkedOrders;
   }
   if (analysis.order_no) {
@@ -591,7 +604,7 @@ function computeSlaBucket(receivedAt: string | null | undefined): string | null 
   return "over_72h";
 }
 
-type ProcessEmailOptions = { analyzeOnly?: boolean };
+type ProcessEmailOptions = { analyzeOnly?: boolean; afterBodyRepair?: boolean };
 
 /** 仅重跑 AI 分析并写回分析字段，不触发关联订单、风控、自动回复等（用于人工/Dify 联调） */
 async function processEmailAnalyzeOnly(
@@ -648,6 +661,7 @@ async function processEmailAnalyzeOnly(
 
 async function processEmail(emailId: string, options?: ProcessEmailOptions) {
   const analyzeOnly = options?.analyzeOnly === true;
+  const afterBodyRepair = options?.afterBodyRepair === true;
   const admin = createClient(SUPABASE_URL, SERVICE_KEY);
   const { data: email, error } = await admin.from("emails").select("*").eq("id", emailId).single();
   if (error || !email) throw new Error("邮件不存在");
@@ -735,7 +749,21 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
   );
 
   const skipAutoAssociation = email.association_status === "manual_unlink";
-  const linkedOrders = skipAutoAssociation ? [] : await associateOrders(admin, email, analysis);
+  const linkedOrders = skipAutoAssociation
+    ? []
+    : await associateOrders(admin, email, analysis, {
+      ignoreCustomerAutomationWindowForAssociation: afterBodyRepair,
+    });
+  if (afterBodyRepair) {
+    await recordEvent(
+      admin,
+      emailId,
+      "body_repair_reanalyzed",
+      "正文补拉后已重跑 AI 分析与订单关联",
+      analysis.summary,
+      { association_count: linkedOrders.length },
+    );
+  }
   // 关联状态语义：
   //   linked           - 已关联订单（自动 / 人工 / 补偿）
   //   compensating     - 客户提供单号但暂未匹配，已创建补偿任务
@@ -947,6 +975,7 @@ Deno.serve(async (req) => {
       });
     }
     const analyzeOnly = body.analyze_only === true || body.mode === "analyze_only";
+    const afterBodyRepair = body.after_body_repair === true || body.mode === "after_body_repair";
     if (analyzeOnly && emailIds.length !== 1) {
       return new Response(JSON.stringify({ error: "analyze_only 仅支持单次处理一封邮件" }), {
         status: 400,
@@ -960,7 +989,7 @@ Deno.serve(async (req) => {
       }
       results.push({
         email_id: emailId,
-        ...(await processEmail(emailId, { analyzeOnly })),
+        ...(await processEmail(emailId, { analyzeOnly, afterBodyRepair })),
       });
     }
     return new Response(JSON.stringify({ results }), {

@@ -15,8 +15,21 @@ import { getMailTlsCaCerts } from "../_shared/mail-tls-ca.ts";
 import { sanitizeDisplayName } from "../_shared/display-name.ts";
 import {
   assertCanAccessMailbox,
+  assertStaffCanAccessEmail,
   isServiceRoleToken,
+  type StaffActor,
 } from "../_shared/mailbox-access.ts";
+import {
+  enqueueBodyRepairTask,
+  friendlyRepairError,
+  isWorkerCancelledError,
+  recordBodyRepairEvent,
+  finalizePostBodyRepair,
+} from "../_shared/email-body-repair-queue.ts";
+import {
+  buildMessageIdSearchCandidates,
+  messageIdMatchesHeader,
+} from "../_shared/imap-message-id.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -50,14 +63,51 @@ async function connectImapTls(host: string, port: number, signal: AbortSignal): 
   });
 }
 
+interface SyncOptions {
+  forceBulk?: boolean;
+  repairEmptyBody?: boolean;
+}
+
 interface SyncResult {
   mailbox: string;
   fetched: number;
   inserted: number;
   total: number;
   remaining: number;
+  repaired?: number;
+  empty_body_remaining?: number;
+  mode?: "incremental" | "historical" | "repair_body" | "repair_single";
+  skipped?: boolean;
+  email_id?: string;
   error?: string;
+  queued?: boolean;
+  queue_reason?: string;
+  /** true：不应再提示“已入队等待” */
+  terminal?: boolean;
 }
+
+type RepairOneOptions = {
+  /** 点开轻量：优先 BODY.PEEK[TEXT]，短超时，不上传附件 */
+  lightweight?: boolean;
+  readTimeoutCapMs?: number;
+  skipAttachments?: boolean;
+  /** 后台补正文遇到大附件时只取正文，避免 BODY.PEEK[] 拉整封邮件触发 WorkerRequestCancelled */
+  forceTextOnly?: boolean;
+};
+
+const REPAIR_SINGLE_TIME_BUDGET_MS = 16_000;
+
+type EmailRepairRow = {
+  id: string;
+  message_id: string | null;
+  body_text?: string | null;
+  body_html?: string | null;
+  has_attachment?: boolean | null;
+  received_at?: string | null;
+};
+
+const REPAIR_BODY_BATCH = 5;
+const REPAIR_BODY_SCAN_LIMIT = 80;
 
 /**
  * 从 IMAP FETCH 响应中按 literal 声明的字节数截取正文（RFC 3501）。
@@ -229,6 +279,16 @@ class ImapClient {
     console.log("[imap] searchSinceUid minUid:", minUid, "ok:", r.ok, "found:", uids.length);
     if (!r.ok) return [];
     return uids;
+  }
+
+  /** 按 Message-ID 头搜索 UID（补正文模式） */
+  async searchByMessageId(messageId: string): Promise<number[]> {
+    const trimmed = messageId.trim();
+    if (!trimmed) return [];
+    const esc = trimmed.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const r = await this.command(`UID SEARCH HEADER Message-ID "${esc}"`);
+    if (!r.ok) return [];
+    return this.parseSearchUids(r.lines);
   }
 
   // 抓取邮件轻量元数据：只取头部 + BODYSTRUCTURE，不下载正文和附件，避免大邮件触发 CPU/内存限制
@@ -517,9 +577,570 @@ function countHistoricalRemaining(uids: number[], cursorUid: number | null): num
   return uids.filter((uid) => uid < cursorUid).length;
 }
 
+function isBodyEmpty(
+  bodyText: string | null | undefined,
+  bodyHtml: string | null | undefined,
+): boolean {
+  return !String(bodyText ?? "").trim() && !String(bodyHtml ?? "").trim();
+}
+
+function resolveUidFromSyntheticMessageId(messageId: string, mailboxId: string): number | null {
+  const prefix = `${mailboxId}-`;
+  if (!messageId.startsWith(prefix)) return null;
+  const n = parseInt(messageId.slice(prefix.length), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function parseFetchedMimeBody(
+  rawBody: string,
+  isFull: boolean,
+): { bodyText: string; bodyHtml: string | null; mimeAttachmentParts: MimeAttachmentPart[] } {
+  let bodyText = "";
+  let bodyHtml: string | null = null;
+  let mimeAttachmentParts: MimeAttachmentPart[] = [];
+  if (!rawBody) return { bodyText, bodyHtml, mimeAttachmentParts };
+  const parsed = parseFullMime(rawBody);
+  bodyText = parsed.bodyText;
+  bodyHtml = parsed.bodyHtml;
+  mimeAttachmentParts = parsed.attachments;
+  if (!isFull && mimeAttachmentParts.length === 0 && isBodyEmpty(bodyText, bodyHtml)) {
+    bodyText = extractTextFromMime(rawBody);
+  }
+  if (bodyText.length > 50000) bodyText = bodyText.substring(0, 50000) + "\n\n[正文过长，已截断]";
+  if (bodyHtml && bodyHtml.length > 100_000) {
+    bodyHtml = bodyHtml.substring(0, 100_000) + "\n\n[HTML 内容过长，已截断]";
+  }
+  return { bodyText, bodyHtml, mimeAttachmentParts };
+}
+
+async function countEmptyBodyEmails(admin: ReturnType<typeof createClient>, mailboxId: string): Promise<number> {
+  const sinceDate = new Date();
+  sinceDate.setDate(sinceDate.getDate() - 30);
+  const { data, error } = await admin
+    .from("emails")
+    .select("id, body_text, body_html")
+    .eq("mailbox_id", mailboxId)
+    .gte("received_at", sinceDate.toISOString());
+  if (error) {
+    console.warn("[repair] count empty body failed:", error.message);
+    return 0;
+  }
+  return (data ?? []).filter((row) =>
+    isBodyEmpty(row.body_text as string | null, row.body_html as string | null)
+  ).length;
+}
+
+const UID_DATE_WINDOW_FALLBACK_MAX_SCAN = 60;
+
+async function resolveImapUidForEmail(
+  client: ImapClient,
+  messageId: string,
+  mailboxId: string,
+  receivedAt?: string | null,
+  opts?: { allowDateWindowFallback?: boolean },
+): Promise<number | null> {
+  const synthetic = resolveUidFromSyntheticMessageId(messageId, mailboxId);
+  if (synthetic != null) return synthetic;
+
+  for (const candidate of buildMessageIdSearchCandidates(messageId)) {
+    const uids = await client.searchByMessageId(candidate);
+    if (uids.length > 0) return Math.max(...uids);
+  }
+
+  if (opts?.allowDateWindowFallback === false || !receivedAt) {
+    return null;
+  }
+
+  const recv = new Date(receivedAt);
+  if (Number.isNaN(recv.getTime())) return null;
+
+  const since = new Date(recv);
+  since.setUTCDate(since.getUTCDate() - 3);
+  const until = new Date(recv);
+  until.setUTCDate(until.getUTCDate() + 1);
+
+  let uids: number[] = [];
+  try {
+    uids = await client.search(since);
+  } catch (e) {
+    console.warn("[resolveImapUid] date window search failed:", e);
+    return null;
+  }
+  if (uids.length === 0) return null;
+
+  const toScan = uids.length > UID_DATE_WINDOW_FALLBACK_MAX_SCAN
+    ? uids.slice(-UID_DATE_WINDOW_FALLBACK_MAX_SCAN)
+    : uids;
+
+  for (const uid of [...toScan].reverse()) {
+    try {
+      const metaRaw = await client.fetchMetadata(uid);
+      const mid = headerValue(metaRaw, "Message-ID");
+      if (!messageIdMatchesHeader(messageId, mid)) continue;
+      const dateHeader = headerValue(metaRaw, "Date");
+      if (dateHeader) {
+        const d = new Date(dateHeader);
+        if (!Number.isNaN(d.getTime()) && (d < since || d > until)) continue;
+      }
+      console.log("[resolveImapUid] date-window fallback hit uid:", uid);
+      return uid;
+    } catch (metaErr) {
+      console.warn("[resolveImapUid] fetchMetadata uid", uid, metaErr);
+    }
+  }
+  return null;
+}
+
+/** 为单封已入库邮件从 IMAP 补拉正文（仅当当前正文仍为空时写入） */
+async function repairOneEmailRecord(
+  client: ImapClient,
+  admin: ReturnType<typeof createClient>,
+  mb: { id: string },
+  row: EmailRepairRow,
+  maxBytesNoAttach: number,
+  maxBytesWithAttach: number,
+  opts: RepairOneOptions = {},
+): Promise<"repaired" | "still_empty" | "skip_not_empty" | "skip_no_uid" | "update_failed"> {
+  if (!isBodyEmpty(row.body_text, row.body_html)) return "skip_not_empty";
+
+  const messageId = String(row.message_id ?? "").trim();
+  if (!messageId) return "skip_no_uid";
+
+  const uid = await resolveImapUidForEmail(
+    client,
+    messageId,
+    String(mb.id),
+    row.received_at ?? null,
+    { allowDateWindowFallback: !opts.lightweight },
+  );
+  if (uid == null) {
+    console.log("[repair] no IMAP uid for message_id:", messageId.slice(0, 120));
+    return "skip_no_uid";
+  }
+
+  const metaRaw = await client.fetchMetadata(uid);
+  const rfc822SizeMatch = metaRaw.match(/RFC822\.SIZE\s+(\d+)/i);
+  const rfc822Size = rfc822SizeMatch ? parseInt(rfc822SizeMatch[1], 10) || 0 : 0;
+  const attachInfo = detectAttachments(metaRaw);
+  const maxBytesForFetch = attachInfo.hasAttachment ? maxBytesWithAttach : maxBytesNoAttach;
+  const readTimeout = opts.readTimeoutCapMs != null
+    ? Math.min(
+      imapFullBodyReadTimeoutMs(attachInfo.hasAttachment, rfc822Size),
+      opts.readTimeoutCapMs,
+    )
+    : imapFullBodyReadTimeoutMs(attachInfo.hasAttachment, rfc822Size);
+
+  let bodyText = "";
+  let bodyHtml: string | null = null;
+  let mimeAttachmentParts: Awaited<ReturnType<typeof parseFetchedMimeBody>>["mimeAttachmentParts"] = [];
+
+  if (opts.lightweight || opts.forceTextOnly) {
+    const textRaw = await client.fetchTextOnly(uid, Math.min(readTimeout, 10_000));
+    if (textRaw) {
+      const parsed = parseFetchedMimeBody(textRaw, false);
+      bodyText = parsed.bodyText;
+      bodyHtml = parsed.bodyHtml;
+    }
+  }
+
+  if (isBodyEmpty(bodyText, bodyHtml) && !opts.forceTextOnly) {
+    const bodyResult = await client.fetchFullBody(
+      uid,
+      rfc822Size,
+      readTimeout,
+      opts.lightweight ? Math.min(maxBytesForFetch, maxBytesNoAttach) : maxBytesForFetch,
+    );
+    const parsed = parseFetchedMimeBody(bodyResult.raw, bodyResult.isFull);
+    bodyText = parsed.bodyText;
+    bodyHtml = parsed.bodyHtml;
+    mimeAttachmentParts = parsed.mimeAttachmentParts;
+  }
+  if (isBodyEmpty(bodyText, bodyHtml)) {
+    console.log("[repair] still empty after fetch uid:", uid, "email_id:", row.id);
+    return "still_empty";
+  }
+
+  const { data: stillEmpty } = await admin
+    .from("emails")
+    .select("body_text, body_html")
+    .eq("id", row.id)
+    .maybeSingle();
+  if (!stillEmpty || !isBodyEmpty(stillEmpty.body_text, stillEmpty.body_html)) return "skip_not_empty";
+
+  const updatePayload: Record<string, unknown> = {
+    body_text: bodyText,
+    body_html: bodyHtml,
+  };
+  if (!opts.skipAttachments && mimeAttachmentParts.length > 0) {
+    try {
+      const attJson = await persistEmailAttachments(
+        admin,
+        String(mb.id),
+        String(row.id),
+        mimeAttachmentParts,
+      );
+      updatePayload.attachments = attJson;
+      updatePayload.has_attachment = attJson.length > 0 || Boolean(row.has_attachment);
+    } catch (attErr) {
+      console.error("[repair attachments]", attErr);
+    }
+  }
+
+  const { error: upErr } = await admin.from("emails").update(updatePayload).eq("id", row.id);
+  if (upErr) {
+    console.error("[repair update]", upErr);
+    return "update_failed";
+  }
+  return "repaired";
+}
+
+async function connectImapClient(
+  mb: any,
+  opts: { connectTimeoutMs?: number; attempts?: number } = {},
+): Promise<ImapClient> {
+  const effectiveUseSsl = MAIL_LOCAL_TEST_MODE ? false : (mb.use_ssl !== false);
+  const client = new ImapClient(mb.incoming_host, Number(mb.incoming_port), effectiveUseSsl);
+  const attempts = Math.max(1, opts.attempts ?? 2);
+  const connectTimeoutMs = opts.connectTimeoutMs ?? 15000;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await client.connect(connectTimeoutMs);
+      break;
+    } catch (connErr) {
+      try { (client as any).conn?.close(); } catch { /* ignore */ }
+      try { (client as any).reader?.releaseLock(); } catch { /* ignore */ }
+      if (attempt === attempts) throw connErr;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+  await client.login(mb.auth_user, mb.auth_password);
+  await client.select("INBOX");
+  return client;
+}
+
+/** 打开邮件时按需补拉单封正文（轻量限时；失败/超时入后台队列） */
+async function repairEmailById(
+  admin: ReturnType<typeof createClient>,
+  emailId: string,
+): Promise<SyncResult> {
+  const startedAt = Date.now();
+  const emptyResult = (mailbox: string, extra: Partial<SyncResult> = {}): SyncResult => ({
+    mailbox,
+    fetched: 0,
+    inserted: 0,
+    total: 0,
+    remaining: 0,
+    email_id: emailId,
+    mode: "repair_single",
+    ...extra,
+  });
+
+  const { data: row, error: qErr } = await admin
+    .from("emails")
+    .select("id, message_id, body_text, body_html, has_attachment, mailbox_id, received_at")
+    .eq("id", emailId)
+    .maybeSingle();
+  if (qErr) return emptyResult("", { error: qErr.message });
+  if (!row?.mailbox_id) return emptyResult("", { error: "邮件不存在" });
+
+  const { data: mb, error: mbErr } = await admin
+    .from("mailboxes")
+    .select("*")
+    .eq("id", row.mailbox_id)
+    .maybeSingle();
+  if (mbErr || !mb) return emptyResult("", { error: mbErr?.message ?? "邮箱不存在" });
+
+  if (!isBodyEmpty(row.body_text, row.body_html)) {
+    return emptyResult(mb.email_address, { skipped: true, repaired: 0 });
+  }
+
+  const maxBytesNoAttach = parseEnvPositiveInt(
+    "MAIL_SYNC_FULL_BODY_MAX_BYTES",
+    DEFAULT_FULL_BODY_MAX_BYTES,
+  );
+  const maxBytesWithAttach = parseEnvPositiveInt(
+    "MAIL_SYNC_FULL_BODY_WITH_ATTACH_MAX_BYTES",
+    DEFAULT_FULL_BODY_WITH_ATTACH_MAX_BYTES,
+  );
+
+  const overBudget = () => Date.now() - startedAt >= REPAIR_SINGLE_TIME_BUDGET_MS;
+
+  const enqueueAndReturn = async (reason: string) => {
+    const { enqueued, terminal } = await enqueueBodyRepairTask(admin, emailId, reason, "interactive");
+    return emptyResult(mb.email_address, {
+      repaired: 0,
+      queued: enqueued,
+      queue_reason: reason,
+      terminal: terminal ?? !enqueued,
+      error: enqueued ? undefined : (terminal ? friendlyRepairError(reason) : undefined),
+    });
+  };
+
+  // 先入队，再做快速补拉。这样即使 Edge Runtime 在 IMAP 阶段取消请求，后台 worker 仍能继续补正文。
+  const prequeue = await enqueueBodyRepairTask(admin, emailId, "quick_repair_prequeued", "interactive");
+  if (!prequeue.enqueued) {
+    const reason = prequeue.terminal ? "无法加入后台补拉队列" : "正文补拉入队失败";
+    return emptyResult(mb.email_address, {
+      repaired: 0,
+      queued: false,
+      terminal: prequeue.terminal ?? true,
+      error: reason,
+    });
+  }
+
+  let client: ImapClient | null = null;
+  try {
+    if (overBudget()) {
+      return await enqueueAndReturn("quick_repair_budget_exceeded_before_connect");
+    }
+    client = await connectImapClient(mb, { connectTimeoutMs: 4_000, attempts: 1 });
+    if (overBudget()) {
+      return await enqueueAndReturn("quick_repair_budget_exceeded_after_connect");
+    }
+    const status = await repairOneEmailRecord(
+      client,
+      admin,
+      mb,
+      row as EmailRepairRow,
+      maxBytesNoAttach,
+      maxBytesWithAttach,
+      {
+        lightweight: true,
+        readTimeoutCapMs: 8_000,
+        skipAttachments: true,
+      },
+    );
+    if (status === "repaired") {
+      EdgeRuntime.waitUntil(
+        finalizePostBodyRepair(admin, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, emailId)
+          .catch((err) => console.error("[repair single post-process]", emailId, err)),
+      );
+      return emptyResult(mb.email_address, { repaired: 1, fetched: 1, total: 1 });
+    }
+    if (status === "skip_not_empty") {
+      return emptyResult(mb.email_address, { skipped: true, repaired: 0 });
+    }
+    if (status === "skip_no_uid") {
+      return await enqueueAndReturn("skip_no_uid_imap_search_miss");
+    }
+    if (status === "update_failed") {
+      return await enqueueAndReturn("quick_repair_update_failed");
+    }
+    return await enqueueAndReturn(
+      overBudget() ? "quick_repair_timeout_or_slow_imap" : "quick_repair_still_empty",
+    );
+  } catch (e) {
+    const raw = e instanceof Error ? e.message : String(e);
+    console.error("[repair single]", emailId, raw);
+    if (isWorkerCancelledError(e) || overBudget() || /timeout/i.test(raw)) {
+      return await enqueueAndReturn(
+        isWorkerCancelledError(e) ? "worker_request_cancelled" : raw,
+      );
+    }
+    return await enqueueAndReturn(`quick_repair_error:${raw.slice(0, 200)}`);
+  } finally {
+    if (client) await client.logout();
+  }
+}
+
+/** 后台 worker：完整补拉正文，成功后触发 process-email（after_body_repair） */
+async function repairEmailByIdFull(
+  admin: ReturnType<typeof createClient>,
+  emailId: string,
+  taskId?: string,
+): Promise<SyncResult & { post_processed?: boolean }> {
+  const emptyResult = (mailbox: string, extra: Partial<SyncResult> = {}): SyncResult => ({
+    mailbox,
+    fetched: 0,
+    inserted: 0,
+    total: 0,
+    remaining: 0,
+    email_id: emailId,
+    mode: "repair_single",
+    ...extra,
+  });
+
+  const { data: row, error: qErr } = await admin
+    .from("emails")
+    .select("id, message_id, body_text, body_html, has_attachment, mailbox_id, received_at")
+    .eq("id", emailId)
+    .maybeSingle();
+  if (qErr) return emptyResult("", { error: qErr.message });
+  if (!row?.mailbox_id) return emptyResult("", { error: "邮件不存在" });
+
+  const { data: mb, error: mbErr } = await admin
+    .from("mailboxes")
+    .select("*")
+    .eq("id", row.mailbox_id)
+    .maybeSingle();
+  if (mbErr || !mb) return emptyResult("", { error: mbErr?.message ?? "邮箱不存在" });
+
+  if (!isBodyEmpty(row.body_text, row.body_html)) {
+    const post = await finalizePostBodyRepair(admin, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, emailId);
+    return {
+      ...emptyResult(mb.email_address, { skipped: true, repaired: 0 }),
+      post_processed: post.ok,
+    };
+  }
+
+  const maxBytesNoAttach = parseEnvPositiveInt(
+    "MAIL_SYNC_FULL_BODY_MAX_BYTES",
+    DEFAULT_FULL_BODY_MAX_BYTES,
+  );
+  const maxBytesWithAttach = parseEnvPositiveInt(
+    "MAIL_SYNC_FULL_BODY_WITH_ATTACH_MAX_BYTES",
+    DEFAULT_FULL_BODY_WITH_ATTACH_MAX_BYTES,
+  );
+
+  let client: ImapClient | null = null;
+  try {
+    await recordBodyRepairEvent(admin, emailId, "body_repair_started", "后台正文补拉开始", undefined, {
+      task_id: taskId ?? null,
+    });
+    client = await connectImapClient(mb, { connectTimeoutMs: 4_000, attempts: 1 });
+    const status = await repairOneEmailRecord(
+      client,
+      admin,
+      mb,
+      row as EmailRepairRow,
+      maxBytesNoAttach,
+      maxBytesWithAttach,
+      {
+        lightweight: false,
+        forceTextOnly: true,
+        readTimeoutCapMs: 12_000,
+        skipAttachments: true,
+      },
+    );
+    if (status === "repaired") {
+      await admin.from("email_body_repair_tasks").update({
+        status: "resolved",
+        repaired_at: new Date().toISOString(),
+        last_error: null,
+      }).eq("email_id", emailId);
+      await recordBodyRepairEvent(admin, emailId, "body_repair_succeeded", "后台正文补拉成功");
+      const post = await finalizePostBodyRepair(admin, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, emailId);
+      return {
+        ...emptyResult(mb.email_address, { repaired: 1, fetched: 1, total: 1 }),
+        post_processed: post.ok,
+      };
+    }
+    if (status === "skip_not_empty") {
+      return { ...emptyResult(mb.email_address, { skipped: true, repaired: 0 }), post_processed: false };
+    }
+    const errMsg = status === "still_empty"
+      ? "IMAP 已拉取但未解析出正文"
+      : status === "skip_no_uid"
+        ? "skip_no_uid: 无法在邮箱中找到该邮件（Message-ID 未命中）"
+        : "正文写入失败";
+    return emptyResult(mb.email_address, { error: errMsg });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[repair full]", emailId, msg);
+    return emptyResult(mb.email_address, { error: msg });
+  } finally {
+    if (client) await client.logout();
+  }
+}
+
+/** 小批量为已入库但正文为空的历史邮件补拉 BODY.PEEK[] */
+async function repairEmptyBodies(mb: any, admin: ReturnType<typeof createClient>): Promise<SyncResult> {
+  const result: SyncResult = {
+    mailbox: mb.email_address,
+    fetched: 0,
+    inserted: 0,
+    total: 0,
+    remaining: 0,
+    repaired: 0,
+    mode: "repair_body",
+  };
+  const startedAt = Date.now();
+  const TIME_BUDGET_MS = 40_000;
+  let client: ImapClient | null = null;
+
+  try {
+    client = await connectImapClient(mb);
+
+    const sinceDate = new Date();
+    sinceDate.setDate(sinceDate.getDate() - 30);
+    const { data: candidates, error: qErr } = await admin
+      .from("emails")
+      .select("id, message_id, body_text, body_html, has_attachment, received_at")
+      .eq("mailbox_id", mb.id)
+      .gte("received_at", sinceDate.toISOString())
+      .order("received_at", { ascending: false })
+      .limit(REPAIR_BODY_SCAN_LIMIT);
+    if (qErr) throw qErr;
+
+    const toRepair = (candidates ?? []).filter((row) =>
+      isBodyEmpty(row.body_text as string | null, row.body_html as string | null)
+    ).slice(0, REPAIR_BODY_BATCH);
+    result.total = toRepair.length;
+    result.fetched = toRepair.length;
+
+    const maxBytesNoAttach = parseEnvPositiveInt(
+      "MAIL_SYNC_FULL_BODY_MAX_BYTES",
+      DEFAULT_FULL_BODY_MAX_BYTES,
+    );
+    const maxBytesWithAttach = parseEnvPositiveInt(
+      "MAIL_SYNC_FULL_BODY_WITH_ATTACH_MAX_BYTES",
+      DEFAULT_FULL_BODY_WITH_ATTACH_MAX_BYTES,
+    );
+
+    for (const row of toRepair) {
+      if (Date.now() - startedAt > TIME_BUDGET_MS - 8000) {
+        console.log("[repair] time budget low, stopping");
+        break;
+      }
+      try {
+        const status = await repairOneEmailRecord(
+          client,
+          admin,
+          mb,
+          row as EmailRepairRow,
+          maxBytesNoAttach,
+          maxBytesWithAttach,
+        );
+        if (status === "repaired") result.repaired = (result.repaired ?? 0) + 1;
+      } catch (perErr) {
+        console.error("[repair] email_id", row.id, perErr);
+      }
+    }
+
+    const emptyRemaining = await countEmptyBodyEmails(admin, String(mb.id));
+    result.empty_body_remaining = emptyRemaining;
+    result.remaining = emptyRemaining;
+    console.log(
+      "[repair] done repaired:",
+      result.repaired,
+      "empty_body_remaining:",
+      emptyRemaining,
+    );
+  } catch (e) {
+    result.error = e instanceof Error ? e.message : String(e);
+    console.error("[repair error]", mb.email_address, result.error);
+    await admin.from("mailboxes").update({ last_error: result.error }).eq("id", mb.id);
+  } finally {
+    if (client) await client.logout();
+  }
+  return result;
+}
+
 // ============ 同步逻辑 ============
-async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResult> {
-  const result: SyncResult = { mailbox: mb.email_address, fetched: 0, inserted: 0, total: 0, remaining: 0 };
+async function syncOne(mb: any, admin: any, opts: SyncOptions = {}): Promise<SyncResult> {
+  if (opts.repairEmptyBody) {
+    return repairEmptyBodies(mb, admin);
+  }
+
+  const forceBulk = opts.forceBulk === true;
+  const result: SyncResult = {
+    mailbox: mb.email_address,
+    fetched: 0,
+    inserted: 0,
+    total: 0,
+    remaining: 0,
+    mode: forceBulk ? "historical" : "incremental",
+  };
   const effectiveUseSsl = MAIL_LOCAL_TEST_MODE ? false : (mb.use_ssl !== false);
   const client = new ImapClient(mb.incoming_host, Number(mb.incoming_port), effectiveUseSsl);
 
@@ -553,14 +1174,16 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
 
     let uids: number[] = [];
     const lastUid = parseOptionalUid(mb.last_uid) ?? 0;
-    const isHistoricalBackfill = forceBulk || lastUid <= 0;
+    const isHistoricalBackfill = forceBulk;
     let historyCursorUid = parseOptionalUid(mb.history_sync_cursor_uid);
     if (isHistoricalBackfill) {
       const sinceDate = new Date();
       sinceDate.setDate(sinceDate.getDate() - DAYS_BACK);
       uids = await client.searchSinceBeforeUid(sinceDate, historyCursorUid);
-    } else {
+    } else if (lastUid > 0) {
       uids = await client.searchSinceUid(lastUid + 1);
+    } else {
+      uids = [];
     }
     uids.sort((a, b) => b - a); // 降序：最新邮件优先
     result.total = uids.length;
@@ -750,20 +1373,11 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
               imapFullBodyReadTimeoutMs(attachInfo.hasAttachment, rfc822Size),
               maxBytesForFetch,
             );
-          const rawBody = bodyResult.raw;
+          const parsedBody = parseFetchedMimeBody(bodyResult.raw, bodyResult.isFull);
+          bodyText = parsedBody.bodyText;
+          bodyHtml = parsedBody.bodyHtml;
+          mimeAttachmentParts = parsedBody.mimeAttachmentParts;
           fullBodyFetched = bodyResult.isFull;
-          if (rawBody) {
-            if (bodyResult.isFull) {
-              const parsed = parseFullMime(rawBody);
-              bodyText = parsed.bodyText;
-              bodyHtml = parsed.bodyHtml;
-              mimeAttachmentParts = parsed.attachments;
-            } else {
-              bodyText = extractTextFromMime(rawBody);
-            }
-            if (bodyText.length > 50000) bodyText = bodyText.substring(0, 50000) + "\n\n[正文过长，已截断]";
-            if (bodyHtml && bodyHtml.length > 100_000) bodyHtml = bodyHtml.substring(0, 100_000) + "\n\n[HTML 内容过长，已截断]";
-          }
         } catch (bodyErr) {
           console.error(`[body uid ${meta.uid}]`, bodyErr);
         }
@@ -970,13 +1584,42 @@ Deno.serve(async (req) => {
     }
 
     let mailboxId: string | undefined;
-    let forceBulk = false;
+    let repairEmailId: string | undefined;
+    let repairFull = false;
+    let repairTaskId: string | undefined;
+    const syncOpts: SyncOptions = {};
     if (req.method === "POST") {
       try {
         const body = await req.json();
         mailboxId = body?.mailbox_id;
-        forceBulk = body?.force_bulk === true;
+        syncOpts.forceBulk = body?.force_bulk === true;
+        syncOpts.repairEmptyBody = body?.repair_empty_body === true;
+        repairEmailId = typeof body?.repair_email_id === "string"
+          ? body.repair_email_id.trim()
+          : undefined;
+        repairFull = body?.repair_full === true;
+        repairTaskId = typeof body?.repair_task_id === "string" ? body.repair_task_id.trim() : undefined;
       } catch { /* ignore */ }
+    }
+
+    if (repairEmailId) {
+      const isWorkerCall = repairFull && isServiceRole;
+      if (!isWorkerCall && manualUserId) {
+        const actor: StaffActor = { userId: manualUserId, isService: false };
+        await assertStaffCanAccessEmail(admin, actor, repairEmailId);
+      }
+      if (repairFull && !isWorkerCall) {
+        return new Response(JSON.stringify({ error: "repair_full 仅允许服务角色" }), {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      const r = repairFull
+        ? await repairEmailByIdFull(admin, repairEmailId, repairTaskId)
+        : await repairEmailById(admin, repairEmailId);
+      return new Response(JSON.stringify({ results: [r] }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     if (manualUserId && mailboxId) {
@@ -1021,7 +1664,7 @@ Deno.serve(async (req) => {
       // 单个邮箱同步（手动触发）：同步执行并返回结果
       const results: SyncResult[] = [];
       for (const mb of mailboxes) {
-        const r = await syncOne(mb, admin, forceBulk);
+        const r = await syncOne(mb, admin, syncOpts);
         results.push(r);
       }
       return new Response(JSON.stringify({ results }), {
@@ -1032,7 +1675,7 @@ Deno.serve(async (req) => {
     // 全部邮箱同步（cron 自动）：异步后台执行
     EdgeRuntime.waitUntil((async () => {
       for (const mb of mailboxes) {
-        await syncOne(mb, admin);
+        await syncOne(mb, admin, {});
       }
     })());
 

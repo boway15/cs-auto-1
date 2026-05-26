@@ -254,6 +254,48 @@ function hasAttachmentDisposition(headers: string): boolean {
   return /content-disposition:\s*attachment/i.test(unfoldHeaders(headers));
 }
 
+/** inline 或未声明 disposition 的 text/plain|html 一律视为正文，不因 Content-Type name= 当附件 */
+function shouldTreatTextPartAsAttachment(headers: string): boolean {
+  return hasAttachmentDisposition(headers);
+}
+
+function looksLikeQuotedPrintable(s: string): boolean {
+  return /=([0-9A-Fa-f]{2})(?![0-9A-Fa-f])/.test(s) || /=\r?\n/.test(s);
+}
+
+/** 无 MIME 头时的 quoted-printable 解码（Shopify / BODY[TEXT] 片段） */
+function decodeQuotedPrintableLoose(input: string): string {
+  if (!looksLikeQuotedPrintable(input)) return input;
+  const buf: number[] = [];
+  for (let i = 0; i < input.length; i++) {
+    if (input[i] === "=") {
+      if (i + 2 < input.length) {
+        if (input[i + 1] === "\r" && input[i + 2] === "\n") {
+          i += 2;
+          continue;
+        }
+        if (input[i + 1] === "\n") {
+          i += 1;
+          continue;
+        }
+        const hex = input.substring(i + 1, i + 3);
+        if (/^[0-9A-Fa-f]{2}$/.test(hex)) {
+          buf.push(parseInt(hex, 16));
+          i += 2;
+          continue;
+        }
+      }
+    } else if (input[i] !== "\r" && input[i] !== "\n") {
+      buf.push(input.charCodeAt(i));
+    }
+  }
+  try {
+    return new TextDecoder("utf-8").decode(new Uint8Array(buf));
+  } catch {
+    return input;
+  }
+}
+
 /** 取 base64 行直到 MIME boundary，避免把 epilogue/--boundary 喂进 atob */
 function joinBase64Payload(body: string): string {
   const lines = body.split(/\r?\n/);
@@ -321,6 +363,42 @@ function decodeBodyToText(headers: string, body: string): string {
   }
 }
 
+function decodeHtmlEntities(s: string): string {
+  const named: Record<string, string> = {
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: "\"",
+    apos: "'",
+    nbsp: " ",
+  };
+  return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, entity) => {
+    const e = String(entity).toLowerCase();
+    if (e.startsWith("#x")) {
+      const n = parseInt(e.slice(2), 16);
+      return Number.isFinite(n) ? String.fromCodePoint(n) : m;
+    }
+    if (e.startsWith("#")) {
+      const n = parseInt(e.slice(1), 10);
+      return Number.isFinite(n) ? String.fromCodePoint(n) : m;
+    }
+    return named[e] ?? m;
+  });
+}
+
+function htmlToText(html: string): string {
+  return decodeHtmlEntities(
+    html
+      .replace(/<\s*(br|\/p|\/div|\/tr|\/li)\b[^>]*>/gi, "\n")
+      .replace(/<\s*(script|style)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/[ \t\f\v]+/g, " ")
+      .replace(/\n\s+/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim(),
+  );
+}
+
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -377,7 +455,7 @@ function pickBestAlternative(plainParts: string[], htmlParts: string[]): { bodyT
   const html = htmlParts.filter((p) => p.trim()).pop()?.trim() ?? null;
   let bodyText = plain;
   if (html) {
-    const stripped = html.replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+    const stripped = htmlToText(html);
     if (!bodyText && stripped) bodyText = stripped;
   }
   return { bodyText, bodyHtml: html || null };
@@ -497,25 +575,28 @@ export function parseMimePart(part: string, options?: { forceAttachment?: boolea
     return { bodyText: text, bodyHtml: null, attachments: [] };
   }
 
-  // Binary / explicit attachment / non-plain-html text
-  if (main === "text" && (getMainMediaType(headers).subtype === "plain" || getMainMediaType(headers).subtype === "html")) {
+  // text/plain|html：仅 Content-Disposition: attachment 才当附件（Shopify 联系表单 html 常带 name=）
+  if (main === "text") {
+    const { subtype } = getMainMediaType(headers);
     const text = decodeBodyToText(headers, body).trim();
-    if (dispType === "attachment" || fn) {
-      const bytes = decodeBodyToBytes(headers, body);
-      return {
-        bodyText: "",
-        bodyHtml: null,
-        attachments: [{
-          filename: safeFilename(fn, full, 0),
-          contentType: full,
-          bytes,
-        }],
-      };
+    if (subtype === "plain" || subtype === "html") {
+      if (shouldTreatTextPartAsAttachment(headers)) {
+        const bytes = decodeBodyToBytes(headers, body);
+        return {
+          bodyText: "",
+          bodyHtml: null,
+          attachments: [{
+            filename: safeFilename(fn, full, 0),
+            contentType: full,
+            bytes,
+          }],
+        };
+      }
+      if (subtype === "html") {
+        return { bodyText: "", bodyHtml: text || null, attachments: [] };
+      }
+      return { bodyText: text, bodyHtml: null, attachments: [] };
     }
-    if (getMainMediaType(headers).subtype === "html") {
-      return { bodyText: "", bodyHtml: text || null, attachments: [] };
-    }
-    return { bodyText: text, bodyHtml: null, attachments: [] };
   }
 
   const bytes = decodeBodyToBytes(headers, body);
@@ -528,6 +609,122 @@ export function parseMimePart(part: string, options?: { forceAttachment?: boolea
       bytes,
     }],
   };
+}
+
+function collectTextLikeMimeParts(raw: string): { plainParts: string[]; htmlParts: string[] } {
+  const plainParts: string[] = [];
+  const htmlParts: string[] = [];
+  const re = /content-type:\s*text\/(?:plain|html)\b[\s\S]*?(?=\r?\n--[^\r\n]+(?:--)?\r?\n|$)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) {
+    const block = m[0].trim();
+    const { headers, body } = splitHeadersBody(block);
+    if (!headers.trim() || !body.trim()) continue;
+    const { subtype } = getMainMediaType(headers);
+    const text = decodeBodyToText(headers, body).trim();
+    if (!text) continue;
+    if (subtype === "html") htmlParts.push(text);
+    else if (subtype === "plain") plainParts.push(text);
+  }
+  return { plainParts, htmlParts };
+}
+
+function fallbackBodyFromRaw(raw: string): { bodyText: string; bodyHtml: string | null } {
+  const collected = collectTextLikeMimeParts(raw);
+  const best = pickBestAlternative(collected.plainParts, collected.htmlParts);
+  if (best.bodyText || best.bodyHtml) return best;
+
+  let payload = mimePayloadOnly(raw).trim();
+  if (!payload) return { bodyText: "", bodyHtml: null };
+  if (looksLikeQuotedPrintable(payload)) {
+    payload = decodeQuotedPrintableLoose(payload);
+  }
+  const looksHtml = /<\/?[a-z][\s\S]*>/i.test(payload);
+  if (looksHtml) {
+    return { bodyText: htmlToText(payload), bodyHtml: payload };
+  }
+  return { bodyText: payload.trim(), bodyHtml: null };
+}
+
+function promoteMisclassifiedTextAttachments(
+  bodyText: string,
+  bodyHtml: string | null,
+  attachments: MimeAttachmentPart[],
+): { bodyText: string; bodyHtml: string | null; attachments: MimeAttachmentPart[] } {
+  let text = bodyText;
+  let html = bodyHtml;
+  const kept: MimeAttachmentPart[] = [];
+
+  for (const a of attachments) {
+    const ct = (a.contentType || "").split(";")[0].trim().toLowerCase();
+    if (!html && ct === "text/html" && a.bytes.length > 0 && a.bytes.length <= MAX_ATTACHMENT_BYTES) {
+      let decoded = new TextDecoder().decode(a.bytes);
+      if (looksLikeQuotedPrintable(decoded)) decoded = decodeQuotedPrintableLoose(decoded);
+      html = decoded;
+      if (!text.trim()) text = htmlToText(decoded);
+      continue;
+    }
+    if (!text.trim() && !html && ct === "text/plain" && a.bytes.length > 0 && a.bytes.length <= MAX_ATTACHMENT_BYTES) {
+      let decoded = new TextDecoder().decode(a.bytes);
+      if (looksLikeQuotedPrintable(decoded)) decoded = decodeQuotedPrintableLoose(decoded);
+      text = decoded;
+      continue;
+    }
+    kept.push(a);
+  }
+
+  return { bodyText: text, bodyHtml: html, attachments: kept };
+}
+
+function repairQuotedPrintableBody(bodyText: string, bodyHtml: string | null): {
+  bodyText: string;
+  bodyHtml: string | null;
+} {
+  let text = bodyText.trim();
+  let html = bodyHtml?.trim() ? bodyHtml.trim() : null;
+
+  if (!html && text && looksLikeQuotedPrintable(text)) {
+    const decoded = decodeQuotedPrintableLoose(text);
+    if (/<\/?[a-z][\s\S]*>/i.test(decoded)) {
+      html = decoded;
+      text = htmlToText(decoded);
+    } else {
+      text = decoded;
+    }
+  } else if (html && looksLikeQuotedPrintable(html)) {
+    html = decodeQuotedPrintableLoose(html);
+    if (!text.trim()) text = htmlToText(html);
+  }
+
+  return { bodyText: text, bodyHtml: html };
+}
+
+function finalizeParseResult(r: ParseMimeResult, raw: string): ParseMimeResult {
+  let bodyText = r.bodyText.trim();
+  let bodyHtml = r.bodyHtml?.trim() ? r.bodyHtml.trim() : null;
+  let attachments = [...r.attachments];
+
+  if (!bodyText && !bodyHtml) {
+    const fb = fallbackBodyFromRaw(raw);
+    bodyText = fb.bodyText;
+    bodyHtml = fb.bodyHtml;
+  }
+
+  const promoted = promoteMisclassifiedTextAttachments(bodyText, bodyHtml, attachments);
+  bodyText = promoted.bodyText;
+  bodyHtml = promoted.bodyHtml;
+  attachments = promoted.attachments;
+
+  const repaired = repairQuotedPrintableBody(bodyText, bodyHtml);
+  bodyText = repaired.bodyText;
+  bodyHtml = repaired.bodyHtml;
+
+  if (!bodyHtml && bodyText && /<(html|head|body|div|p|table|tr|td|th|span|a|br|img|ul|ol|li|h[1-6]|blockquote|strong|em)\b[\s>]/i.test(bodyText)) {
+    bodyHtml = bodyText;
+    bodyText = htmlToText(bodyText);
+  }
+
+  return { bodyText, bodyHtml, attachments };
 }
 
 /** Top-level entry: RFC822 raw or MIME fragment → bodies + attachments (capped). */
@@ -552,10 +749,14 @@ export function parseFullMime(raw: string): ParseMimeResult {
       filename: safeFilename(base || null, a.contentType, slot),
     });
   }
+  const finalized = finalizeParseResult(
+    { bodyText: r.bodyText, bodyHtml: r.bodyHtml, attachments },
+    raw,
+  );
   return {
-    bodyText: r.bodyText.trim(),
-    bodyHtml: r.bodyHtml?.trim() ? r.bodyHtml.trim() : null,
-    attachments,
+    bodyText: finalized.bodyText,
+    bodyHtml: finalized.bodyHtml,
+    attachments: finalized.attachments,
   };
 }
 

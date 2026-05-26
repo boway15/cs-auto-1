@@ -1,0 +1,31 @@
+services:
+  email-body-repair-worker:
+    image: denoland/deno:alpine
+    container_name: mail-guide-email-body-repair-worker
+    working_dir: /app
+    command:
+      - run
+      - --no-lock
+      - --allow-net
+      - --allow-env
+      - --allow-read
+      - scripts/workers/email-body-repair-worker.ts
+    volumes:
+      - ./:/app:ro
+    env_file:
+      - ../supabase-selfhost/.env
+      - ../supabase-selfhost/.env.functions
+    environment:
+      # Docker Desktop 从独立 compose 栈访问本机 Kong。
+      SUPABASE_URL: http://host.docker.internal:8000
+      MAIL_TLS_CA_CERT_PATH: /app/supabase/functions/certs/mail-ca.pem
+      EMAIL_BODY_REPAIR_WORKER_BATCH: "1"
+      EMAIL_BODY_REPAIR_WORKER_INTERVAL_MS: "30000"
+      EMAIL_BODY_REPAIR_STALE_LOCK_MINUTES: "10"
+      EMAIL_BODY_REPAIR_IMAP_CONNECT_TIMEOUT_MS: "15000"
+      EMAIL_BODY_REPAIR_IMAP_COMMAND_TIMEOUT_MS: "20000"
+      EMAIL_BODY_REPAIR_IMAP_LOGIN_TIMEOUT_MS: "20000"
+      EMAIL_BODY_REPAIR_IMAP_SELECT_TIMEOUT_MS: "20000"
+      EMAIL_BODY_REPAIR_IMAP_SEARCH_TIMEOUT_MS: "20000"
+      EMAIL_BODY_REPAIR_IMAP_FETCH_TEXT_TIMEOUT_MS: "30000"
+    restart: unless-stopped

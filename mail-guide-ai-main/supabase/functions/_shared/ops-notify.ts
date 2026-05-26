@@ -70,13 +70,45 @@ function buildIdempotencyKey(payload: AlertInput): string {
   return `${payload.source}:${payload.kind}:${e}:${o}`;
 }
 
-function renderEmail(payload: AlertInput, idempotencyKey: string): { subject: string; text: string } {
+async function resolveRelatedMessageId(
+  admin: any,
+  emailId: string | null | undefined,
+): Promise<string | null> {
+  if (!emailId) return null;
+  const { data, error } = await admin
+    .from("emails")
+    .select("message_id")
+    .eq("id", emailId)
+    .maybeSingle();
+  if (error) {
+    console.warn("[ops-notify] resolve message_id failed:", error.message);
+    return null;
+  }
+  const mid = data?.message_id;
+  return typeof mid === "string" && mid.trim() ? mid.trim() : null;
+}
+
+function mergeAlertMetadata(
+  payload: AlertInput,
+  relatedMessageId: string | null,
+): Record<string, unknown> {
+  const base = { ...(payload.metadata ?? {}) };
+  if (relatedMessageId) base.related_message_id = relatedMessageId;
+  return base;
+}
+
+function renderEmail(
+  payload: AlertInput,
+  idempotencyKey: string,
+  relatedMessageId: string | null,
+): { subject: string; text: string } {
   const subject = `[mail-guide-ai 告警] ${payload.title}`;
   const lines = [
     `严重级别：${payload.severity ?? "warning"}`,
     `事件来源：${payload.source}`,
     `事件类型：${payload.kind}`,
     `关联邮件：${payload.related_email_id ?? "-"}`,
+    `Message-ID：${relatedMessageId ?? "-"}`,
     `关联订单：${payload.related_order_id ?? "-"}`,
     `幂等键：${idempotencyKey}`,
     "",
@@ -102,6 +134,8 @@ export async function createAlertAndNotify(
 ): Promise<AlertResult> {
   const idempotencyKey = (payload.idempotency_key?.trim() || buildIdempotencyKey(payload));
   const severity = payload.severity ?? "warning";
+  const relatedMessageId = await resolveRelatedMessageId(admin, payload.related_email_id);
+  const metadata = mergeAlertMetadata(payload, relatedMessageId);
 
   // 1) 查重
   const { data: existing } = await admin
@@ -123,7 +157,7 @@ export async function createAlertAndNotify(
         message: payload.message ?? null,
         related_email_id: payload.related_email_id ?? null,
         related_order_id: payload.related_order_id ?? null,
-        metadata: payload.metadata ?? {},
+        metadata,
         idempotency_key: idempotencyKey,
       })
       .select("id, email_sent_at")
@@ -174,7 +208,7 @@ export async function createAlertAndNotify(
     return { alert_id: alertId, email_sent: false, deduped, error: errMsg };
   }
 
-  const { subject, text } = renderEmail(payload, idempotencyKey);
+  const { subject, text } = renderEmail(payload, idempotencyKey, relatedMessageId);
 
   try {
     await sendMail(

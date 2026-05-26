@@ -33,9 +33,19 @@
 /mail-guide-ops 发版已完成，给我 post-deploy 验收步骤和漏项对照
 ```
 
+**发给线上运维的上线说明（标准格式）：**
+
+```text
+/mail-guide-ops 输出 v1.2.0 发给运维的发版文档
+```
+
+输出遵循 `docs/ops-release-notice-template.md`（五步：rsync → 后端脚本 → 环境变量 → 前端 → 验收）。
+
 ## 你会得到什么
 
-固定五段输出（中文）：
+**提交/发版核对**（模式 A/B）固定五段输出（中文）：
+
+**运维发版文档**（模式 C）：完整可转发的上线说明 Markdown（见 `docs/ops-release-notice-template.md`）。
 
 1. 变更摘要  
 2. 提交/发版检查表（`- [ ]`）  
