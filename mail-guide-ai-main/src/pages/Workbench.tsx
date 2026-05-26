@@ -960,7 +960,12 @@ export default function Workbench() {
 
   async function syncMailboxes() {
     setSyncing(true);
-    const MAX_ROUNDS = 20;
+    const MAX_ROUNDS = 50;
+    const MAX_BATCHES = 10;
+    const ROUND_DELAY_MS = 1500;
+    const BATCH_DELAY_MS = 20000;
+    const WORKER_CANCEL_RETRY_DELAY_MS = 8000;
+    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     try {
       const rows = await fetchAccessibleMailboxes();
       if (rows.length === 0) {
@@ -969,49 +974,85 @@ export default function Workbench() {
       }
 
       let grandTotalInserted = 0;
+      let grandRemaining = 0;
       const failures: string[] = [];
 
       for (const mb of rows) {
         const label = mb.email_address ?? mb.id;
-        let rounds = 0;
-        while (rounds < MAX_ROUNDS) {
-          rounds++;
-          const { data, error } = await supabase.functions.invoke("sync-mailbox", {
-            body: { mailbox_id: mb.id, force_bulk: true },
-          });
-          if (error) {
-            failures.push(`${label}：${await formatFunctionsInvokeError(error)}`);
-            break;
+        let totalRounds = 0;
+        let lastRemaining = 0;
+        let workerCancelRetries = 0;
+        let failed = false;
+        for (let batch = 1; batch <= MAX_BATCHES; batch++) {
+          let rounds = 0;
+          while (rounds < MAX_ROUNDS) {
+            rounds++;
+            totalRounds++;
+            const { data, error } = await supabase.functions.invoke("sync-mailbox", {
+              body: { mailbox_id: mb.id, force_bulk: true },
+            });
+            if (error) {
+              const detail = await formatFunctionsInvokeError(error);
+              if (
+                workerCancelRetries < 2 &&
+                /WorkerRequestCancelled|request has been cancelled/i.test(detail)
+              ) {
+                workerCancelRetries++;
+                rounds--;
+                totalRounds--;
+                toast.message(`[${label}] 同步运行时被回收，等待后自动重试 ${workerCancelRetries}/2`);
+                await wait(WORKER_CANCEL_RETRY_DELAY_MS);
+                continue;
+              }
+              failures.push(`${label}：${detail}`);
+              failed = true;
+              break;
+            }
+            if (data?.error) {
+              failures.push(`${label}：${data.error}`);
+              failed = true;
+              break;
+            }
+            const r = data?.results?.[0];
+            if (r?.error) {
+              failures.push(`${label}：${r.error}`);
+              failed = true;
+              break;
+            }
+            if (!r) {
+              failures.push(`${label}：未获取到同步结果`);
+              failed = true;
+              break;
+            }
+            const ins = r.inserted ?? 0;
+            lastRemaining = r.remaining ?? 0;
+            grandTotalInserted += ins;
+            toast.message(`[${label}] 第 ${batch} 批 / 总第 ${totalRounds} 轮：新增 ${ins} 封，剩余 ${lastRemaining} 封`);
+            if (!lastRemaining) break;
+            await wait(rounds % 10 === 0 ? WORKER_CANCEL_RETRY_DELAY_MS : ROUND_DELAY_MS);
           }
-          if (data?.error) {
-            failures.push(`${label}：${data.error}`);
-            break;
+          if (failed || !lastRemaining) break;
+          if (batch < MAX_BATCHES) {
+            toast.message(`[${label}] 第 ${batch} 批完成，剩余 ${lastRemaining} 封，${Math.round(BATCH_DELAY_MS / 1000)} 秒后自动继续`);
+            await wait(BATCH_DELAY_MS);
           }
-          const r = data?.results?.[0];
-          if (r?.error) {
-            failures.push(`${label}：${r.error}`);
-            break;
-          }
-          if (!r) {
-            failures.push(`${label}：未获取到同步结果`);
-            break;
-          }
-          const ins = r.inserted ?? 0;
-          grandTotalInserted += ins;
-          toast.message(`[${label}] 第 ${rounds} 轮：新增 ${ins} 封，剩余 ${r.remaining ?? 0} 封`);
-          if (!r.remaining || r.remaining === 0) break;
         }
+        if (lastRemaining > 0) grandRemaining += lastRemaining;
       }
 
       if (failures.length > 0) {
         toast.error(failures.slice(0, 3).join("；") + (failures.length > 3 ? `…等 ${failures.length} 条` : ""));
       }
       if (grandTotalInserted > 0) {
-        toast.success(
-          failures.length === 0
-            ? `同步完成，共新增 ${grandTotalInserted} 封邮件`
-            : `同步结束，共新增 ${grandTotalInserted} 封邮件（部分邮箱失败见上方提示）`,
-        );
+        let message = `同步完成，共新增 ${grandTotalInserted} 封邮件`;
+        if (grandRemaining > 0) {
+          message = `本次自动续批新增 ${grandTotalInserted} 封，仍剩约 ${grandRemaining} 封，可再次点击继续`;
+        } else if (failures.length > 0) {
+          message = `同步结束，共新增 ${grandTotalInserted} 封邮件（部分邮箱失败见上方提示）`;
+        }
+        toast.success(message);
+      } else if (grandRemaining > 0 && failures.length === 0) {
+        toast.message(`本次未新增邮件，仍剩约 ${grandRemaining} 封历史邮件，可再次点击继续`);
       } else if (failures.length === 0) {
         toast.success("同步完成，共新增 0 封邮件");
       }

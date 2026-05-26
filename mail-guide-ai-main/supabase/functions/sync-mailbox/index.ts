@@ -212,6 +212,16 @@ class ImapClient {
     return this.parseSearchUids(r.lines);
   }
 
+  async searchSinceBeforeUid(sinceDate: Date, beforeUid: number | null): Promise<number[]> {
+    if (beforeUid != null && beforeUid <= 1) return [];
+    const m = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const d = `${sinceDate.getUTCDate()}-${m[sinceDate.getUTCMonth()]}-${sinceDate.getUTCFullYear()}`;
+    const uidRange = beforeUid != null ? ` UID 1:${beforeUid - 1}` : "";
+    const r = await this.command(`UID SEARCH SINCE ${d}${uidRange}`);
+    if (!r.ok) return [];
+    return this.parseSearchUids(r.lines);
+  }
+
   // 按 UID 区间搜索：拉取 minUid 之后的所有邮件
   async searchSinceUid(minUid: number): Promise<number[]> {
     const r = await this.command(`UID SEARCH UID ${minUid}:*`);
@@ -274,6 +284,10 @@ class ImapClient {
     }
     const text = await this.fetchBodyTextFallback(uid, timeoutMs);
     return { raw: text, isFull: false };
+  }
+
+  async fetchTextOnly(uid: number, timeoutMs = 5000): Promise<string> {
+    return await this.fetchBodyTextFallback(uid, timeoutMs);
   }
 
   // 回退：仅取 BODY[TEXT]（与旧逻辑一致）
@@ -492,6 +506,17 @@ function imapFullBodyReadTimeoutMs(hasAttachment: boolean, rfc822Size: number): 
   return Math.min(180_000, base + extra);
 }
 
+function parseOptionalUid(value: unknown): number | null {
+  if (value == null) return null;
+  const n = typeof value === "number" ? value : parseInt(String(value), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function countHistoricalRemaining(uids: number[], cursorUid: number | null): number {
+  if (cursorUid == null) return uids.length;
+  return uids.filter((uid) => uid < cursorUid).length;
+}
+
 // ============ 同步逻辑 ============
 async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResult> {
   const result: SyncResult = { mailbox: mb.email_address, fetched: 0, inserted: 0, total: 0, remaining: 0 };
@@ -518,29 +543,37 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
     await client.select("INBOX");
 
     // 同步策略：
-    // - last_uid > 0：增量 UID 搜索（仅拉取后续新邮件）
-    // - last_uid <= 0：按 30 天日期范围搜索，从最新开始倒序同步
-    // 多轮分批：每轮最多 20 封，一次同步调用最多 20 轮（共 400 封）
+    // - 增量同步：last_uid 是新邮件高水位，只拉取后续 UID。
+    // - 历史同步：history_sync_cursor_uid 是从新到旧的独立游标，避免 3000+ 封历史邮件在一次请求里跑超时。
     const DAYS_BACK = 30;
-    const PER_ROUND = 20;
-    const MAX_ROUNDS = 20;
-    const TIME_BUDGET_MS = 45_000; // 总时间预算 45s
+    const PER_ROUND = 5;
+    const MAX_ROUNDS = 2;
+    const TIME_BUDGET_MS = 40_000; // 总时间预算 40s，给 Edge Runtime 留退出余量
     const startedAt = Date.now();
 
     let uids: number[] = [];
-    const isBulkSync = forceBulk || !mb.last_uid || mb.last_uid <= 0;
-    if (isBulkSync) {
+    const lastUid = parseOptionalUid(mb.last_uid) ?? 0;
+    const isHistoricalBackfill = forceBulk || lastUid <= 0;
+    let historyCursorUid = parseOptionalUid(mb.history_sync_cursor_uid);
+    if (isHistoricalBackfill) {
       const sinceDate = new Date();
       sinceDate.setDate(sinceDate.getDate() - DAYS_BACK);
-      uids = await client.search(sinceDate);
+      uids = await client.searchSinceBeforeUid(sinceDate, historyCursorUid);
     } else {
-      uids = await client.searchSinceUid(mb.last_uid + 1);
+      uids = await client.searchSinceUid(lastUid + 1);
     }
     uids.sort((a, b) => b - a); // 降序：最新邮件优先
     result.total = uids.length;
-    console.log("[sync] isBulkSync:", isBulkSync, "totalFound:", uids.length);
+    console.log(
+      "[sync] isHistoricalBackfill:",
+      isHistoricalBackfill,
+      "historyCursorUid:",
+      historyCursorUid,
+      "totalFound:",
+      uids.length,
+    );
 
-    let progressUid = mb.last_uid ?? 0;
+    let progressUid = Math.max(lastUid, isHistoricalBackfill ? (uids[0] ?? 0) : lastUid);
     let overallFetched = 0;
     let overallInserted = 0;
 
@@ -611,6 +644,7 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
       // --- Phase 3: 下载正文 + 入库 ---
       let roundInserted = 0;
       let roundHandledUid = progressUid;
+      let roundLowestHandledUid: number | null = null;
       const insertedEmailIds: string[] = [];
       for (const meta of metaList) {
         if (Date.now() - startedAt > TIME_BUDGET_MS - 5000) {
@@ -634,11 +668,18 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
 
         const existing = existingByMessageId.get(meta.messageId);
         if (existing) {
+          if (isHistoricalBackfill) {
+            roundHandledUid = meta.uid;
+            roundLowestHandledUid = roundLowestHandledUid == null ? meta.uid : Math.min(roundLowestHandledUid, meta.uid);
+            continue;
+          }
+
           const needsAttachmentRepair =
             attachInfo.hasAttachment &&
             (attachmentJsonLength(existing.attachments) === 0 || failedAttachmentEmailIds.has(existing.id));
           if (!needsAttachmentRepair) {
             roundHandledUid = meta.uid;
+            roundLowestHandledUid = roundLowestHandledUid == null ? meta.uid : Math.min(roundLowestHandledUid, meta.uid);
             continue;
           }
 
@@ -686,6 +727,7 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
             }).eq("id", existing.id);
           }
           roundHandledUid = meta.uid;
+          roundLowestHandledUid = roundLowestHandledUid == null ? meta.uid : Math.min(roundLowestHandledUid, meta.uid);
           continue;
         }
 
@@ -700,15 +742,18 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
         let mimeAttachmentParts: MimeAttachmentPart[] = [];
         let fullBodyFetched = false;
         try {
-          const { raw: rawBody, isFull } = await client.fetchFullBody(
-            meta.uid,
-            rfc822Size,
-            imapFullBodyReadTimeoutMs(attachInfo.hasAttachment, rfc822Size),
-            maxBytesForFetch,
-          );
-          fullBodyFetched = isFull;
+          const bodyResult = isHistoricalBackfill
+            ? { raw: "", isFull: false }
+            : await client.fetchFullBody(
+              meta.uid,
+              rfc822Size,
+              imapFullBodyReadTimeoutMs(attachInfo.hasAttachment, rfc822Size),
+              maxBytesForFetch,
+            );
+          const rawBody = bodyResult.raw;
+          fullBodyFetched = bodyResult.isFull;
           if (rawBody) {
-            if (isFull) {
+            if (bodyResult.isFull) {
               const parsed = parseFullMime(rawBody);
               bodyText = parsed.bodyText;
               bodyHtml = parsed.bodyHtml;
@@ -726,7 +771,9 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
         const initialAttachments: Record<string, unknown>[] = !fullBodyFetched && attachInfo.hasAttachment
           ? [{
             count: attachInfo.count,
-            note: "附件已检测到；仅拉取了正文摘要，附件未同步（整封超过 MAIL_SYNC_FULL_BODY_* 上限或 FETCH 超时时仅取 BODY[TEXT]）。",
+            note: isHistoricalBackfill
+              ? "历史邮件轻量同步已检测到附件；为避免批量同步超时，未拉取正文和附件。"
+              : "附件已检测到；仅拉取了正文摘要，附件未同步（整封超过 MAIL_SYNC_FULL_BODY_* 上限或 FETCH 超时时仅取 BODY[TEXT]）。",
           }]
           : [];
 
@@ -795,6 +842,7 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
         }
         roundInserted++;
         roundHandledUid = meta.uid;
+        roundLowestHandledUid = roundLowestHandledUid == null ? meta.uid : Math.min(roundLowestHandledUid, meta.uid);
       }
 
       overallInserted += roundInserted;
@@ -802,16 +850,29 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
       // 本轮进度标记
       const roundProgressUid = roundHandledUid > 0 ? roundHandledUid : roundMaxUid;
       if (roundProgressUid > progressUid) progressUid = roundProgressUid;
+      if (isHistoricalBackfill && roundLowestHandledUid != null) {
+        historyCursorUid = historyCursorUid == null
+          ? roundLowestHandledUid
+          : Math.min(historyCursorUid, roundLowestHandledUid);
+      }
+      const remainingAfterRound = isHistoricalBackfill
+        ? countHistoricalRemaining(uids, historyCursorUid)
+        : Math.max(0, uids.length - overallFetched);
 
       // 每轮结束后保存进度（确保中断时有部分进度）
-      await admin.from("mailboxes").update({
+      const updatePayload: Record<string, unknown> = {
         last_synced_at: new Date().toISOString(),
         last_error: null,
         last_uid: progressUid,
-      }).eq("id", mb.id);
+      };
+      if (isHistoricalBackfill) {
+        updatePayload.history_sync_cursor_uid = historyCursorUid;
+        updatePayload.history_sync_completed_at = remainingAfterRound === 0 ? new Date().toISOString() : null;
+      }
+      await admin.from("mailboxes").update(updatePayload).eq("id", mb.id);
 
       // 每轮触发 AI 处理
-      if (insertedEmailIds.length > 0) {
+      if (!isHistoricalBackfill && insertedEmailIds.length > 0) {
         EdgeRuntime.waitUntil(fetch(`${SUPABASE_URL}/functions/v1/process-email`, {
           method: "POST",
           headers: {
@@ -827,7 +888,7 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
       const roundDuration = Date.now() - roundStartTs;
       console.log(`[sync] round ${round + 1} done: fetched=${roundFetched} inserted=${roundInserted} duration=${roundDuration}ms`);
 
-      // 时间不足则提前退出，剩余邮件下次 cron 继续
+      // 时间不足则提前退出，剩余邮件下次手动同步继续
       if (Date.now() - startedAt > TIME_BUDGET_MS - 15000) {
         console.log("[sync] time budget nearly exhausted, stopping rounds");
         break;
@@ -836,15 +897,22 @@ async function syncOne(mb: any, admin: any, forceBulk = false): Promise<SyncResu
 
     result.fetched = overallFetched;
     result.inserted = overallInserted;
-    result.remaining = Math.max(0, uids.length - overallFetched);
+    result.remaining = isHistoricalBackfill
+      ? countHistoricalRemaining(uids, historyCursorUid)
+      : Math.max(0, uids.length - overallFetched);
     console.log("[sync] all rounds done. fetched:", overallFetched, "inserted:", overallInserted, "total:", result.total, "remaining:", result.remaining, "progressUid:", progressUid);
 
     // 最终进度更新
-    await admin.from("mailboxes").update({
+    const finalUpdatePayload: Record<string, unknown> = {
       last_synced_at: new Date().toISOString(),
       last_error: null,
       last_uid: progressUid,
-    }).eq("id", mb.id);
+    };
+    if (isHistoricalBackfill) {
+      finalUpdatePayload.history_sync_cursor_uid = historyCursorUid;
+      finalUpdatePayload.history_sync_completed_at = result.remaining === 0 ? new Date().toISOString() : null;
+    }
+    await admin.from("mailboxes").update(finalUpdatePayload).eq("id", mb.id);
   } catch (e) {
     result.error = e instanceof Error ? e.message : String(e);
     console.error("[sync error]", mb.email_address, result.error);

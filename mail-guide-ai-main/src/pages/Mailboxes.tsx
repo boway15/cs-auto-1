@@ -307,20 +307,61 @@ export default function MailboxesPage() {
     setSyncingId(id);
     let totalInserted = 0;
     let rounds = 0;
-    const MAX_ROUNDS = 20;
+    let lastRemaining = 0;
+    let workerCancelRetries = 0;
+    const MAX_ROUNDS = 50;
+    const MAX_BATCHES = 10;
+    const ROUND_DELAY_MS = 1500;
+    const BATCH_DELAY_MS = 20000;
+    const WORKER_CANCEL_RETRY_DELAY_MS = 8000;
+    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     try {
-      while (rounds < MAX_ROUNDS) {
-        rounds++;
-        const { data, error } = await supabase.functions.invoke("sync-mailbox", { body: { mailbox_id: id, force_bulk: true } });
-        if (error) { toast.error("同步失败：" + error.message); break; }
-        const r = data?.results?.[0];
-        if (r?.error) { toast.error("同步失败：" + r.error); break; }
-        if (!r) { toast.error("同步异常：未获取到结果"); break; }
-        totalInserted += r.inserted ?? 0;
-        toast.message(`第 ${rounds} 轮：新增 ${r.inserted ?? 0} 封，剩余 ${r.remaining ?? 0} 封`);
-        if (!r.remaining || r.remaining === 0) break;
+      let failed = false;
+      for (let batch = 1; batch <= MAX_BATCHES; batch++) {
+        let batchRounds = 0;
+        while (batchRounds < MAX_ROUNDS) {
+          batchRounds++;
+          rounds++;
+          const { data, error } = await supabase.functions.invoke("sync-mailbox", { body: { mailbox_id: id, force_bulk: true } });
+          if (error) {
+            const message = await getFunctionErrorMessage(error);
+            if (
+              workerCancelRetries < 2 &&
+              /WorkerRequestCancelled|request has been cancelled/i.test(message)
+            ) {
+              workerCancelRetries++;
+              batchRounds--;
+              rounds--;
+              toast.message(`同步运行时被回收，等待后自动重试 ${workerCancelRetries}/2`);
+              await wait(WORKER_CANCEL_RETRY_DELAY_MS);
+              continue;
+            }
+            toast.error("同步失败：" + message);
+            failed = true;
+            break;
+          }
+          const r = data?.results?.[0];
+          if (r?.error) { toast.error("同步失败：" + r.error); failed = true; break; }
+          if (!r) { toast.error("同步异常：未获取到结果"); failed = true; break; }
+          totalInserted += r.inserted ?? 0;
+          lastRemaining = r.remaining ?? 0;
+          toast.message(`第 ${batch} 批 / 总第 ${rounds} 轮：新增 ${r.inserted ?? 0} 封，剩余 ${lastRemaining} 封`);
+          if (!lastRemaining) break;
+          await wait(batchRounds % 10 === 0 ? WORKER_CANCEL_RETRY_DELAY_MS : ROUND_DELAY_MS);
+        }
+        if (failed || !lastRemaining) break;
+        if (batch < MAX_BATCHES) {
+          toast.message(`第 ${batch} 批完成，剩余 ${lastRemaining} 封，${Math.round(BATCH_DELAY_MS / 1000)} 秒后自动继续`);
+          await wait(BATCH_DELAY_MS);
+        }
       }
-      toast.success(`同步完成，本次共新增 ${totalInserted} 封邮件（${rounds} 轮）`);
+      if (!failed) {
+        toast.success(
+          lastRemaining > 0
+            ? `本次自动续批新增 ${totalInserted} 封，仍剩约 ${lastRemaining} 封，可再次点击继续`
+            : `同步完成，本次共新增 ${totalInserted} 封邮件（${rounds} 轮）`,
+        );
+      }
     } finally {
       setSyncingId(null);
       load();
