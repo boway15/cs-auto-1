@@ -53,6 +53,31 @@ const DEFAULT_MAX_BATCHES = 10;
 const DEFAULT_ROUND_DELAY_MS = 1500;
 const DEFAULT_BATCH_DELAY_MS = 20_000;
 const DEFAULT_WORKER_CANCEL_RETRY_DELAY_MS = 8000;
+/** 补正文/补附件连续多轮无进展则结束，避免空转（如 IMAP 找不到 UID） */
+const REPAIR_PHASE_STALL_ROUNDS = 2;
+
+export function getSyncPhaseLabel(phase: SyncMailboxPhase): string {
+  switch (phase) {
+    case "incremental":
+      return "增量";
+    case "historical":
+      return "历史";
+    case "repair_body":
+      return "补正文";
+    case "repair_attachments":
+      return "补附件";
+  }
+}
+
+export function formatSyncPhaseProgress(phase: SyncMailboxPhase, p: PhasedSyncProgress): string {
+  if (phase === "repair_body") {
+    return `已补 ${p.repaired ?? 0} 封，仍剩空正文约 ${p.emptyBodyRemaining ?? p.remaining} 封`;
+  }
+  if (phase === "repair_attachments") {
+    return `已补附件 ${p.repaired ?? 0} 封，仍剩占位约 ${p.remaining} 封`;
+  }
+  return `新增 ${p.inserted} 封，剩余 ${p.remaining} 封`;
+}
 
 export function isWorkerRequestCancelledError(message: string | null | undefined): boolean {
   return /WorkerRequestCancelled|request has been cancelled/i.test(String(message ?? ""));
@@ -212,6 +237,8 @@ export async function runPhasedMailboxSync(
   for (const phase of phases) {
     if (failed) break;
     let workerCancelRetries = 0;
+    let repairStallRounds = 0;
+    let lastRepairRemain: number | undefined;
 
     for (let batch = 1; batch <= maxBatches; batch++) {
       let rounds = 0;
@@ -275,13 +302,40 @@ export async function runPhasedMailboxSync(
             break;
           }
         } else if (phase === "repair_body") {
-          if (repaired === 0 && emptyRemain === 0) {
+          if (emptyRemain === 0) {
             phaseDone = true;
             break;
           }
-        } else if (repaired === 0 && remaining === 0) {
-          phaseDone = true;
-          break;
+          if (repaired > 0) {
+            repairStallRounds = 0;
+          } else if (lastRepairRemain === emptyRemain) {
+            repairStallRounds++;
+          } else {
+            repairStallRounds = 1;
+          }
+          lastRepairRemain = emptyRemain;
+          if (repairStallRounds >= REPAIR_PHASE_STALL_ROUNDS) {
+            phaseDone = true;
+            break;
+          }
+        } else {
+          const attRemain = remaining;
+          if (attRemain === 0) {
+            phaseDone = true;
+            break;
+          }
+          if (repaired > 0) {
+            repairStallRounds = 0;
+          } else if (lastRepairRemain === attRemain) {
+            repairStallRounds++;
+          } else {
+            repairStallRounds = 1;
+          }
+          lastRepairRemain = attRemain;
+          if (repairStallRounds >= REPAIR_PHASE_STALL_ROUNDS) {
+            phaseDone = true;
+            break;
+          }
         }
 
         await wait(rounds % 10 === 0 ? workerCancelRetryDelayMs : roundDelayMs);

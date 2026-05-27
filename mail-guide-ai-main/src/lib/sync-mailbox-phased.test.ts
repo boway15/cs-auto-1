@@ -14,6 +14,8 @@ import {
   invokeRepairSingleEmail,
   invokeRepairSingleEmailWithRetry,
   invokeSyncMailboxPhase,
+  formatSyncPhaseProgress,
+  getSyncPhaseLabel,
   runPhasedMailboxSync,
 } from "@/lib/sync-mailbox-phased";
 
@@ -186,5 +188,60 @@ describe("runPhasedMailboxSync", () => {
     expect(outcome.totalInserted).toBe(1);
     expect(outcome.totalRepaired).toBe(3);
     expect(outcome.emptyBodyRemaining).toBe(0);
+  });
+
+  it("补正文连续无进展时停止空转，不跑满 maxRounds", async () => {
+    const stalled = { repaired: 0, empty_body_remaining: 9, remaining: 9 };
+    vi.mocked(supabase.functions.invoke)
+      .mockResolvedValueOnce({
+        data: { results: [{ inserted: 0, remaining: 0 }] },
+        error: null,
+      } as never)
+      .mockResolvedValueOnce({
+        data: { results: [{ inserted: 0, remaining: 0 }] },
+        error: null,
+      } as never)
+      .mockResolvedValue({ data: { results: [stalled] }, error: null } as never);
+
+    const outcome = await runPhasedMailboxSync({
+      mailboxId: "mb-1",
+      maxBatches: 1,
+      maxRoundsPerPhase: 50,
+      roundDelayMs: 0,
+      batchDelayMs: 0,
+      wait: async () => {},
+    });
+
+    expect(outcome.failed).toBe(false);
+    expect(outcome.emptyBodyRemaining).toBe(9);
+    const repairCalls = vi.mocked(supabase.functions.invoke).mock.calls.filter(
+      (c) => (c[1] as { body?: { repair_empty_body?: boolean } })?.body?.repair_empty_body,
+    );
+    expect(repairCalls.length).toBe(2);
+  });
+
+  it("formatSyncPhaseProgress 区分补正文与补附件", () => {
+    expect(getSyncPhaseLabel("repair_attachments")).toBe("补附件");
+    expect(
+      formatSyncPhaseProgress("repair_body", {
+        phase: "repair_body",
+        batch: 1,
+        round: 1,
+        inserted: 0,
+        remaining: 9,
+        repaired: 0,
+        emptyBodyRemaining: 9,
+      }),
+    ).toContain("仍剩空正文约 9 封");
+    expect(
+      formatSyncPhaseProgress("repair_attachments", {
+        phase: "repair_attachments",
+        batch: 1,
+        round: 1,
+        inserted: 0,
+        remaining: 3,
+        repaired: 0,
+      }),
+    ).toContain("仍剩占位约 3 封");
   });
 });

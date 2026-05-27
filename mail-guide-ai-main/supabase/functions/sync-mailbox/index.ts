@@ -89,6 +89,18 @@ interface SyncResult {
   terminal?: boolean;
 }
 
+function repairSingleShell(mailbox: string, extra: Partial<SyncResult> = {}): SyncResult {
+  return {
+    mailbox,
+    fetched: 0,
+    inserted: 0,
+    total: 0,
+    remaining: 0,
+    mode: "repair_single",
+    ...extra,
+  };
+}
+
 type RepairOneOptions = {
   /** 点开轻量：优先 BODY.PEEK[TEXT]，短超时，不上传附件 */
   lightweight?: boolean;
@@ -633,6 +645,13 @@ function isBodyEmpty(
   return !String(bodyText ?? "").trim() && !String(bodyHtml ?? "").trim();
 }
 
+/** Postgres text 不允许 NUL（\u0000），否则 22P05 导致入库失败 */
+function sanitizePostgresText(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const cleaned = value.replace(/\u0000/g, "");
+  return cleaned.length > 0 ? cleaned : null;
+}
+
 function resolveUidFromSyntheticMessageId(messageId: string, mailboxId: string): number | null {
   const prefix = `${mailboxId}-`;
   if (!messageId.startsWith(prefix)) return null;
@@ -819,8 +838,8 @@ async function repairOneEmailRecord(
   if (!stillEmpty || !isBodyEmpty(stillEmpty.body_text, stillEmpty.body_html)) return "skip_not_empty";
 
   const updatePayload: Record<string, unknown> = {
-    body_text: bodyText,
-    body_html: bodyHtml,
+    body_text: sanitizePostgresText(bodyText) ?? "",
+    body_html: sanitizePostgresText(bodyHtml),
   };
   if (!opts.skipAttachments && mimeAttachmentParts.length > 0) {
     try {
@@ -1772,13 +1791,13 @@ async function syncOne(mb: any, admin: any, opts: SyncOptions = {}): Promise<Syn
         const ingestedAt = new Date().toISOString();
         const { data: insertedEmail, error: insErr } = await admin.from("emails").insert({
           mailbox_id: mb.id,
-          message_id: meta.messageId,
-          from_email: fromAddr.address ?? "unknown@unknown",
-          from_name: decodeRfc2047(fromAddr.name),
-          to_email: toAddr.address ?? mb.email_address,
-          subject,
-          body_text: bodyText,
-          body_html: bodyHtml,
+          message_id: sanitizePostgresText(meta.messageId) ?? meta.messageId,
+          from_email: sanitizePostgresText(fromAddr.address ?? "unknown@unknown") ?? "unknown@unknown",
+          from_name: sanitizePostgresText(decodeRfc2047(fromAddr.name)),
+          to_email: sanitizePostgresText(toAddr.address ?? mb.email_address) ?? mb.email_address,
+          subject: sanitizePostgresText(subject),
+          body_text: sanitizePostgresText(bodyText) ?? "",
+          body_html: sanitizePostgresText(bodyHtml),
           received_at: receivedAtFromDateHeader(messageDateHeader, ingestedAt),
           has_attachment: hasAttFlag,
           attachments: initialAttachments,
@@ -1788,8 +1807,12 @@ async function syncOne(mb: any, admin: any, opts: SyncOptions = {}): Promise<Syn
           idempotency_key: `sync:${mb.id}:${meta.messageId}`,
         }).select("id").single();
         if (insErr) {
-          console.error("[insert err]", insErr);
-          break; // 入库失败则不继续本轮
+          console.error("[insert err] uid:", meta.uid, "message_id:", meta.messageId.slice(0, 80), insErr);
+          roundHandledUid = meta.uid;
+          roundLowestHandledUid = roundLowestHandledUid == null
+            ? meta.uid
+            : Math.min(roundLowestHandledUid, meta.uid);
+          continue;
         }
         if (insertedEmail?.id) {
           insertedEmailIds.push(insertedEmail.id);
@@ -2004,7 +2027,7 @@ Deno.serve(async (req) => {
           queued: enq.enqueued,
           task_id: enq.taskId,
           terminal: enq.terminal ?? false,
-          results: [emptyResult("queued", { mode: "repair_single", queued: enq.enqueued })],
+          results: [repairSingleShell("", { mode: "repair_single", queued: enq.enqueued })],
         }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });

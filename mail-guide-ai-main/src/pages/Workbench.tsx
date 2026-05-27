@@ -50,6 +50,8 @@ import {
   enqueueAttachmentRepairForEmail,
   shouldEnqueueAttachmentRepairOnFailure,
   invokeRepairSingleEmailWithRetry,
+  formatSyncPhaseProgress,
+  getSyncPhaseLabel,
   runPhasedMailboxSync,
 } from "@/lib/sync-mailbox-phased";
 import {
@@ -89,6 +91,7 @@ import {
 import {
   displayAttachmentFilename,
   isPlaceholderAttachment,
+  placeholderAttachmentCount,
   partitionWorkbenchAttachments,
 } from "@/lib/workbench-attachments";
 import { Textarea } from "@/components/ui/textarea";
@@ -1366,13 +1369,9 @@ export default function Workbench() {
         const outcome = await runPhasedMailboxSync({
           mailboxId: mb.id,
           onProgress: (p) => {
-            const phaseLabel =
-              p.phase === "incremental" ? "增量" : p.phase === "historical" ? "历史" : "补正文";
-            const extra =
-              p.phase === "repair_body"
-                ? `已补 ${p.repaired ?? 0} 封，仍剩空正文约 ${p.emptyBodyRemaining ?? p.remaining} 封`
-                : `新增 ${p.inserted} 封，剩余 ${p.remaining} 封`;
-            toast.message(`[${label}] ${phaseLabel} 第 ${p.batch} 批 / 第 ${p.round} 轮：${extra}`);
+            toast.message(
+              `[${label}] ${getSyncPhaseLabel(p.phase)} 第 ${p.batch} 批 / 第 ${p.round} 轮：${formatSyncPhaseProgress(p.phase, p)}`,
+            );
           },
         });
         if (outcome.failed) {
@@ -2036,10 +2035,16 @@ export default function Workbench() {
                 const hasPlaceholderAttachments = fileAttachments.some(({ item }) =>
                   isPlaceholderAttachment(item),
                 );
+                const pendingAttCount = placeholderAttachmentCount(
+                  selected.attachments as Record<string, unknown>[] | undefined,
+                );
+                const attachmentTitle = hasPlaceholderAttachments && pendingAttCount > 0
+                  ? `附件（约 ${pendingAttCount} 个，待补拉）`
+                  : `附件 (${fileAttachments.length})`;
                 return (
                 <div>
                   <div className="mb-2 flex items-center justify-between gap-2">
-                    <h3 className="font-medium text-sm">附件 ({fileAttachments.length})</h3>
+                    <h3 className="font-medium text-sm">{attachmentTitle}</h3>
                     {hasPlaceholderAttachments && (
                       <Button
                         type="button"
@@ -2076,7 +2081,9 @@ export default function Workbench() {
                       const hasLink = !placeholder && Boolean(downloadOrUrl || previewOrUrl);
                       const imgSrc = isImg && previewOrUrl ? previewOrUrl : null;
                       const statusLine = placeholder
-                        ? String(a.note ?? "附件尚未从邮箱拉取，请点击「同步邮箱」完成补拉。")
+                        ? (pendingAttCount > 0
+                          ? `邮箱中约有 ${pendingAttCount} 个附件（含图片），需补拉后才能预览/下载。${String(a.note ?? "")}`
+                          : String(a.note ?? "附件尚未从邮箱拉取，请点击「补拉本邮件附件」。"))
                         : hasLink
                           ? "点击下载或预览"
                           : a.storage_path

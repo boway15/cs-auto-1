@@ -20,6 +20,18 @@ export function isPlaceholderAttachment(item: Record<string, unknown>): boolean 
   return Boolean(item.note || item.count);
 }
 
+/** 占位 JSON 里 BODYSTRUCTURE 统计的附件数量（历史轻量同步未拉二进制） */
+export function placeholderAttachmentCount(
+  attachments: Record<string, unknown>[] | null | undefined,
+): number {
+  if (!Array.isArray(attachments)) return 0;
+  return attachments.reduce((max, item) => {
+    if (!item || typeof item !== "object") return max;
+    const c = (item as Record<string, unknown>).count;
+    return typeof c === "number" && c > max ? c : max;
+  }, 0);
+}
+
 /** 邮件内嵌图（multipart/related、Outlook image001 等），应在正文区展示而非仅列在附件 */
 export function isLikelyInlineImageAttachment(
   item: Record<string, unknown>,

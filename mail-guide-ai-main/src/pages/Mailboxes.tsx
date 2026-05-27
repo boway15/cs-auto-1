@@ -11,7 +11,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, Dialog
 import { Textarea } from "@/components/ui/textarea";
 import { Plus, Trash2, Mail, RefreshCw, PlugZap, AlertTriangle, CheckCircle2, Edit3 } from "lucide-react";
 import { toast } from "sonner";
-import { runPhasedMailboxSync } from "@/lib/sync-mailbox-phased";
+import {
+  formatSyncPhaseProgress,
+  getSyncPhaseLabel,
+  runPhasedMailboxSync,
+} from "@/lib/sync-mailbox-phased";
 
 async function getFunctionErrorMessage(error: { message?: string; context?: Response } | null): Promise<string> {
   if (!error) return "未知错误";
@@ -310,13 +314,9 @@ export default function MailboxesPage() {
       const outcome = await runPhasedMailboxSync({
         mailboxId: id,
         onProgress: (p) => {
-          const phaseLabel =
-            p.phase === "incremental" ? "增量" : p.phase === "historical" ? "历史" : "补正文";
-          const extra =
-            p.phase === "repair_body"
-              ? `已补 ${p.repaired ?? 0} 封，仍剩空正文约 ${p.emptyBodyRemaining ?? p.remaining} 封`
-              : `新增 ${p.inserted} 封，剩余 ${p.remaining} 封`;
-          toast.message(`${phaseLabel} 第 ${p.batch} 批 / 第 ${p.round} 轮：${extra}`);
+          toast.message(
+            `${getSyncPhaseLabel(p.phase)} 第 ${p.batch} 批 / 第 ${p.round} 轮：${formatSyncPhaseProgress(p.phase, p)}`,
+          );
         },
       });
       if (outcome.failed) {
