@@ -30,6 +30,9 @@ verify_jwt = false
 [functions.run-email-body-repair-tasks]
 verify_jwt = false
 
+[functions.run-email-attachment-repair-tasks]
+verify_jwt = false
+
 [functions.retry-risk-intercept-compensation]
 verify_jwt = false
 

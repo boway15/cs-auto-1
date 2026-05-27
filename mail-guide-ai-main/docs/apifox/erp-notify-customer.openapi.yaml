@@ -3,6 +3,7 @@ info:
   title: 客服系统 - ERP 拦截客户通知
   description: |
     ERP 在订单拦截后调用本接口，由客服系统按场景模板向客户发送通知邮件。
+    发件邮箱由 `site_code` 在客服系统「站点邮箱关联」中解析。
 
     **本地 Docker 默认地址**：`http://localhost:8000`
 
@@ -12,7 +13,8 @@ info:
     - `baseUrl` = `http://localhost:8000`
     - `erpNotifyApiKey` = 与 `.env.functions` 中 `ERP_NOTIFY_API_KEY` 一致
     - `testToEmail` = 你的测试收件邮箱
-  version: 1.0.0
+    - `testSiteCode` = 已在管理端配置的 site_code（如 sedeta-us）
+  version: 1.1.0
 
 servers:
   - url: http://localhost:8000
@@ -31,8 +33,10 @@ paths:
         - ERP通知
       summary: 发送拦截通知邮件
       description: |
-        按 `template_code` 选择模板，将 `order_no` 填入主题/正文后 SMTP 发信。
-        相同 `idempotency_key` 且已成功发送时返回 `deduped: true`，不重复发信。
+        按 `template_code` 选择模板，将 `order_no`、`item_count`、`site_code`、`site_name`（配置表）填入主题/正文后 SMTP 发信。
+        发件邮箱由 `site_code` 解析，不按场景配置。
+        相同 `idempotency_key` 且已成功发送时返回 `deduped: true`。
+        422 失败会写发送日志但不占用幂等键。
       operationId: erpNotifyCustomer
       security:
         - ErpNotifyBearer: []
@@ -48,6 +52,8 @@ paths:
                 value:
                   template_code: risk_shopify
                   order_no: SO-TEST-20260521-001
+                  item_count: 4
+                  site_code: sedeta-us
                   to_email: customer@example.com
                   idempotency_key: risk_shopify-SO-TEST-20260521-001-evt-001
               risk_payoneer:
@@ -55,6 +61,8 @@ paths:
                 value:
                   template_code: risk_payoneer
                   order_no: SO-TEST-20260521-002
+                  item_count: 2
+                  site_code: sedeta-us
                   to_email: customer@example.com
                   idempotency_key: risk_payoneer-SO-TEST-20260521-002-evt-001
               risk_qty_ge_4:
@@ -62,6 +70,8 @@ paths:
                 value:
                   template_code: risk_qty_ge_4
                   order_no: SO-TEST-20260521-003
+                  item_count: 5
+                  site_code: sedeta-us
                   to_email: customer@example.com
                   idempotency_key: risk_qty_ge_4-SO-TEST-20260521-003-evt-001
       responses:
@@ -81,6 +91,8 @@ paths:
                     send_no: SND-20260521-A1B2C3D4
                     template_code: risk_shopify
                     order_no: SO-TEST-20260521-001
+                    item_count: 4
+                    site_code: sedeta-us
                     from_email: notify@yourbrand.com
                     to_email: customer@example.com
                     subject: Regarding your order SO-TEST-20260521-001
@@ -94,6 +106,7 @@ paths:
                     send_no: SND-20260521-A1B2C3D4
                     template_code: risk_shopify
                     order_no: SO-TEST-20260521-001
+                    site_code: sedeta-us
                     from_email: notify@yourbrand.com
                     to_email: customer@example.com
                     subject: Regarding your order SO-TEST-20260521-001
@@ -110,7 +123,7 @@ paths:
                     success: false
                     error:
                       code: INVALID_REQUEST
-                      message: 缺少必填字段
+                      message: 缺少必填字段、site_code 为空或 item_count 无效
                 invalid_template:
                   value:
                     success: false
@@ -140,26 +153,29 @@ paths:
                   code: TEMPLATE_DISABLED
                   message: 模板已停用
         '422':
-          description: 发件邮箱未配置或 SMTP 不可用
+          description: 站点未配置或发件邮箱/SMTP 不可用（写发送日志，不占用幂等键）
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErpNotifyError'
+                $ref: '#/components/schemas/ErpNotifyErrorWithLog'
               examples:
-                sender_not_configured:
+                site_not_configured:
                   value:
                     success: false
+                    send_log_id: 550e8400-e29b-41d4-a716-446655440001
+                    send_no: SND-20260521-B2C3D4E5
                     error:
-                      code: SENDER_NOT_CONFIGURED
-                      message: 该场景未配置发件邮箱
+                      code: SITE_NOT_CONFIGURED
+                      message: 站点未配置或已停用
                 smtp_missing:
                   value:
                     success: false
+                    send_log_id: 550e8400-e29b-41d4-a716-446655440002
                     error:
                       code: MAILBOX_SMTP_MISSING
                       message: 发件邮箱未配置 SMTP
         '500':
-          description: SMTP 发信失败（可能含 send_log_id）
+          description: SMTP 发信失败（含 send_log_id，占用幂等键可重试更新）
           content:
             application/json:
               schema:
@@ -187,6 +203,8 @@ components:
       required:
         - template_code
         - order_no
+        - item_count
+        - site_code
         - to_email
         - idempotency_key
       properties:
@@ -205,15 +223,24 @@ components:
           type: string
           description: 订单号，用于替换模板中的 {{order_no}}
           example: SO20240315001
+        item_count:
+          type: integer
+          minimum: 1
+          description: 订单购买总件数（正整数），用于替换模板中的 {{item_count}}
+          example: 4
+        site_code:
+          type: string
+          description: 独立站站点编码，用于解析发件邮箱；替换模板 {{site_code}}
+          example: sedeta-us
         to_email:
           type: string
           format: email
-          description: 客户收件邮箱（由 ERP 传入，客服系统不查单）
+          description: 客户收件邮箱（由 ERP 传入）
           example: customer@example.com
         idempotency_key:
           type: string
           maxLength: 128
-          description: 幂等键，建议 `{template_code}-{order_no}-{事件ID}`
+          description: 幂等键；仅成功发信占用，422 不占用
           example: risk_shopify-SO20240315001-evt-001
 
     ErpNotifySuccess:
@@ -234,6 +261,10 @@ components:
         template_code:
           type: string
         order_no:
+          type: string
+        item_count:
+          type: integer
+        site_code:
           type: string
         from_email:
           type: string
@@ -259,6 +290,26 @@ components:
             message:
               type: string
 
+    ErpNotifyErrorWithLog:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        send_log_id:
+          type: string
+          format: uuid
+        send_no:
+          type: string
+          nullable: true
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
     ErpNotifySmtpFailed:
       type: object
       properties:
@@ -268,6 +319,9 @@ components:
         send_log_id:
           type: string
           format: uuid
+        send_no:
+          type: string
+          nullable: true
         error:
           type: object
           properties:

@@ -1,4 +1,4 @@
-import { assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { parseFullMime } from "./mime-parse.ts";
 
 Deno.test("parseFullMime falls back to text/html part when structured parse is empty", () => {
@@ -60,6 +60,82 @@ Deno.test("parseFullMime treats html with name= as body not attachment (Shopify)
   assertEquals(parsed.attachments.length, 0);
   assertStringIncludes(parsed.bodyHtml ?? "", "mail-sections");
   assertStringIncludes(parsed.bodyText, "Is this desk reversible?");
+});
+
+Deno.test("parseFullMime splits multipart/related into inline images", () => {
+  const boundary = "rel1";
+  const img1 = "fake-jpeg-bytes-1";
+  const img2 = "fake-jpeg-bytes-2";
+  const raw = [
+    `Content-Type: multipart/related; boundary="${boundary}"`,
+    "",
+    `--${boundary}`,
+    "Content-Type: text/html; charset=utf-8",
+    "",
+    "<p>see <img src=\"cid:image1.jpeg\"></p>",
+    `--${boundary}`,
+    "Content-Type: image/jpeg; name=\"image1.jpeg\"",
+    "Content-Disposition: inline",
+    "Content-Transfer-Encoding: 7bit",
+    "",
+    img1,
+    `--${boundary}`,
+    "Content-Type: image/jpeg; name=\"image2.jpeg\"",
+    "Content-Disposition: inline",
+    "Content-Transfer-Encoding: 7bit",
+    "",
+    img2,
+    `--${boundary}--`,
+  ].join("\r\n");
+
+  const parsed = parseFullMime(raw);
+  assert(parsed.attachments.length >= 2);
+  const names = parsed.attachments.map((a) => a.filename);
+  assertEquals(names.some((n) => n.includes("image1")), true);
+  assertEquals(names.some((n) => n.includes("image2")), true);
+});
+
+Deno.test("parseFullMime does not treat multipart/alternative leaf as downloadable attachment", () => {
+  const raw = [
+    "Content-Type: multipart/alternative; boundary=\"b1\"",
+    "Content-Disposition: attachment",
+    "",
+    "--b1",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "I'll just accept the refund",
+    "--b1",
+    "Content-Type: text/html; charset=utf-8",
+    "",
+    "<p>I'll just accept the refund</p>",
+    "--b1--",
+  ].join("\r\n");
+
+  const parsed = parseFullMime(raw);
+  assertEquals(parsed.attachments.length, 0);
+  assertStringIncludes(parsed.bodyText, "accept the refund");
+});
+
+Deno.test("parseFullMime promotes misclassified text/html attachment to body", () => {
+  const html = "<html><body><p>Real order details here</p></body></html>";
+  const raw = [
+    "Content-Type: multipart/mixed; boundary=\"b1\"",
+    "",
+    "--b1",
+    "Content-Type: text/plain",
+    "",
+    "short plain",
+    "--b1",
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Disposition: attachment",
+    "",
+    html,
+    "--b1--",
+  ].join("\r\n");
+
+  const parsed = parseFullMime(raw);
+  assertEquals(parsed.attachments.length, 0);
+  assertStringIncludes(parsed.bodyHtml ?? "", "Real order details");
 });
 
 Deno.test("parseFullMime decodes quoted-printable body_text fragment", () => {

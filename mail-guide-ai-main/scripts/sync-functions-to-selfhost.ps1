@@ -43,4 +43,18 @@ Get-ChildItem -Path $SrcFunctions -Directory | ForEach-Object {
     Copy-Item -Path $_.FullName -Destination $dest -Recurse -Force
 }
 
-Write-Host "Done. Next: cd `"$SelfhostRoot`"; docker compose restart functions --no-deps"
+# 显式校验 TLS 证书（MAIL_TLS_CA_CERT_PATH 默认指向此文件）
+$srcCa = Join-Path $SrcFunctions "certs\mail-ca.pem"
+$dstCa = Join-Path $DstFunctions "certs\mail-ca.pem"
+if (Test-Path $srcCa) {
+    $dstCaDir = Split-Path $dstCa -Parent
+    if (-not (Test-Path $dstCaDir)) {
+        New-Item -ItemType Directory -Path $dstCaDir -Force | Out-Null
+    }
+    Copy-Item -Path $srcCa -Destination $dstCa -Force
+    Write-Host "Sync: certs/mail-ca.pem -> $dstCa"
+} else {
+    Write-Warning "Missing $srcCa — IMAP TLS will rely on bundled 163 CA only."
+}
+
+Write-Host "Done. Next: cd `"$SelfhostRoot`"; docker compose up -d --force-recreate --no-deps functions"

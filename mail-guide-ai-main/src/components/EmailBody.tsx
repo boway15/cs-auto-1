@@ -1,16 +1,11 @@
 import { cn } from "@/lib/utils";
-import { looksLikeHtmlEmailContent, normalizeEmailBodyContent } from "@/lib/email-body";
-
-/**
- * Decode HTML entities like &gt; &lt; &nbsp; &amp; to their text equivalents.
- * Uses the browser's built-in HTML parser for accurate decoding.
- */
-function decodeHtmlEntities(text: string): string {
-  if (!text) return "";
-  const txt = document.createElement("textarea");
-  txt.innerHTML = text;
-  return txt.value;
-}
+import {
+  formatPlainTextEmailForDisplay,
+  looksLikeHtmlEmailContent,
+  normalizeEmailBodyContent,
+  pickRenderableEmailBody,
+  plainTextEmailToDisplayHtml,
+} from "@/lib/email-body";
 
 // Styles injected once for email content rendering
 let styleInjected = false;
@@ -49,18 +44,52 @@ function injectEmailStyles() {
       overflow-wrap: break-word;
       word-break: break-word;
     }
+    .email-plain-main {
+      line-height: 1.55;
+    }
+    .email-plain-quote {
+      border-left: 3px solid #d1d5db;
+      margin: 0.75em 0 0;
+      padding: 0.25em 0 0.25em 1em;
+      color: #4b5563;
+      font-size: 0.95em;
+      line-height: 1.5;
+    }
+    .email-body-html .gmail_quote,
+    .email-body-html blockquote.gmail_quote {
+      border-left: 1px solid #ccc;
+      margin: 0.75em 0 0 0.8ex;
+      padding-left: 1ex;
+      color: #4b5563;
+    }
+    .email-body-html .gmail_attr {
+      color: #6b7280;
+      font-size: 0.85em;
+      margin-bottom: 0.25em;
+    }
+    .email-body-html .gmail_signature {
+      margin-top: 0.5em;
+    }
   `;
   document.head.appendChild(el);
 }
 
 interface EmailBodyProps {
-  /** Raw email body (may contain HTML or plain text with entities) */
-  content: string | null | undefined;
+  /** 单字段正文（历史用法）；与 bodyText/bodyHtml 二选一 */
+  content?: string | null | undefined;
+  bodyText?: string | null;
+  bodyHtml?: string | null;
   className?: string;
 }
 
-export function EmailBody({ content, className }: EmailBodyProps) {
-  const normalized = normalizeEmailBodyContent(content);
+export function EmailBody({ content, bodyText, bodyHtml, className }: EmailBodyProps) {
+  const normalized =
+    bodyText !== undefined || bodyHtml !== undefined
+      ? pickRenderableEmailBody(bodyText, bodyHtml)
+      : (() => {
+          const single = normalizeEmailBodyContent(content);
+          return pickRenderableEmailBody(single.text, single.html);
+        })();
 
   if (!normalized.text && !normalized.html) {
     return (
@@ -72,11 +101,7 @@ export function EmailBody({ content, className }: EmailBodyProps) {
 
   const text = normalized.text;
   const htmlToRender =
-    normalized.html && looksLikeHtmlEmailContent(normalized.html)
-      ? normalized.html
-      : looksLikeHtmlEmailContent(text)
-        ? text
-        : null;
+    normalized.html && looksLikeHtmlEmailContent(normalized.html) ? normalized.html : null;
 
   if (htmlToRender) {
     injectEmailStyles();
@@ -91,18 +116,16 @@ export function EmailBody({ content, className }: EmailBodyProps) {
     );
   }
 
-  // Plain text email — decode HTML entities (like &gt; → >, &nbsp; → space)
-  // and display with whitespace preserved
-  const decoded = decodeHtmlEntities(text);
-
+  const formatted = formatPlainTextEmailForDisplay(text);
+  const plainHtml = plainTextEmailToDisplayHtml(formatted);
+  injectEmailStyles();
   return (
     <div
       className={cn(
-        "text-sm whitespace-pre-wrap break-words overflow-hidden",
+        "email-body-html text-sm break-words overflow-hidden",
         className,
       )}
-    >
-      {decoded}
-    </div>
+      dangerouslySetInnerHTML={{ __html: plainHtml }}
+    />
   );
 }

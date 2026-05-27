@@ -202,6 +202,7 @@ const MIME_TO_EXT: Record<string, string> = {
   "audio/wav": ".wav",
   "video/mp4": ".mp4",
   "video/quicktime": ".mov",
+  "application/octet-stream": ".bin",
 };
 
 function extensionFromMime(mime: string): string {
@@ -226,6 +227,16 @@ function getBoundary(contentTypeValue: string): string | null {
   const m = unfoldHeaders(contentTypeValue).match(/boundary\s*=\s*("([^"]+)"|([^;\s]+))/i);
   if (!m) return null;
   return (m[2] ?? m[3] ?? "").trim();
+}
+
+/** 头里缺 boundary 时从正文首行 --token 推断（Outlook/Hotmail 偶发） */
+function inferBoundaryFromBody(body: string): string | null {
+  const m = body.trimStart().match(/^--([^\s\r\n;]+)/);
+  return m?.[1]?.trim() || null;
+}
+
+function resolveMultipartBoundary(contentTypeLine: string, body: string): string | null {
+  return getBoundary(contentTypeLine) ?? inferBoundaryFromBody(body);
 }
 
 function getMainMediaType(headers: string): { full: string; main: string; subtype: string } {
@@ -480,8 +491,26 @@ function inferAnonymousMultipartSubtype(subs: string[]): "alternative" | "mixed"
   return "mixed";
 }
 
+function dedupeAttachmentParts(parts: MimeAttachmentPart[]): MimeAttachmentPart[] {
+  const seen = new Set<string>();
+  const out: MimeAttachmentPart[] = [];
+  for (const p of parts) {
+    const key = `${p.filename}\0${p.bytes.length}\0${p.contentType}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out;
+}
+
+export type ParseMimePartOptions = {
+  forceAttachment?: boolean;
+  /** 仅提取附件，跳过正文解码（超大邮件附件补拉时降低 CPU） */
+  attachmentsOnly?: boolean;
+};
+
 /** Parse one MIME part (headers + body or nested fragment). */
-export function parseMimePart(part: string, options?: { forceAttachment?: boolean }): ParseMimeResult {
+export function parseMimePart(part: string, options?: ParseMimePartOptions): ParseMimeResult {
   const empty: ParseMimeResult = { bodyText: "", bodyHtml: null, attachments: [] };
   const trimmed = part.replace(/^\r?\n/, "").trimStart();
   if (!trimmed) return empty;
@@ -507,7 +536,7 @@ export function parseMimePart(part: string, options?: { forceAttachment?: boolea
   }
 
   const ctLine = unfoldHeaders(headers).match(/content-type:\s*([^\r\n]+)/i)?.[1] ?? "";
-  const boundary = getBoundary(ctLine);
+  const boundary = resolveMultipartBoundary(ctLine, body);
   const { main, full } = getMainMediaType(headers);
 
   if (main === "multipart" && boundary) {
@@ -519,10 +548,15 @@ export function parseMimePart(part: string, options?: { forceAttachment?: boolea
       const htmlParts: string[] = [];
       let atts: MimeAttachmentPart[] = [];
       for (const sub of subs) {
-        const r = parseMimePart(sub);
-        if (r.bodyText) plainParts.push(r.bodyText);
-        if (r.bodyHtml) htmlParts.push(r.bodyHtml);
+        const r = parseMimePart(sub, options);
+        if (!options?.attachmentsOnly) {
+          if (r.bodyText) plainParts.push(r.bodyText);
+          if (r.bodyHtml) htmlParts.push(r.bodyHtml);
+        }
         atts = atts.concat(r.attachments);
+      }
+      if (options?.attachmentsOnly) {
+        return { bodyText: "", bodyHtml: null, attachments: atts };
       }
       const best = pickBestAlternative(plainParts, htmlParts);
       return { bodyText: best.bodyText, bodyHtml: best.bodyHtml, attachments: atts };
@@ -534,16 +568,36 @@ export function parseMimePart(part: string, options?: { forceAttachment?: boolea
       const htmlParts: string[] = [];
       let allAtt: MimeAttachmentPart[] = [];
       for (const sub of subs) {
-        const r = parseMimePart(sub);
-        if (r.bodyText) plainParts.push(r.bodyText);
-        if (r.bodyHtml) htmlParts.push(r.bodyHtml);
+        const r = parseMimePart(sub, options);
+        if (!options?.attachmentsOnly) {
+          if (r.bodyText) plainParts.push(r.bodyText);
+          if (r.bodyHtml) htmlParts.push(r.bodyHtml);
+        }
         allAtt = allAtt.concat(r.attachments);
+        const { headers: subH, body: subB } = splitHeadersBody(sub.trim());
+        if (!subH.trim()) continue;
+        const subMeta = getMainMediaType(subH);
+        if (subMeta.main === "image" || subMeta.main === "application") {
+          const fn = extractAttachmentFilename(subH);
+          const bytes = decodeBodyToBytes(subH, subB);
+          if (bytes.length > 0 && bytes.length <= MAX_ATTACHMENT_BYTES) {
+            allAtt.push({
+              filename: safeFilename(fn, subMeta.full, allAtt.length),
+              contentType: subMeta.full,
+              bytes,
+            });
+          }
+        }
+      }
+      if (options?.attachmentsOnly) {
+        return { bodyText: "", bodyHtml: null, attachments: dedupeAttachmentParts(allAtt) };
       }
       const best = pickBestAlternative(plainParts, htmlParts);
+      const dedupedAtt = dedupeAttachmentParts(allAtt);
       return {
         bodyText: best.bodyText,
         bodyHtml: best.bodyHtml,
-        attachments: allAtt,
+        attachments: dedupedAtt,
       };
     }
 
@@ -552,10 +606,15 @@ export function parseMimePart(part: string, options?: { forceAttachment?: boolea
     let htmlParts: string[] = [];
     let atts: MimeAttachmentPart[] = [];
     for (const sub of subs) {
-      const r = parseMimePart(sub);
-      if (r.bodyText) plainParts.push(r.bodyText);
-      if (r.bodyHtml) htmlParts.push(r.bodyHtml);
+      const r = parseMimePart(sub, options);
+      if (!options?.attachmentsOnly) {
+        if (r.bodyText) plainParts.push(r.bodyText);
+        if (r.bodyHtml) htmlParts.push(r.bodyHtml);
+      }
       atts = atts.concat(r.attachments);
+    }
+    if (options?.attachmentsOnly) {
+      return { bodyText: "", bodyHtml: null, attachments: atts };
     }
     const best = pickBestAlternative(plainParts, htmlParts);
     return { bodyText: best.bodyText, bodyHtml: best.bodyHtml, attachments: atts };
@@ -566,7 +625,17 @@ export function parseMimePart(part: string, options?: { forceAttachment?: boolea
   const fn = dispFn;
   const forceAtt = options?.forceAttachment === true;
 
+  if (options?.attachmentsOnly && !forceAtt && !hasAttachmentDisposition(headers)) {
+    const { main: leafMain } = getMainMediaType(headers);
+    if (leafMain === "text" || leafMain === "multipart" || leafMain === "message") {
+      if (leafMain !== "text" || !shouldTreatTextPartAsAttachment(headers)) {
+        return empty;
+      }
+    }
+  }
+
   if (!forceAtt && isBodyTextLeaf(headers)) {
+    if (options?.attachmentsOnly) return empty;
     const { subtype } = getMainMediaType(headers);
     const text = decodeBodyToText(headers, body).trim();
     if (subtype === "html") {
@@ -597,6 +666,20 @@ export function parseMimePart(part: string, options?: { forceAttachment?: boolea
       }
       return { bodyText: text, bodyHtml: null, attachments: [] };
     }
+  }
+
+  // multipart/message 不应作为二进制附件落库（Outlook 常见误解析为 attachment-1）
+  if (main === "multipart" || main === "message") {
+    const nested = parseMimePart(`${headers}\r\n\r\n${body}`, options);
+    if (nested.bodyText.trim() || nested.bodyHtml || nested.attachments.length > 0) {
+      return nested;
+    }
+    const trimmedBody = body.trimStart();
+    const firstLine = trimmedBody.split(/\r?\n/, 1)[0] ?? "";
+    if (/^--[^\s\r\n]+/.test(firstLine)) {
+      return parseMimePart(trimmedBody, options);
+    }
+    return empty;
   }
 
   const bytes = decodeBodyToBytes(headers, body);
@@ -646,6 +729,70 @@ function fallbackBodyFromRaw(raw: string): { bodyText: string; bodyHtml: string 
   return { bodyText: payload.trim(), bodyHtml: null };
 }
 
+/** 根据魔数/内容修正类型与文件名，避免无扩展名或 HTML 误当二进制附件 */
+function refineAttachmentPartMeta(part: MimeAttachmentPart, index: number): MimeAttachmentPart | null {
+  const bytes = part.bytes;
+  if (!bytes.length) return null;
+
+  const ctMain = (part.contentType || "").split(";")[0].trim().toLowerCase();
+  let filename = part.filename?.trim() || "";
+
+  const headText = (() => {
+    try {
+      return new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, Math.min(2048, bytes.length)));
+    } catch {
+      return "";
+    }
+  })().trimStart();
+
+  if (
+    ctMain.startsWith("multipart/") ||
+    ctMain.startsWith("message/") ||
+    ctMain === "text/html" ||
+    ctMain === "text/plain" ||
+    (ctMain.startsWith("text/") && /<(?:html|head|body|div|table|p)\b/i.test(headText)) ||
+    (headText.startsWith("<") && /<(?:html|head|body|div|table|p)\b/i.test(headText))
+  ) {
+    return null;
+  }
+
+  if (bytes.length >= 4 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) {
+    return {
+      ...part,
+      contentType: "application/pdf",
+      filename: safeFilename(filename || null, "application/pdf", index),
+    };
+  }
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return {
+      ...part,
+      contentType: "image/png",
+      filename: safeFilename(filename || null, "image/png", index),
+    };
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return {
+      ...part,
+      contentType: "image/jpeg",
+      filename: safeFilename(filename || null, "image/jpeg", index),
+    };
+  }
+  if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) {
+    return {
+      ...part,
+      contentType: "application/zip",
+      filename: safeFilename(filename || null, "application/zip", index),
+    };
+  }
+
+  const refinedName = safeFilename(filename || null, part.contentType, index);
+  return {
+    ...part,
+    filename: refinedName,
+    contentType: part.contentType || "application/octet-stream",
+  };
+}
+
 function promoteMisclassifiedTextAttachments(
   bodyText: string,
   bodyHtml: string | null,
@@ -657,20 +804,21 @@ function promoteMisclassifiedTextAttachments(
 
   for (const a of attachments) {
     const ct = (a.contentType || "").split(";")[0].trim().toLowerCase();
-    if (!html && ct === "text/html" && a.bytes.length > 0 && a.bytes.length <= MAX_ATTACHMENT_BYTES) {
+    if (ct === "text/html" && a.bytes.length > 0 && a.bytes.length <= MAX_ATTACHMENT_BYTES) {
       let decoded = new TextDecoder().decode(a.bytes);
       if (looksLikeQuotedPrintable(decoded)) decoded = decodeQuotedPrintableLoose(decoded);
-      html = decoded;
+      if (!html || decoded.length > html.length) html = decoded;
       if (!text.trim()) text = htmlToText(decoded);
       continue;
     }
-    if (!text.trim() && !html && ct === "text/plain" && a.bytes.length > 0 && a.bytes.length <= MAX_ATTACHMENT_BYTES) {
+    if (ct === "text/plain" && a.bytes.length > 0 && a.bytes.length <= MAX_ATTACHMENT_BYTES) {
       let decoded = new TextDecoder().decode(a.bytes);
       if (looksLikeQuotedPrintable(decoded)) decoded = decodeQuotedPrintableLoose(decoded);
-      text = decoded;
+      if (!text.trim() || decoded.length > text.length) text = decoded;
       continue;
     }
-    kept.push(a);
+    const refined = refineAttachmentPartMeta(a, kept.length);
+    if (refined) kept.push(refined);
   }
 
   return { bodyText: text, bodyHtml: html, attachments: kept };
@@ -727,17 +875,10 @@ function finalizeParseResult(r: ParseMimeResult, raw: string): ParseMimeResult {
   return { bodyText, bodyHtml, attachments };
 }
 
-/** Top-level entry: RFC822 raw or MIME fragment → bodies + attachments (capped). */
-export function parseFullMime(raw: string): ParseMimeResult {
-  // 直接将原始内容传给 parseMimePart（包含 RFC822 头部），由其负责解析：
-  // - 单 part 邮件：RFC822 头部中的 Content-Type / Content-Transfer-Encoding 仍可被正确读取
-  // - 多 part 邮件：Content-Type: multipart/... 和 boundary 均可正确提取
-  // - 匿名 multipart（以 --boundary 开头）：parseMimePart 内已有专门处理分支
-  // 不再调用 mimePayloadOnly，避免其将 Content-Type 头剥离后导致正文变成无头纯文本、parseMimePart 返回空
-  const r = parseMimePart(raw.trimStart());
+function capAttachmentParts(parts: MimeAttachmentPart[]): MimeAttachmentPart[] {
   const attachments: MimeAttachmentPart[] = [];
-  for (let i = 0; i < r.attachments.length && attachments.length < MAX_ATTACHMENTS; i++) {
-    const a = r.attachments[i];
+  for (let i = 0; i < parts.length && attachments.length < MAX_ATTACHMENTS; i++) {
+    const a = parts[i];
     if (a.bytes.length > MAX_ATTACHMENT_BYTES) continue;
     const slot = attachments.length;
     let base = a.filename?.trim() ?? "";
@@ -748,6 +889,24 @@ export function parseFullMime(raw: string): ParseMimeResult {
       ...a,
       filename: safeFilename(base || null, a.contentType, slot),
     });
+  }
+  return attachments;
+}
+
+/** Top-level entry: RFC822 raw or MIME fragment → bodies + attachments (capped). */
+export function parseFullMime(
+  raw: string,
+  options?: { attachmentsOnly?: boolean },
+): ParseMimeResult {
+  // 直接将原始内容传给 parseMimePart（包含 RFC822 头部），由其负责解析：
+  // - 单 part 邮件：RFC822 头部中的 Content-Type / Content-Transfer-Encoding 仍可被正确读取
+  // - 多 part 邮件：Content-Type: multipart/... 和 boundary 均可正确提取
+  // - 匿名 multipart（以 --boundary 开头）：parseMimePart 内已有专门处理分支
+  // 不再调用 mimePayloadOnly，避免其将 Content-Type 头剥离后导致正文变成无头纯文本、parseMimePart 返回空
+  const r = parseMimePart(raw.trimStart(), { attachmentsOnly: options?.attachmentsOnly });
+  const attachments = capAttachmentParts(r.attachments);
+  if (options?.attachmentsOnly) {
+    return { bodyText: "", bodyHtml: null, attachments };
   }
   const finalized = finalizeParseResult(
     { bodyText: r.bodyText, bodyHtml: r.bodyHtml, attachments },

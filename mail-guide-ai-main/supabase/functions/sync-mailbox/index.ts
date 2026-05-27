@@ -26,6 +26,7 @@ import {
   recordBodyRepairEvent,
   finalizePostBodyRepair,
 } from "../_shared/email-body-repair-queue.ts";
+import { enqueueAttachmentRepairTask } from "../_shared/email-attachment-repair-queue.ts";
 import {
   buildMessageIdSearchCandidates,
   messageIdMatchesHeader,
@@ -66,6 +67,7 @@ async function connectImapTls(host: string, port: number, signal: AbortSignal): 
 interface SyncOptions {
   forceBulk?: boolean;
   repairEmptyBody?: boolean;
+  repairMissingAttachments?: boolean;
 }
 
 interface SyncResult {
@@ -76,7 +78,8 @@ interface SyncResult {
   remaining: number;
   repaired?: number;
   empty_body_remaining?: number;
-  mode?: "incremental" | "historical" | "repair_body" | "repair_single";
+  mode?: "incremental" | "historical" | "repair_body" | "repair_attachments" | "repair_single";
+  attachments_remaining?: number;
   skipped?: boolean;
   email_id?: string;
   error?: string;
@@ -96,6 +99,8 @@ type RepairOneOptions = {
 };
 
 const REPAIR_SINGLE_TIME_BUDGET_MS = 16_000;
+/** 交互式附件补拉：RFC822.SIZE 超过此值则先入队，避免单请求拉整封超大邮件 */
+const INTERACTIVE_ATTACHMENT_RFC822_MAX_BYTES = 28_000_000;
 
 type EmailRepairRow = {
   id: string;
@@ -108,6 +113,8 @@ type EmailRepairRow = {
 
 const REPAIR_BODY_BATCH = 5;
 const REPAIR_BODY_SCAN_LIMIT = 80;
+const REPAIR_ATTACH_BATCH = 5;
+const REPAIR_ATTACH_SCAN_LIMIT = 80;
 
 /**
  * 从 IMAP FETCH 响应中按 literal 声明的字节数截取正文（RFC 3501）。
@@ -442,6 +449,43 @@ function attachmentJsonLength(value: unknown): number {
   return Array.isArray(value) ? value.length : 0;
 }
 
+function isInvalidStoredAttachmentMeta(item: Record<string, unknown>): boolean {
+  const ct = String(item.contentType ?? "").split(";")[0].trim().toLowerCase();
+  if (ct.startsWith("multipart/") || ct.startsWith("message/")) return true;
+  const fn = String(item.filename ?? "").trim().toLowerCase();
+  if (/^attachment-\d+$/.test(fn) && !/\.[a-z0-9]{2,8}$/i.test(fn)) {
+    if (ct.startsWith("multipart/") || ct.startsWith("message/") || ct === "application/octet-stream") {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** emails.attachments 是否仅有占位说明、尚无有效 storage_path 可下载 */
+function attachmentsJsonNeedsBinarySync(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0) return true;
+  const hasValid = value.some((item) => {
+    if (!item || typeof item !== "object") return false;
+    const o = item as Record<string, unknown>;
+    if (isInvalidStoredAttachmentMeta(o)) return false;
+    if (typeof o.storage_path === "string" && o.storage_path.trim()) return true;
+    if (typeof o.url === "string" && o.url.trim()) return true;
+    return false;
+  });
+  return !hasValid;
+}
+
+/** 历史轻量同步占位：count 较大时通常含超大视频，交互请求不宜同步拉整封 */
+function placeholderSuggestsLargeMail(attachments: unknown): boolean {
+  if (!Array.isArray(attachments) || attachments.length === 0) return false;
+  const maxCount = attachments.reduce((max, item) => {
+    if (!item || typeof item !== "object") return max;
+    const c = (item as Record<string, unknown>).count;
+    return typeof c === "number" && c > max ? c : max;
+  }, 0);
+  return maxCount >= 5;
+}
+
 /** 上传 MIME 解析出的附件到 Storage，写 email_attachments 并返回 emails.attachments JSON 数组项 */
 async function persistEmailAttachments(
   admin: ReturnType<typeof createClient>,
@@ -453,6 +497,11 @@ async function persistEmailAttachments(
   const bucket = "email-attachments";
   for (let i = 0; i < parts.length; i++) {
     const p = parts[i];
+    const ctMain = (p.contentType || "").split(";")[0].trim().toLowerCase();
+    if (ctMain.startsWith("multipart/") || ctMain.startsWith("message/")) {
+      console.warn("[persist attachments] skip non-file part:", ctMain, p.filename);
+      continue;
+    }
     const safe = sanitizeStorageFilename(p.filename);
     const storagePath = `${mailboxId}/${emailId}/${i}_${safe}`;
     try {
@@ -594,15 +643,17 @@ function resolveUidFromSyntheticMessageId(messageId: string, mailboxId: string):
 function parseFetchedMimeBody(
   rawBody: string,
   isFull: boolean,
+  attachmentsOnly = false,
 ): { bodyText: string; bodyHtml: string | null; mimeAttachmentParts: MimeAttachmentPart[] } {
   let bodyText = "";
   let bodyHtml: string | null = null;
   let mimeAttachmentParts: MimeAttachmentPart[] = [];
   if (!rawBody) return { bodyText, bodyHtml, mimeAttachmentParts };
-  const parsed = parseFullMime(rawBody);
+  const parsed = parseFullMime(rawBody, attachmentsOnly ? { attachmentsOnly: true } : undefined);
   bodyText = parsed.bodyText;
   bodyHtml = parsed.bodyHtml;
-  mimeAttachmentParts = parsed.attachments;
+  // BODY[TEXT] 等片段 FETCH 不可信，避免把正文/HTML 误解析为可下载附件
+  mimeAttachmentParts = isFull ? parsed.attachments : [];
   if (!isFull && mimeAttachmentParts.length === 0 && isBodyEmpty(bodyText, bodyHtml)) {
     bodyText = extractTextFromMime(rawBody);
   }
@@ -837,7 +888,7 @@ async function repairEmailById(
 
   const { data: row, error: qErr } = await admin
     .from("emails")
-    .select("id, message_id, body_text, body_html, has_attachment, mailbox_id, received_at")
+    .select("id, message_id, body_text, body_html, has_attachment, mailbox_id, received_at, attachments")
     .eq("id", emailId)
     .maybeSingle();
   if (qErr) return emptyResult("", { error: qErr.message });
@@ -850,10 +901,6 @@ async function repairEmailById(
     .maybeSingle();
   if (mbErr || !mb) return emptyResult("", { error: mbErr?.message ?? "邮箱不存在" });
 
-  if (!isBodyEmpty(row.body_text, row.body_html)) {
-    return emptyResult(mb.email_address, { skipped: true, repaired: 0 });
-  }
-
   const maxBytesNoAttach = parseEnvPositiveInt(
     "MAIL_SYNC_FULL_BODY_MAX_BYTES",
     DEFAULT_FULL_BODY_MAX_BYTES,
@@ -864,6 +911,89 @@ async function repairEmailById(
   );
 
   const overBudget = () => Date.now() - startedAt >= REPAIR_SINGLE_TIME_BUDGET_MS;
+
+  if (!isBodyEmpty(row.body_text, row.body_html)) {
+    if (row.has_attachment && attachmentsJsonNeedsBinarySync(row.attachments)) {
+      if (placeholderSuggestsLargeMail(row.attachments)) {
+        const enq = await enqueueAttachmentRepairTask(
+          admin,
+          emailId,
+          "interactive_large_placeholder_attachment",
+          "interactive",
+        );
+        return emptyResult(mb.email_address, {
+          repaired: 0,
+          queued: enq.enqueued,
+          queue_reason: "large_placeholder_attachment",
+          terminal: enq.terminal ?? !enq.enqueued,
+          error: enq.enqueued ? undefined : "超大附件已入队，请稍后刷新",
+        });
+      }
+
+      const prequeue = await enqueueAttachmentRepairTask(
+        admin,
+        emailId,
+        "interactive_attachment_repair_prequeued",
+        "interactive",
+      );
+
+      let client: ImapClient | null = null;
+      try {
+        if (overBudget()) {
+          return emptyResult(mb.email_address, {
+            repaired: 0,
+            queued: prequeue.enqueued,
+            queue_reason: "interactive_attachment_budget_before_connect",
+          });
+        }
+        client = await connectImapClient(mb, { connectTimeoutMs: 6_000, attempts: 1 });
+        if (overBudget()) {
+          return emptyResult(mb.email_address, {
+            repaired: 0,
+            queued: prequeue.enqueued,
+            queue_reason: "interactive_attachment_budget_after_connect",
+          });
+        }
+        const attStatus = await repairAttachmentsForRecord(
+          client,
+          admin,
+          mb,
+          row as EmailAttachmentRepairRow,
+          maxBytesNoAttach,
+          maxBytesWithAttach,
+          { interactive: true, rfc822MaxBytes: INTERACTIVE_ATTACHMENT_RFC822_MAX_BYTES },
+        );
+        if (attStatus === "repaired") {
+          return emptyResult(mb.email_address, { repaired: 1, fetched: 1, total: 1 });
+        }
+        if (attStatus === "queued_large") {
+          return emptyResult(mb.email_address, {
+            repaired: 0,
+            queued: prequeue.enqueued,
+            queue_reason: "rfc822_size_exceeds_interactive_limit",
+          });
+        }
+        return emptyResult(mb.email_address, {
+          repaired: 0,
+          queued: prequeue.enqueued,
+          error: attStatus === "skip_no_uid" ? "无法在邮箱中定位该邮件" : "附件补拉未完成",
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (isWorkerCancelledError(e) || overBudget() || /timeout/i.test(msg)) {
+          return emptyResult(mb.email_address, {
+            repaired: 0,
+            queued: prequeue.enqueued,
+            queue_reason: isWorkerCancelledError(e) ? "worker_request_cancelled" : msg.slice(0, 200),
+          });
+        }
+        return emptyResult(mb.email_address, { repaired: 0, error: msg, queued: prequeue.enqueued });
+      } finally {
+        if (client) await client.logout();
+      }
+    }
+    return emptyResult(mb.email_address, { skipped: true, repaired: 0 });
+  }
 
   const enqueueAndReturn = async (reason: string) => {
     const { enqueued, terminal } = await enqueueBodyRepairTask(admin, emailId, reason, "interactive");
@@ -962,7 +1092,7 @@ async function repairEmailByIdFull(
 
   const { data: row, error: qErr } = await admin
     .from("emails")
-    .select("id, message_id, body_text, body_html, has_attachment, mailbox_id, received_at")
+    .select("id, message_id, body_text, body_html, has_attachment, mailbox_id, received_at, attachments")
     .eq("id", emailId)
     .maybeSingle();
   if (qErr) return emptyResult("", { error: qErr.message });
@@ -975,14 +1105,6 @@ async function repairEmailByIdFull(
     .maybeSingle();
   if (mbErr || !mb) return emptyResult("", { error: mbErr?.message ?? "邮箱不存在" });
 
-  if (!isBodyEmpty(row.body_text, row.body_html)) {
-    const post = await finalizePostBodyRepair(admin, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, emailId);
-    return {
-      ...emptyResult(mb.email_address, { skipped: true, repaired: 0 }),
-      post_processed: post.ok,
-    };
-  }
-
   const maxBytesNoAttach = parseEnvPositiveInt(
     "MAIL_SYNC_FULL_BODY_MAX_BYTES",
     DEFAULT_FULL_BODY_MAX_BYTES,
@@ -991,6 +1113,40 @@ async function repairEmailByIdFull(
     "MAIL_SYNC_FULL_BODY_WITH_ATTACH_MAX_BYTES",
     DEFAULT_FULL_BODY_WITH_ATTACH_MAX_BYTES,
   );
+
+  const needsAtt = attachmentsJsonNeedsBinarySync(row.attachments);
+
+  if (!isBodyEmpty(row.body_text, row.body_html)) {
+    if (needsAtt && row.has_attachment) {
+      let client: ImapClient | null = null;
+      try {
+        client = await connectImapClient(mb, { connectTimeoutMs: 4_000, attempts: 1 });
+        const attStatus = await repairAttachmentsForRecord(
+          client,
+          admin,
+          mb,
+          row as EmailAttachmentRepairRow,
+          maxBytesNoAttach,
+          maxBytesWithAttach,
+        );
+        if (attStatus === "repaired") {
+          return {
+            ...emptyResult(mb.email_address, { repaired: 1, fetched: 1, total: 1 }),
+            post_processed: false,
+          };
+        }
+      } catch (attErr) {
+        console.error("[repair full] attachment-only", emailId, attErr);
+      } finally {
+        if (client) await client.logout();
+      }
+    }
+    const post = await finalizePostBodyRepair(admin, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, emailId);
+    return {
+      ...emptyResult(mb.email_address, { skipped: true, repaired: 0 }),
+      post_processed: post.ok,
+    };
+  }
 
   let client: ImapClient | null = null;
   try {
@@ -1126,10 +1282,228 @@ async function repairEmptyBodies(mb: any, admin: ReturnType<typeof createClient>
   return result;
 }
 
+type EmailAttachmentRepairRow = {
+  id: string;
+  message_id: string | null;
+  received_at: string | null;
+  attachments: unknown;
+  has_attachment: boolean | null;
+};
+
+/** 为已入库但 attachments 仅为占位的邮件从 IMAP 补拉附件二进制 */
+type RepairAttachmentsOptions = {
+  interactive?: boolean;
+  rfc822MaxBytes?: number;
+};
+
+async function repairAttachmentsForRecord(
+  client: ImapClient,
+  admin: ReturnType<typeof createClient>,
+  mb: { id: string },
+  row: EmailAttachmentRepairRow,
+  maxBytesNoAttach: number,
+  maxBytesWithAttach: number,
+  opts: RepairAttachmentsOptions = {},
+): Promise<"repaired" | "still_missing" | "skip_no_uid" | "queued_large"> {
+  const messageId = String(row.message_id ?? "").trim();
+  if (!messageId) return "skip_no_uid";
+
+  const uid = await resolveImapUidForEmail(
+    client,
+    messageId,
+    String(mb.id),
+    row.received_at ?? null,
+    { allowDateWindowFallback: true },
+  );
+  if (uid == null) {
+    console.log("[repair-att] no IMAP uid for message_id:", messageId.slice(0, 120));
+    return "skip_no_uid";
+  }
+
+  const metaRaw = await client.fetchMetadata(uid);
+  const rfc822SizeMatch = metaRaw.match(/RFC822\.SIZE\s+(\d+)/i);
+  const rfc822Size = rfc822SizeMatch ? parseInt(rfc822SizeMatch[1], 10) || 0 : 0;
+  const attachInfo = detectAttachments(metaRaw);
+  const maxBytesForFetch = attachInfo.hasAttachment ? maxBytesWithAttach : maxBytesNoAttach;
+
+  if (
+    opts.interactive &&
+    opts.rfc822MaxBytes != null &&
+    rfc822Size > opts.rfc822MaxBytes
+  ) {
+    console.log(
+      "[repair-att] interactive skip large rfc822:",
+      rfc822Size,
+      "email_id:",
+      row.id,
+    );
+    return "queued_large";
+  }
+
+  const bodyResult = await client.fetchFullBody(
+    uid,
+    rfc822Size,
+    imapFullBodyReadTimeoutMs(attachInfo.hasAttachment, rfc822Size),
+    maxBytesForFetch,
+  );
+  const parsed = parseFetchedMimeBody(bodyResult.raw, bodyResult.isFull, true);
+
+  if (!bodyResult.isFull) {
+    await admin.from("emails").update({
+      attachments: [{
+        count: attachInfo.count,
+        note: "附件补拉时仅取得正文摘要，整封超过 MAIL_SYNC_FULL_BODY_* 上限或 FETCH 超时，附件仍未同步。",
+      }] as unknown,
+      has_attachment: true,
+    }).eq("id", row.id);
+    return "still_missing";
+  }
+
+  if (!parsed.mimeAttachmentParts.length) {
+    if (attachInfo.hasAttachment) {
+      await admin.from("emails").update({
+        attachments: [{
+          count: attachInfo.count,
+          note: "IMAP 已标记附件，但补拉时未从 MIME 中解析出二进制。",
+        }] as unknown,
+        has_attachment: true,
+      }).eq("id", row.id);
+    }
+    return "still_missing";
+  }
+
+  try {
+    await admin.from("email_attachments").delete().eq("email_id", row.id);
+    const attJson = await persistEmailAttachments(
+      admin,
+      String(mb.id),
+      String(row.id),
+      parsed.mimeAttachmentParts,
+    );
+    await admin.from("emails").update({
+      attachments: attJson as unknown,
+      has_attachment: attJson.length > 0 || attachInfo.hasAttachment,
+    }).eq("id", row.id);
+    return "repaired";
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[repair-att]", row.id, e);
+    await admin.from("emails").update({
+      attachments: [{
+        note: "附件补拉失败，请检查 Edge 日志与 Storage 策略。",
+        error: msg.slice(0, 500),
+      }] as unknown,
+      has_attachment: true,
+    }).eq("id", row.id);
+    return "still_missing";
+  }
+}
+
+async function countPlaceholderAttachmentEmails(
+  admin: ReturnType<typeof createClient>,
+  mailboxId: string,
+): Promise<number> {
+  const sinceDate = new Date();
+  sinceDate.setDate(sinceDate.getDate() - 30);
+  const { data, error } = await admin
+    .from("emails")
+    .select("attachments")
+    .eq("mailbox_id", mailboxId)
+    .eq("has_attachment", true)
+    .gte("received_at", sinceDate.toISOString())
+    .limit(500);
+  if (error) {
+    console.warn("[repair-att] count failed:", error.message);
+    return 0;
+  }
+  return (data ?? []).filter((row) => attachmentsJsonNeedsBinarySync(row.attachments)).length;
+}
+
+/** 小批量为占位附件邮件补拉 MIME 附件 */
+async function repairMissingAttachments(mb: any, admin: ReturnType<typeof createClient>): Promise<SyncResult> {
+  const result: SyncResult = {
+    mailbox: mb.email_address,
+    fetched: 0,
+    inserted: 0,
+    total: 0,
+    remaining: 0,
+    repaired: 0,
+    mode: "repair_attachments",
+  };
+  const startedAt = Date.now();
+  const TIME_BUDGET_MS = 40_000;
+  let client: ImapClient | null = null;
+
+  try {
+    client = await connectImapClient(mb);
+    const sinceDate = new Date();
+    sinceDate.setDate(sinceDate.getDate() - 30);
+    const { data: candidates, error: qErr } = await admin
+      .from("emails")
+      .select("id, message_id, has_attachment, received_at, attachments")
+      .eq("mailbox_id", mb.id)
+      .eq("has_attachment", true)
+      .gte("received_at", sinceDate.toISOString())
+      .order("received_at", { ascending: false })
+      .limit(REPAIR_ATTACH_SCAN_LIMIT);
+    if (qErr) throw qErr;
+
+    const toRepair = (candidates ?? []).filter((row) =>
+      attachmentsJsonNeedsBinarySync(row.attachments)
+    ).slice(0, REPAIR_ATTACH_BATCH);
+    result.total = toRepair.length;
+    result.fetched = toRepair.length;
+
+    const maxBytesNoAttach = parseEnvPositiveInt(
+      "MAIL_SYNC_FULL_BODY_MAX_BYTES",
+      DEFAULT_FULL_BODY_MAX_BYTES,
+    );
+    const maxBytesWithAttach = parseEnvPositiveInt(
+      "MAIL_SYNC_FULL_BODY_WITH_ATTACH_MAX_BYTES",
+      DEFAULT_FULL_BODY_WITH_ATTACH_MAX_BYTES,
+    );
+
+    for (const row of toRepair) {
+      if (Date.now() - startedAt > TIME_BUDGET_MS - 8000) {
+        console.log("[repair-att] time budget low, stopping");
+        break;
+      }
+      try {
+        const status = await repairAttachmentsForRecord(
+          client,
+          admin,
+          mb,
+          row as EmailAttachmentRepairRow,
+          maxBytesNoAttach,
+          maxBytesWithAttach,
+        );
+        if (status === "repaired") result.repaired = (result.repaired ?? 0) + 1;
+      } catch (perErr) {
+        console.error("[repair-att] email_id", row.id, perErr);
+      }
+    }
+
+    const remaining = await countPlaceholderAttachmentEmails(admin, String(mb.id));
+    result.attachments_remaining = remaining;
+    result.remaining = remaining;
+    console.log("[repair-att] done repaired:", result.repaired, "remaining:", remaining);
+  } catch (e) {
+    result.error = e instanceof Error ? e.message : String(e);
+    console.error("[repair-att error]", mb.email_address, result.error);
+    await admin.from("mailboxes").update({ last_error: result.error }).eq("id", mb.id);
+  } finally {
+    if (client) await client.logout();
+  }
+  return result;
+}
+
 // ============ 同步逻辑 ============
 async function syncOne(mb: any, admin: any, opts: SyncOptions = {}): Promise<SyncResult> {
   if (opts.repairEmptyBody) {
     return repairEmptyBodies(mb, admin);
+  }
+  if (opts.repairMissingAttachments) {
+    return repairMissingAttachments(mb, admin);
   }
 
   const forceBulk = opts.forceBulk === true;
@@ -1291,15 +1665,17 @@ async function syncOne(mb: any, admin: any, opts: SyncOptions = {}): Promise<Syn
 
         const existing = existingByMessageId.get(meta.messageId);
         if (existing) {
-          if (isHistoricalBackfill) {
+          const needsAttachmentRepair =
+            attachInfo.hasAttachment &&
+            (attachmentsJsonNeedsBinarySync(existing.attachments) ||
+              failedAttachmentEmailIds.has(existing.id));
+          // 历史轻量同步：已存在且非占位附件则跳过；占位附件仍尝试补拉
+          if (isHistoricalBackfill && !needsAttachmentRepair) {
             roundHandledUid = meta.uid;
             roundLowestHandledUid = roundLowestHandledUid == null ? meta.uid : Math.min(roundLowestHandledUid, meta.uid);
             continue;
           }
 
-          const needsAttachmentRepair =
-            attachInfo.hasAttachment &&
-            (attachmentJsonLength(existing.attachments) === 0 || failedAttachmentEmailIds.has(existing.id));
           if (!needsAttachmentRepair) {
             roundHandledUid = meta.uid;
             roundLowestHandledUid = roundLowestHandledUid == null ? meta.uid : Math.min(roundLowestHandledUid, meta.uid);
@@ -1587,6 +1963,7 @@ Deno.serve(async (req) => {
     let repairEmailId: string | undefined;
     let repairFull = false;
     let repairTaskId: string | undefined;
+    let queueAttachmentRepair = false;
     const syncOpts: SyncOptions = {};
     if (req.method === "POST") {
       try {
@@ -1594,11 +1971,13 @@ Deno.serve(async (req) => {
         mailboxId = body?.mailbox_id;
         syncOpts.forceBulk = body?.force_bulk === true;
         syncOpts.repairEmptyBody = body?.repair_empty_body === true;
+        syncOpts.repairMissingAttachments = body?.repair_missing_attachments === true;
         repairEmailId = typeof body?.repair_email_id === "string"
           ? body.repair_email_id.trim()
           : undefined;
         repairFull = body?.repair_full === true;
         repairTaskId = typeof body?.repair_task_id === "string" ? body.repair_task_id.trim() : undefined;
+        queueAttachmentRepair = body?.queue_attachment_repair === true;
       } catch { /* ignore */ }
     }
 
@@ -1611,6 +1990,22 @@ Deno.serve(async (req) => {
       if (repairFull && !isWorkerCall) {
         return new Response(JSON.stringify({ error: "repair_full 仅允许服务角色" }), {
           status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      if (queueAttachmentRepair) {
+        const enq = await enqueueAttachmentRepairTask(
+          admin,
+          repairEmailId,
+          "interactive_attachment_repair_queue",
+          "interactive",
+        );
+        return new Response(JSON.stringify({
+          queued: enq.enqueued,
+          task_id: enq.taskId,
+          terminal: enq.terminal ?? false,
+          results: [emptyResult("queued", { mode: "repair_single", queued: enq.enqueued })],
+        }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }

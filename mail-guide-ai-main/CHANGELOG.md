@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.3.0] - 2026-05-27
+
+### Features
+
+- **ERP 拦截通知按站点发信**：新增 `erp_site_mailboxes`；`erp-notify-customer` 必填 `site_code`，发件邮箱由站点配置解析；模板变量扩展 `{{site_code}}`、`{{site_name}}`；422 写入发送日志且不占用幂等键。
+- **超大附件补拉队列**：`email_attachment_repair_tasks` + `run-email-attachment-repair-tasks`；工作台/同步可触发；自建 cron 经 Kong 调度。
+- **邮件正文与 MIME**：增强 `mime-parse`、`email-body` 与 `sync-mailbox` 附件处理；工作台附件展示与下载（`workbench-attachments`）。
+- **管理端**：迅捷回邮模板页支持站点邮箱关联；发送日志展示 ERP 站点信息；模板/工作台体验优化。
+
+### Database
+
+- `20260527143000_email_attachment_repair_tasks.sql`
+- `20260527143100_cron_email_attachment_repair_tasks.sql`
+- `20260527143200_selfhost_cron_repair_tasks_kong.sql`（正文/附件补拉 cron 改 Kong）
+- `20260527200000_erp_site_mailboxes.sql`
+
+### Documentation
+
+- 更新 `erp-notify-customer-api.md` 与 Apifox 导出（`site_code`、422 幂等说明）。
+
 ## [1.0.1] - 2026-05-20
 
 ### Features

@@ -1,13 +1,14 @@
 {
   "info": {
     "name": "ERP拦截客户通知",
-    "description": "导入 Apifox：项目设置 → 导入 → Postman。环境变量 baseUrl、erpNotifyApiKey、testToEmail。",
+    "description": "导入 Apifox：项目设置 → 导入 → Postman。环境变量 baseUrl、erpNotifyApiKey、testToEmail、testSiteCode。",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     { "key": "baseUrl", "value": "http://localhost:8000" },
     { "key": "erpNotifyApiKey", "value": "请填写.env.functions中的ERP_NOTIFY_API_KEY" },
-    { "key": "testToEmail", "value": "your-test@example.com" }
+    { "key": "testToEmail", "value": "your-test@example.com" },
+    { "key": "testSiteCode", "value": "sedeta-us" }
   ],
   "auth": {
     "type": "bearer",
@@ -21,7 +22,7 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"template_code\": \"risk_shopify\",\n  \"order_no\": \"SO-TEST-001\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"risk_shopify-SO-TEST-001-{{$timestamp}}\"\n}"
+          "raw": "{\n  \"template_code\": \"risk_shopify\",\n  \"order_no\": \"SO-TEST-001\",\n  \"item_count\": 4,\n  \"site_code\": \"{{testSiteCode}}\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"risk_shopify-SO-TEST-001-{{$timestamp}}\"\n}"
         },
         "url": "{{baseUrl}}/functions/v1/erp-notify-customer"
       }
@@ -33,7 +34,7 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"template_code\": \"risk_payoneer\",\n  \"order_no\": \"SO-TEST-002\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"risk_payoneer-SO-TEST-002-{{$timestamp}}\"\n}"
+          "raw": "{\n  \"template_code\": \"risk_payoneer\",\n  \"order_no\": \"SO-TEST-002\",\n  \"item_count\": 2,\n  \"site_code\": \"{{testSiteCode}}\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"risk_payoneer-SO-TEST-002-{{$timestamp}}\"\n}"
         },
         "url": "{{baseUrl}}/functions/v1/erp-notify-customer"
       }
@@ -45,7 +46,19 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"template_code\": \"risk_qty_ge_4\",\n  \"order_no\": \"SO-TEST-003\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"risk_qty_ge_4-SO-TEST-003-{{$timestamp}}\"\n}"
+          "raw": "{\n  \"template_code\": \"risk_qty_ge_4\",\n  \"order_no\": \"SO-TEST-003\",\n  \"item_count\": 5,\n  \"site_code\": \"{{testSiteCode}}\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"risk_qty_ge_4-SO-TEST-003-{{$timestamp}}\"\n}"
+        },
+        "url": "{{baseUrl}}/functions/v1/erp-notify-customer"
+      }
+    },
+    {
+      "name": "站点未配置（应422）",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"template_code\": \"risk_shopify\",\n  \"order_no\": \"SO-TEST-422\",\n  \"item_count\": 1,\n  \"site_code\": \"unknown-site-not-in-config\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"risk_shopify-SO-TEST-422-fixed\"\n}"
         },
         "url": "{{baseUrl}}/functions/v1/erp-notify-customer"
       }
@@ -61,7 +74,7 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"template_code\": \"risk_shopify\",\n  \"order_no\": \"SO-TEST-001\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"test-401\"\n}"
+          "raw": "{\n  \"template_code\": \"risk_shopify\",\n  \"order_no\": \"SO-TEST-001\",\n  \"item_count\": 4,\n  \"site_code\": \"{{testSiteCode}}\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"test-401\"\n}"
         },
         "url": "{{baseUrl}}/functions/v1/erp-notify-customer"
       }
@@ -73,7 +86,7 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"template_code\": \"risk_shopify\",\n  \"order_no\": \"SO-TEST-IDEM\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"risk_shopify-SO-TEST-IDEM-fixed\"\n}"
+          "raw": "{\n  \"template_code\": \"risk_shopify\",\n  \"order_no\": \"SO-TEST-IDEM\",\n  \"item_count\": 4,\n  \"site_code\": \"{{testSiteCode}}\",\n  \"to_email\": \"{{testToEmail}}\",\n  \"idempotency_key\": \"risk_shopify-SO-TEST-IDEM-fixed\"\n}"
         },
         "url": "{{baseUrl}}/functions/v1/erp-notify-customer"
       }

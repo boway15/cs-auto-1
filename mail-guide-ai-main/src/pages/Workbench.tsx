@@ -46,7 +46,12 @@ import { supabase } from "@/lib/supabase";
 import { fetchAccessibleMailboxes } from "@/lib/accessible-mailboxes";
 import { invokeGetOrderByEmail } from "@/lib/invoke-get-order-by-email";
 import { formatFunctionsInvokeError, formatInvokeBodyField } from "@/lib/format-functions-invoke-error";
-import { runPhasedMailboxSync } from "@/lib/sync-mailbox-phased";
+import {
+  enqueueAttachmentRepairForEmail,
+  shouldEnqueueAttachmentRepairOnFailure,
+  invokeRepairSingleEmailWithRetry,
+  runPhasedMailboxSync,
+} from "@/lib/sync-mailbox-phased";
 import {
   BODY_REPAIR_COOLDOWN_MS,
   deriveBodyRepairUiStatusFromTask,
@@ -55,7 +60,6 @@ import {
   invokeProcessEmailAfterBodyRepair,
   invokeRepairEmailBody,
   isEmailBodyEmpty,
-  normalizeEmailBodyForDisplay,
   type BodyRepairUiStatus,
 } from "@/lib/email-body";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -82,6 +86,11 @@ import {
   workbenchListDaysLabel,
   type WorkbenchListFilters,
 } from "@/lib/workbench-email-list";
+import {
+  displayAttachmentFilename,
+  isPlaceholderAttachment,
+  partitionWorkbenchAttachments,
+} from "@/lib/workbench-attachments";
 import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -129,6 +138,7 @@ import { useAuth } from "@/hooks/useAuth";
 type Email = any;
 type Order = any;
 type Draft = any;
+const ATTACHMENT_REPAIR_COOLDOWN_MS = 6 * 60 * 1000;
 
 /** 用于邮箱筛选：兼容 `Name <a@b.com>` 与纯地址 */
 function normalizeEmailAddress(s: string | null | undefined): string {
@@ -179,6 +189,8 @@ export default function Workbench() {
   const [refreshingEmailDetail, setRefreshingEmailDetail] = useState(false);
   const bodyRepairInFlightRef = useRef<string | null>(null);
   const bodyRepairCooldownUntilRef = useRef<Map<string, number>>(new Map());
+  const attachmentRepairInFlightRef = useRef<string | null>(null);
+  const attachmentRepairCooldownUntilRef = useRef<Map<string, number>>(new Map());
   const repairEmailBodyIfNeededRef = useRef<(emailId: string, force?: boolean) => void>(() => {});
   const missingAnalysisInFlightRef = useRef<string | null>(null);
   const [bodyRepairTaskHint, setBodyRepairTaskHint] = useState<string | null>(null);
@@ -229,8 +241,11 @@ export default function Workbench() {
   const [sending, setSending] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
-  /** 私有桶 email-attachments：按 storage_path 生成的短期签名 URL（索引 → url） */
-  const [attachmentSignedUrls, setAttachmentSignedUrls] = useState<Record<number, string>>({});
+  /** 私有桶 email-attachments：正文预览与下载链接分离，避免图片被 download 策略拦截预览 */
+  const [attachmentPreviewUrls, setAttachmentPreviewUrls] = useState<Record<number, string>>({});
+  const [attachmentDownloadUrls, setAttachmentDownloadUrls] = useState<Record<number, string>>({});
+  const [repairingSelectedAttachments, setRepairingSelectedAttachments] = useState(false);
+  const [autoRepairingAttachmentEmailId, setAutoRepairingAttachmentEmailId] = useState<string | null>(null);
 
   /** 订单补偿任务状态（用于 compensating ↔ not_found 展示） */
   const [compensationByEmailId, setCompensationByEmailId] = useState<
@@ -543,6 +558,90 @@ export default function Workbench() {
     [selectedId, selectedEmailDetail, emails, loadDetail],
   );
 
+  const repairSelectedEmailAttachments = useCallback(async (opts?: {
+    emailId?: string;
+    silent?: boolean;
+    force?: boolean;
+    autoTriggered?: boolean;
+  }) => {
+    const emailId = opts?.emailId ?? selected?.id;
+    if (!emailId) return false;
+    if (attachmentRepairInFlightRef.current === emailId) return false;
+    const cooldownUntil = attachmentRepairCooldownUntilRef.current.get(emailId) ?? 0;
+    if (!opts?.force && Date.now() < cooldownUntil) return false;
+
+    attachmentRepairInFlightRef.current = emailId;
+    attachmentRepairCooldownUntilRef.current.set(emailId, Date.now() + ATTACHMENT_REPAIR_COOLDOWN_MS);
+    if (selected?.id === emailId) setRepairingSelectedAttachments(true);
+    if (opts?.autoTriggered && selected?.id === emailId) setAutoRepairingAttachmentEmailId(emailId);
+    try {
+      const { row, errorMessage, retries } = await invokeRepairSingleEmailWithRetry({
+        emailId,
+        maxRetries: 4,
+        retryDelayMs: 12_000,
+      });
+      if (errorMessage) {
+        if (shouldEnqueueAttachmentRepairOnFailure(errorMessage)) {
+          const queued = await enqueueAttachmentRepairForEmail(emailId);
+          if (!opts?.silent) {
+            if (queued.queued) {
+              toast.message("已加入后台附件补拉队列", {
+                description:
+                  "检测到超大附件同步超时，系统将由后台任务持续重试；可稍后刷新本邮件查看附件状态。",
+              });
+            } else {
+              toast.message("补拉任务超时", {
+                description:
+                  queued.errorMessage ||
+                  "该邮件可能包含超大附件（如 30MB+ 视频），Edge Worker 已到时限。建议先在官方邮箱下载超大文件。",
+              });
+            }
+          }
+        } else if (!opts?.silent) {
+          toast.error("补拉附件失败", { description: errorMessage });
+        }
+        return false;
+      }
+      if (row?.queued && !row?.repaired) {
+        if (!opts?.silent) {
+          toast.message("已加入后台附件补拉队列", {
+            description: "该邮件附件较大，将由后台任务补拉；请稍后刷新查看。",
+          });
+        }
+        return true;
+      }
+      await refreshSelectedEmail({ silent: true });
+      if (!opts?.silent) {
+        toast.message("已触发本邮件补拉", {
+          description:
+            row?.repaired && row.repaired > 0
+              ? `已修复 ${row.repaired} 项附件/正文。${retries > 0 ? `（自动重试 ${retries} 次）` : ""}`
+              : "邮件正文与附件已刷新，请查看附件区状态。",
+        });
+      }
+      return true;
+    } finally {
+      if (attachmentRepairInFlightRef.current === emailId) {
+        attachmentRepairInFlightRef.current = null;
+      }
+      if (selected?.id === emailId) setRepairingSelectedAttachments(false);
+      if (selected?.id === emailId) setAutoRepairingAttachmentEmailId(null);
+    }
+  }, [selected?.id, refreshSelectedEmail]);
+
+  useEffect(() => {
+    if (!selected?.id || !Array.isArray(selected.attachments) || selected.attachments.length === 0) return;
+    const hasPlaceholder = (selected.attachments as Record<string, unknown>[]).some((item) =>
+      isPlaceholderAttachment(item),
+    );
+    if (!hasPlaceholder) return;
+    void repairSelectedEmailAttachments({
+      emailId: selected.id,
+      silent: true,
+      autoTriggered: true,
+    });
+  }, [selected?.id, selected?.attachments, repairSelectedEmailAttachments]);
+
   const repairEmailBodyIfNeeded = useCallback(async (emailId: string, force = false) => {
     if (bodyRepairInFlightRef.current === emailId) return;
     const cooldownUntil = bodyRepairCooldownUntilRef.current.get(emailId) ?? 0;
@@ -749,35 +848,59 @@ export default function Workbench() {
 
   useEffect(() => {
     if (!selected?.attachments || !Array.isArray(selected.attachments)) {
-      setAttachmentSignedUrls({});
+      setAttachmentPreviewUrls({});
+      setAttachmentDownloadUrls({});
       return;
     }
     let cancelled = false;
     const arr = selected.attachments as Record<string, unknown>[];
+    const { inlineImages } = partitionWorkbenchAttachments(arr, selected);
+    const inlineIndexes = new Set(inlineImages.map((r) => r.index));
     (async () => {
-      const next: Record<number, string> = {};
+      const nextPreview: Record<number, string> = {};
+      const nextDownload: Record<number, string> = {};
       const signErrors: string[] = [];
       await Promise.all(
         arr.map(async (a, i) => {
-          if (typeof a?.url === "string" && a.url) {
-            next[i] = a.url;
+          const rawUrl = typeof a?.url === "string" ? a.url : "";
+          if (rawUrl) {
+            nextPreview[i] = rawUrl;
+            nextDownload[i] = rawUrl;
             return;
           }
           const path = a?.storage_path;
           if (typeof path !== "string" || !path) return;
-          const { data, error } = await supabase.storage
+
+          const previewResp = await supabase.storage
             .from("email-attachments")
             .createSignedUrl(path, 3600);
-          if (error) {
-            console.error("[attachment signed url]", path, error.message);
-            signErrors.push(error.message);
-            return;
+          if (previewResp.error) {
+            console.error("[attachment preview signed url]", path, previewResp.error.message);
+            signErrors.push(previewResp.error.message);
+          } else if (previewResp.data?.signedUrl && !cancelled) {
+            nextPreview[i] = previewResp.data.signedUrl;
           }
-          if (data?.signedUrl && !cancelled) next[i] = data.signedUrl;
+
+          if (!inlineIndexes.has(i)) {
+            const downloadAs = displayAttachmentFilename(a);
+            const downloadResp = await supabase.storage
+              .from("email-attachments")
+              .createSignedUrl(path, 3600, { download: downloadAs });
+            if (downloadResp.error) {
+              console.error("[attachment download signed url]", path, downloadResp.error.message);
+              signErrors.push(downloadResp.error.message);
+            } else if (downloadResp.data?.signedUrl && !cancelled) {
+              nextDownload[i] = downloadResp.data.signedUrl;
+            }
+          } else if (nextPreview[i]) {
+            // 内嵌图点击下载时也可回落使用预览地址
+            nextDownload[i] = nextPreview[i];
+          }
         }),
       );
       if (!cancelled) {
-        setAttachmentSignedUrls(next);
+        setAttachmentPreviewUrls(nextPreview);
+        setAttachmentDownloadUrls(nextDownload);
         if (signErrors.length > 0) {
           const first = signErrors[0];
           const suffix = signErrors.length > 1 ? `（共 ${signErrors.length} 项失败）` : "";
@@ -788,7 +911,7 @@ export default function Workbench() {
     return () => {
       cancelled = true;
     };
-  }, [selected?.id, selected?.attachments]);
+  }, [selected?.id, selected?.attachments, selected?.body_html, selected?.body_text]);
 
   // 仅随选中邮件 id 拉详情，避免 loadDetail 更新 selectedEmailDetail 后 selected 引用变化导致反复加载、历史邮件计数闪烁
   useEffect(() => {
@@ -1863,66 +1986,128 @@ export default function Workbench() {
                       正文较大或邮箱响应较慢，后台正在补拉；完成后将自动更新本邮件，无需刷新整页。
                     </p>
                   ) : (
-                    <EmailBody
-                      content={
-                        (() => {
-                          const n = normalizeEmailBodyForDisplay(
-                            selected.body_text,
-                            selected.body_html,
-                          );
-                          return n.html ?? n.text;
-                        })()
-                      }
-                    />
+                    <>
+                      <EmailBody
+                        bodyText={selected.body_text}
+                        bodyHtml={selected.body_html}
+                      />
+                      {(() => {
+                        const { inlineImages } = partitionWorkbenchAttachments(
+                          selected.attachments as Record<string, unknown>[] | undefined,
+                          selected,
+                        );
+                        if (inlineImages.length === 0) return null;
+                        return (
+                          <div className="mt-3 space-y-2 border-t pt-3">
+                            {inlineImages.map(({ item, index }) => {
+                              const filename = displayAttachmentFilename(item);
+                              const previewUrl = attachmentPreviewUrls[index] || "";
+                              if (!previewUrl) {
+                                return (
+                                  <p key={index} className="text-xs text-muted-foreground">
+                                    {filename}（图片加载中…）
+                                  </p>
+                                );
+                              }
+                              return (
+                                <img
+                                  key={index}
+                                  src={previewUrl}
+                                  alt={filename}
+                                  className="max-w-full h-auto rounded border bg-background"
+                                />
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
+                    </>
                   )}
                 </Card>
               </div>
 
               {/* 附件 */}
-              {Array.isArray(selected.attachments) && selected.attachments.length > 0 && (
+              {(() => {
+                const { fileAttachments } = partitionWorkbenchAttachments(
+                  selected.attachments as Record<string, unknown>[] | undefined,
+                  selected,
+                );
+                if (fileAttachments.length === 0) return null;
+                const hasPlaceholderAttachments = fileAttachments.some(({ item }) =>
+                  isPlaceholderAttachment(item),
+                );
+                return (
                 <div>
-                  <h3 className="font-medium text-sm mb-2">附件 ({selected.attachments.length})</h3>
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <h3 className="font-medium text-sm">附件 ({fileAttachments.length})</h3>
+                    {hasPlaceholderAttachments && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void repairSelectedEmailAttachments({ force: true })}
+                        disabled={repairingSelectedAttachments}
+                      >
+                        {repairingSelectedAttachments ? "补拉中…" : "补拉本邮件附件"}
+                      </Button>
+                    )}
+                  </div>
+                  {hasPlaceholderAttachments && autoRepairingAttachmentEmailId === selected?.id && (
+                    <p className="mb-2 text-xs text-muted-foreground">
+                      检测到历史占位附件，正在自动补拉本邮件附件…
+                    </p>
+                  )}
                   <div className="grid grid-cols-2 gap-2">
-                    {(selected.attachments as any[]).map((a, i) => {
+                    {fileAttachments.map(({ item: a, index: i }) => {
+                      const placeholder = isPlaceholderAttachment(a);
                       const contentType = String(a.contentType ?? "");
-                      const filename = String(a.filename ?? "");
+                      const filename = displayAttachmentFilename(a);
                       const isImg =
                         contentType.startsWith("image/") ||
                         /\.(jpe?g|png|gif|webp|bmp|svg)$/i.test(filename);
-                      const signedOrUrl =
-                        attachmentSignedUrls[i] ||
+                      const previewOrUrl =
+                        attachmentPreviewUrls[i] ||
                         (typeof a.url === "string" ? a.url : "") ||
                         "";
-                      const hasLink = Boolean(signedOrUrl);
-                      const imgSrc = isImg && signedOrUrl ? signedOrUrl : null;
+                      const downloadOrUrl =
+                        attachmentDownloadUrls[i] ||
+                        (typeof a.url === "string" ? a.url : "") ||
+                        "";
+                      const hasLink = !placeholder && Boolean(downloadOrUrl || previewOrUrl);
+                      const imgSrc = isImg && previewOrUrl ? previewOrUrl : null;
+                      const statusLine = placeholder
+                        ? String(a.note ?? "附件尚未从邮箱拉取，请点击「同步邮箱」完成补拉。")
+                        : hasLink
+                          ? "点击下载或预览"
+                          : a.storage_path
+                            ? "（签名链接生成中…）"
+                            : a.warning
+                              ? String(a.warning)
+                              : "（未上传）";
                       const inner = (
                         <>
                           {isImg && imgSrc ? (
-                            <img src={imgSrc} alt={a.filename} className="w-12 h-12 object-cover rounded" />
+                            <img src={imgSrc} alt={filename} className="w-12 h-12 object-cover rounded" />
                           ) : (
                             <div className="w-12 h-12 bg-muted rounded flex items-center justify-center text-muted-foreground">📎</div>
                           )}
                           <div className="flex-1 min-w-0">
-                            <div className="truncate font-medium">{a.filename ?? "附件"}</div>
-                            <div className="text-muted-foreground">
-                              {a.size ? `${(Number(a.size) / 1024).toFixed(1)} KB` : ""}{" "}
-                              {hasLink
-                                ? ""
-                                : a.storage_path
-                                  ? "（签名链接生成中…）"
-                                  : a.note
-                                    ? String(a.note)
-                                    : "（未上传）"}
+                            <div className="truncate font-medium">{filename}</div>
+                            <div className="text-muted-foreground line-clamp-3 leading-snug">
+                              {a.size ? `${(Number(a.size) / 1024).toFixed(1)} KB · ` : ""}
+                              {statusLine}
                             </div>
                           </div>
                         </>
                       );
+                      const openInNewTab = isImg && hasLink;
                       return hasLink ? (
                         <a
                           key={i}
-                          href={signedOrUrl}
-                          target="_blank"
-                          rel="noreferrer"
+                          href={openInNewTab ? previewOrUrl : (downloadOrUrl || previewOrUrl)}
+                          target={openInNewTab ? "_blank" : undefined}
+                          rel={openInNewTab ? "noreferrer" : undefined}
+                          download={openInNewTab ? undefined : filename}
                           className="flex items-center gap-2 p-2 border rounded hover:bg-muted/50 text-xs"
                         >
                           {inner}
@@ -1930,7 +2115,11 @@ export default function Workbench() {
                       ) : (
                         <div
                           key={i}
-                          className="flex items-center gap-2 p-2 border rounded text-xs opacity-80"
+                          className={`flex items-center gap-2 p-2 border rounded text-xs ${
+                            placeholder
+                              ? "border-warning/40 bg-warning/5"
+                              : "opacity-80"
+                          }`}
                         >
                           {inner}
                         </div>
@@ -1938,7 +2127,8 @@ export default function Workbench() {
                     })}
                   </div>
                 </div>
-              )}
+                );
+              })()}
 
               {/* 同往来历史 */}
               <div>

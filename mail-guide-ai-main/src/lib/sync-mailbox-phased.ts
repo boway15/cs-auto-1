@@ -1,12 +1,18 @@
 import { supabase } from "@/lib/supabase";
 import { formatFunctionsInvokeError } from "@/lib/format-functions-invoke-error";
 
-export type SyncMailboxPhase = "incremental" | "historical" | "repair_body";
+export type SyncMailboxPhase = "incremental" | "historical" | "repair_body" | "repair_attachments";
 
 export type SyncMailboxInvokeBody = {
   mailbox_id: string;
   force_bulk?: boolean;
   repair_empty_body?: boolean;
+  repair_missing_attachments?: boolean;
+};
+
+export type RepairSingleEmailInvokeBody = {
+  repair_email_id: string;
+  queue_attachment_repair?: boolean;
 };
 
 export type SyncMailboxResultRow = {
@@ -19,6 +25,8 @@ export type SyncMailboxResultRow = {
   empty_body_remaining?: number;
   mode?: string;
   error?: string;
+  queued?: boolean;
+  queue_reason?: string;
 };
 
 export type PhasedSyncProgress = {
@@ -46,10 +54,25 @@ const DEFAULT_ROUND_DELAY_MS = 1500;
 const DEFAULT_BATCH_DELAY_MS = 20_000;
 const DEFAULT_WORKER_CANCEL_RETRY_DELAY_MS = 8000;
 
+export function isWorkerRequestCancelledError(message: string | null | undefined): boolean {
+  return /WorkerRequestCancelled|request has been cancelled/i.test(String(message ?? ""));
+}
+
+/** 单封补拉失败时是否应改走后台附件队列（含 Edge non-2xx / 超时） */
+export function shouldEnqueueAttachmentRepairOnFailure(
+  message: string | null | undefined,
+): boolean {
+  const msg = String(message ?? "");
+  if (!msg) return false;
+  if (isWorkerRequestCancelledError(msg)) return true;
+  return /non-2xx|502|504|gateway|timeout|cancelled|cpu time|worker failed/i.test(msg);
+}
+
 function buildInvokeBody(mailboxId: string, phase: SyncMailboxPhase): SyncMailboxInvokeBody {
   const body: SyncMailboxInvokeBody = { mailbox_id: mailboxId };
   if (phase === "historical") body.force_bulk = true;
   if (phase === "repair_body") body.repair_empty_body = true;
+  if (phase === "repair_attachments") body.repair_missing_attachments = true;
   return body;
 }
 
@@ -76,6 +99,79 @@ export async function invokeSyncMailboxPhase(
   return { row };
 }
 
+/** 单封补拉：用于占位附件/正文异常时快速修复当前邮件 */
+export async function invokeRepairSingleEmail(
+  emailId: string,
+): Promise<{ row: SyncMailboxResultRow | null; errorMessage?: string }> {
+  const body: RepairSingleEmailInvokeBody = { repair_email_id: emailId };
+  const { data, error } = await supabase.functions.invoke("sync-mailbox", { body });
+  if (error) {
+    const rawMessage =
+      typeof error === "object" && error !== null && "message" in error
+        ? String((error as { message?: unknown }).message ?? "")
+        : "";
+    return {
+      row: null,
+      errorMessage: rawMessage || (await formatFunctionsInvokeError(error)),
+    };
+  }
+  if (data?.error) {
+    return { row: null, errorMessage: String(data.error) };
+  }
+  const row = (data?.results?.[0] ?? null) as SyncMailboxResultRow | null;
+  if (row?.error) {
+    return { row: null, errorMessage: row.error };
+  }
+  if (!row) {
+    return { row: null, errorMessage: "未获取到补拉结果" };
+  }
+  return { row };
+}
+
+export async function enqueueAttachmentRepairForEmail(
+  emailId: string,
+): Promise<{ queued: boolean; taskId?: string; errorMessage?: string }> {
+  const body: RepairSingleEmailInvokeBody = {
+    repair_email_id: emailId,
+    queue_attachment_repair: true,
+  };
+  const { data, error } = await supabase.functions.invoke("sync-mailbox", { body });
+  if (error) {
+    return { queued: false, errorMessage: await formatFunctionsInvokeError(error) };
+  }
+  if (data?.error) {
+    return { queued: false, errorMessage: String(data.error) };
+  }
+  return {
+    queued: Boolean(data?.queued),
+    taskId: typeof data?.task_id === "string" ? data.task_id : undefined,
+  };
+}
+
+export async function invokeRepairSingleEmailWithRetry(options: {
+  emailId: string;
+  maxRetries?: number;
+  retryDelayMs?: number;
+  wait?: (ms: number) => Promise<void>;
+}): Promise<{ row: SyncMailboxResultRow | null; errorMessage?: string; retries: number }> {
+  const {
+    emailId,
+    maxRetries = 2,
+    retryDelayMs = DEFAULT_WORKER_CANCEL_RETRY_DELAY_MS,
+    wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  } = options;
+
+  let retries = 0;
+  while (true) {
+    const result = await invokeRepairSingleEmail(emailId);
+    if (!result.errorMessage || !isWorkerRequestCancelledError(result.errorMessage) || retries >= maxRetries) {
+      return { ...result, retries };
+    }
+    retries++;
+    await wait(retryDelayMs);
+  }
+}
+
 export type RunPhasedMailboxSyncOptions = {
   mailboxId: string;
   maxRoundsPerPhase?: number;
@@ -88,7 +184,7 @@ export type RunPhasedMailboxSyncOptions = {
 };
 
 /**
- * 手动同步三阶段：增量（新邮件全文）→ 历史轻量回补 → 小批量补空正文。
+ * 手动同步四阶段：增量（新邮件全文）→ 历史轻量回补 → 补空正文 → 补占位附件。
  */
 export async function runPhasedMailboxSync(
   options: RunPhasedMailboxSyncOptions,
@@ -111,7 +207,7 @@ export async function runPhasedMailboxSync(
   let failed = false;
   let errorMessage: string | undefined;
 
-  const phases: SyncMailboxPhase[] = ["incremental", "historical", "repair_body"];
+  const phases: SyncMailboxPhase[] = ["incremental", "historical", "repair_body", "repair_attachments"];
 
   for (const phase of phases) {
     if (failed) break;
@@ -128,7 +224,7 @@ export async function runPhasedMailboxSync(
           if (
             phase !== "repair_body" &&
             workerCancelRetries < 2 &&
-            /WorkerRequestCancelled|request has been cancelled/i.test(invokeErr)
+            isWorkerRequestCancelledError(invokeErr)
           ) {
             workerCancelRetries++;
             rounds--;
@@ -151,9 +247,11 @@ export async function runPhasedMailboxSync(
         } else if (phase === "historical") {
           totalInserted += inserted;
           historyRemaining = remaining;
-        } else {
+        } else if (phase === "repair_body") {
           totalRepaired += repaired;
           emptyBodyRemaining = emptyRemain;
+        } else {
+          totalRepaired += repaired;
         }
 
         onProgress?.({
@@ -176,7 +274,12 @@ export async function runPhasedMailboxSync(
             phaseDone = true;
             break;
           }
-        } else if (repaired === 0 && emptyRemain === 0) {
+        } else if (phase === "repair_body") {
+          if (repaired === 0 && emptyRemain === 0) {
+            phaseDone = true;
+            break;
+          }
+        } else if (repaired === 0 && remaining === 0) {
           phaseDone = true;
           break;
         }

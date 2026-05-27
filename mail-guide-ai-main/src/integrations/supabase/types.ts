@@ -399,6 +399,39 @@ export type Database = {
         }
         Relationships: []
       }
+      erp_site_mailboxes: {
+        Row: {
+          created_at: string
+          id: string
+          is_active: boolean
+          sender_email: string
+          site_code: string
+          site_name: string
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          sender_email: string
+          site_code: string
+          site_name?: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          sender_email?: string
+          site_code?: string
+          site_name?: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: []
+      }
       mailboxes: {
         Row: {
           auth_password: string

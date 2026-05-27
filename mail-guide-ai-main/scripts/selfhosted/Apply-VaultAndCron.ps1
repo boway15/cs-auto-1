@@ -2,8 +2,10 @@
 <#
 .SYNOPSIS
   Self-hosted Supabase: update vault.service_role_key and pg_cron to call the in-stack Kong Functions URL.
-  Registers 4 business cron jobs: sync-mailbox, schedule-draft-generation, run-compensation-tasks,
-  retry-risk-intercept-compensation. compensating-alerts is removed and replaced by first/final ops alerts.
+  Registers business cron jobs for self-hosted Kong (no *.supabase.co):
+  sync-mailbox, schedule-draft-generation, run-compensation-tasks, retry-risk-intercept-compensation,
+  run-email-body-repair-tasks, run-email-attachment-repair-tasks.
+  compensating-alerts is removed and replaced by first/final ops alerts.
 
 .PARAMETER SelfhostRoot
   supabase-selfhost directory, defaults to <cs-main>/supabase-selfhost
@@ -76,6 +78,8 @@ $uSync = Sql-EscapeLiteral ($base + "/functions/v1/sync-mailbox")
 $uDraft = Sql-EscapeLiteral ($base + "/functions/v1/schedule-draft-generation")
 $uComp = Sql-EscapeLiteral ($base + "/functions/v1/run-compensation-tasks")
 $uRiskRetry = Sql-EscapeLiteral ($base + "/functions/v1/retry-risk-intercept-compensation")
+$uBodyRepair = Sql-EscapeLiteral ($base + "/functions/v1/run-email-body-repair-tasks")
+$uAttRepair = Sql-EscapeLiteral ($base + "/functions/v1/run-email-attachment-repair-tasks")
 
 $tag = "mga_" + [Guid]::NewGuid().ToString("N")
 if ($serviceRoleKey.Contains($tag)) { throw "SERVICE_ROLE_KEY delimiter collision; retry." }
@@ -138,6 +142,8 @@ $lines.Add("")
 $lines.Add("SELECT cron.unschedule('retry-risk-intercept-hourly-at-29') WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'retry-risk-intercept-hourly-at-29');")
 $lines.Add("")
 Add-CronBlock -Out $lines -JobName "retry-risk-intercept-hourly-at-45" -Schedule "*/20 * * * *" -UrlEscaped $uRiskRetry
+Add-CronBlock -Out $lines -JobName "email-body-repair-tasks-every-3min" -Schedule "1-59/3 * * * *" -UrlEscaped $uBodyRepair
+Add-CronBlock -Out $lines -JobName "email-attachment-repair-tasks-every-5min" -Schedule "2-59/5 * * * *" -UrlEscaped $uAttRepair
 
 $sql = ($lines -join "`n") + "`n"
 $tempSql = [IO.Path]::GetTempFileName() + ".sql"

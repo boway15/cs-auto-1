@@ -45,13 +45,309 @@ export function decodeQuotedPrintableLoose(input: string): string {
   }
 }
 
-function htmlToPlainText(html: string): string {
+/** 从 HTML 提取可见纯文本（用于判断 Word 空壳、回退展示） */
+export function htmlBodyVisibleText(html: string): string {
   return html
     .replace(/<\s*(br|\/p|\/div|\/tr|\/li)\b[^>]*>/gi, "\n")
+    .replace(/<\s*(script|style)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/gi, " ")
-    .replace(/\s+/g, " ")
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/\n\s+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+const OUTLOOK_HTML_SHELL_RE =
+  /xmlns:v="urn:schemas-microsoft-com:vml"|Microsoft Word|mso-|urn:schemas-microsoft-com:office/i;
+
+/** Outlook/Word 导出的 HTML 常仅有样式壳、几乎无可读正文 */
+export function isOutlookEmptyHtmlShell(html: string | null | undefined): boolean {
+  const raw = html?.trim() ?? "";
+  if (!raw || !OUTLOOK_HTML_SHELL_RE.test(raw)) return false;
+  return htmlBodyVisibleText(raw).length < 120;
+}
+
+function normalizeBodyCompareSnippet(s: string): string {
+  return s
+    .replace(/[*_~`]/g, "")
+    .replace(/[\u{1F300}-\u{1F9FF}]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/** Gmail 导出的 HTML（含签名、引用块） */
+export function isGmailStructuredHtml(html: string | null | undefined): boolean {
+  const h = html?.trim() ?? "";
+  if (!h) return false;
+  return /gmail_quote|gmail_signature|gmail_attr|class=["'][^"']*gmail_/i.test(h);
+}
+
+/** body_text 有实质内容但 HTML 可见区未包含其开头（Word 空壳 / 内嵌图邮件常见） */
+export function plainTextNotRepresentedInHtml(
+  plain: string,
+  html: string | null | undefined,
+): boolean {
+  const p = plain.trim();
+  if (p.length < 20) return false;
+  if (isGmailStructuredHtml(html)) return false;
+  const hVis = html?.trim() ? htmlBodyVisibleText(html) : "";
+  if (!hVis) return true;
+  const words = normalizeBodyCompareSnippet(p)
+    .split(/\s+/)
+    .filter((w) => w.length > 2)
+    .slice(0, 10);
+  if (words.length < 3) return false;
+  const hNorm = normalizeBodyCompareSnippet(hVis);
+  const matched = words.filter((w) => hNorm.includes(w)).length;
+  return matched < Math.ceil(words.length * 0.6);
+}
+
+/** Gmail 纯文本单段 + > 引用（同步时换行被抹掉） */
+export function isGmailCollapsedPlainBody(s: string): boolean {
+  const newlineCount = (s.match(/\n/g) ?? []).length;
+  return (
+    newlineCount < 8 &&
+    /On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),.+wrote:/i.test(s) &&
+    />/.test(s)
+  );
+}
+
+/** 恢复 Gmail 压扁纯文本的换行与引用层级 */
+export function formatGmailCollapsedPlainBody(text: string): string {
+  let s = decodePlainTextEntities(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  s = s.replace(/([.a-z]{2,})(On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),)/gi, "$1\n\n$2");
+  s = s.replace(/(wrote:)(>+)/gi, "$1\n$2 ");
+  s = s.replace(/([.!?])\s*(>+)/g, "$1\n$2 ");
+  s = s.replace(/(>+)\s*(Original:)/gi, "\n\n$2");
+  s = s.replace(/(>+)\s*(On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),)/gi, "\n\n$2");
+  s = s.replace(/(>+)\s*(\d+\.)\s+/g, "$1\n$2 ");
+  s = s.replace(/(>+)\s*(-\s*From)/gi, "$1\n$2");
+  s = s.replace(/\*([^*\n]{1,120})\*/g, "$1");
+  s = s.replace(/([^\n])(📧|🌐|📎)/g, "$1\n$2");
+  s = s.replace(/\s+(>+)\s+/g, "\n$1 ");
+  s = s.replace(/[ \t]{2,}/g, " ");
+  s = s.replace(/\n{3,}/g, "\n\n");
+  return s.trim();
+}
+
+function stripGmailQuoteLinePrefixes(block: string): string {
+  return block
+    .split("\n")
+    .map((line) => line.replace(/^(?:>\s*)+/, "").trimEnd())
+    .join("\n");
+}
+
+/**
+ * 解码纯文本中的 HTML 实体；勿用 innerHTML，否则 `<user@host>` 会被当成标签吞掉。
+ */
+export function decodePlainTextEntities(text: string): string {
+  if (!text) return "";
+  return text
+    .replace(/&nbsp;/gi, "\u00A0")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (_, dec) => {
+      const code = Number(dec);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : _;
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+      const code = parseInt(hex, 16);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : _;
+    });
+}
+
+const EMAIL_HEADER_NAMES = [
+  "From",
+  "Sent",
+  "Reply-To",
+  "To",
+  "Cc",
+  "Bcc",
+  "Subject",
+  "Date",
+  "Importance",
+] as const;
+
+function escapeHtmlForEmailDisplay(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/**
+ * 历史同步/纯文本 MIME 常把换行压成空格；恢复邮件头、段落与引用块换行。
+ */
+export function formatPlainTextEmailForDisplay(text: string): string {
+  let s = decodePlainTextEntities(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (!s.trim()) return "";
+
+  if (isGmailCollapsedPlainBody(s)) {
+    s = formatGmailCollapsedPlainBody(s);
+    const afterGmailNl = (s.match(/\n/g) ?? []).length;
+    if (afterGmailNl >= 6) {
+      return s.replace(/\n{3,}/g, "\n\n").trim();
+    }
+  }
+
+  const newlineCount = (s.match(/\n/g) ?? []).length;
+  if (newlineCount >= 8) {
+    return s.replace(/\t+/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  s = s.replace(/\t+/g, "\n").replace(/\u00a0/g, " ");
+
+  for (const name of EMAIL_HEADER_NAMES) {
+    s = s.replace(
+      new RegExp(`(?<!\\n)(?<![\\n\\r])\\s{2,}(${name}\\s*[：:])`, "gi"),
+      "\n\n$1",
+    );
+  }
+
+  s = s.replace(/([ap]\.?\s*m\.?)(To\s*[：:])/gi, "$1\n$2");
+  s = s.replace(/(<[^>]+>)\s+(Sent\s*[：:])/gi, "$1\n$2");
+  s = s.replace(/(<[^>]+>)\s+(To\s*[：:])/gi, "$1\n$2");
+  s = s.replace(/(>)(Subject\s*[：:])/gi, "$1\n$2");
+  s = s.replace(/(>)(Sent\s*[：:])/gi, "$1\n$2");
+  s = s.replace(/(>)(To\s*[：:])/gi, "$1\n$2");
+  s = s.replace(/(>)(From\s*[：:])/gi, "$1\n$2");
+  s = s.replace(/(@[^\s>]+)\s+(Sent\s*[：:])/gi, "$1\n$2");
+
+  s = s.replace(/(Subject\s*:[^\n]{0,240}?)(Dear\s+)/gi, "$1\n\n$2");
+  s = s.replace(/(Subject\s*:[^\n]{0,240}?)(Greetings,)/gi, "$1\n\n$2");
+  s = s.replace(/(Subject\s*:[^\n]{0,240}?)(Hello[\s,])/gi, "$1\n\n$2");
+  s = s.replace(/(Subject\s*:[^\n]{0,240}?)(Hi[\s,])/gi, "$1\n\n$2");
+  s = s.replace(/(Importance\s*:\s*High\s*)(Greetings,)/gi, "$1\n\n$2");
+  s = s.replace(/(Importance\s*:\s*High\s*)(Dear\s+)/gi, "$1\n\n$2");
+
+  s = s.replace(/(customer,)(Thank\s+)/gi, "$1\n\n$2");
+  s = s.replace(/(customer,)(I\s+)/gi, "$1\n\n$2");
+  s = s.replace(/(\?)(Thank\s+)/g, "$1\n\n$2");
+  s = s.replace(/(reply\.)(\s*)(SEDETA)/gi, "$1\n\n$3");
+  s = s.replace(/(support\.)(\s*)(Looking)/gi, "$1\n\n$3");
+  s = s.replace(/(us\.)(I\s+)/gi, "$1\n$2");
+  s = s.replace(/(part)(Importance\s*[：:])/gi, "$1\n$2");
+  s = s.replace(/(\.com)\s+(Subject\s*[：:])/gi, "$1\n$2");
+  s = s.replace(/(Service)(service@)/gi, "$1\n$2");
+
+  s = s.replace(/\s*(Original\s*:\s*)/gi, "\n\n$1\n");
+  s = s.replace(/\*+\s*(From\s*[：:])/gi, "\n$1");
+  s = s.replace(/\*+\s*(Date\s*[：:])/gi, "\n$1");
+  s = s.replace(/\*+\s*(To\s*[：:])/gi, "\n$1");
+  s = s.replace(/\*+\s*(Cc\s*[：:])/gi, "\n$1");
+  s = s.replace(/\*+\s*(Subject\s*[：:])/gi, "\n$1");
+
+  s = s.replace(/\. ([A-Z][a-z]{3,})/g, ".\n$1");
+
+  s = s.replace(/[ \t]{2,}/g, " ");
+  s = s.replace(/\n{3,}/g, "\n\n");
+  return s.trim();
+}
+
+export function splitPlainEmailTopAndQuoted(formatted: string): {
+  top: string;
+  quoted: string | null;
+} {
+  const gmailWrote = formatted.search(
+    /\n\nOn\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),[\s\S]{8,220}?wrote:\s*(?:\n|$)/i,
+  );
+  if (gmailWrote > 6) {
+    return {
+      top: formatted.slice(0, gmailWrote).trim(),
+      quoted: formatted.slice(gmailWrote).trim(),
+    };
+  }
+  const gmailWroteSingle = formatted.search(
+    /\nOn\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),[\s\S]{8,220}?wrote:\s*\n/i,
+  );
+  if (gmailWroteSingle > 6) {
+    return {
+      top: formatted.slice(0, gmailWroteSingle).trim(),
+      quoted: formatted.slice(gmailWroteSingle).trim(),
+    };
+  }
+  const idx = formatted.search(/\n\nFrom\s*[：:]/i);
+  if (idx > 12) {
+    return {
+      top: formatted.slice(0, idx).trim(),
+      quoted: formatted.slice(idx).trim(),
+    };
+  }
+  return { top: formatted, quoted: null };
+}
+
+/** 将排版后的纯文本转为安全 HTML（引用块样式接近官方邮箱） */
+export function plainTextEmailToDisplayHtml(formatted: string): string {
+  const { top, quoted } = splitPlainEmailTopAndQuoted(formatted);
+  const toBr = (block: string) =>
+    escapeHtmlForEmailDisplay(stripGmailQuoteLinePrefixes(block)).replace(/\n/g, "<br>\n");
+
+  if (quoted) {
+    const attrMatch = quoted.match(
+      /^On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),[\s\S]{8,220}?wrote:\s*/i,
+    );
+    if (attrMatch) {
+      const attr = attrMatch[0]!.trim();
+      const body = quoted.slice(attrMatch[0]!.length).trim();
+      return (
+        `<div class="email-plain-main">${toBr(top)}</div>` +
+        `<div class="email-gmail-attr text-muted-foreground text-xs mt-3 mb-1">${escapeHtmlForEmailDisplay(attr)}</div>` +
+        `<blockquote class="email-plain-quote">${toBr(body)}</blockquote>`
+      );
+    }
+    return (
+      `<div class="email-plain-main">${toBr(top)}</div>` +
+      `<blockquote class="email-plain-quote">${toBr(quoted)}</blockquote>`
+    );
+  }
+  return `<div class="email-plain-main">${toBr(formatted)}</div>`;
+}
+
+/**
+ * 选择应在正文区渲染的内容：避免 body_html 为 Word 空壳时盖住 body_text。
+ */
+export function pickRenderableEmailBody(
+  bodyText: string | null | undefined,
+  bodyHtml: string | null | undefined,
+): { text: string; html: string | null } {
+  const n = normalizeEmailBodyForDisplay(bodyText, bodyHtml);
+  const textFallback = (bodyText ?? "").trim() || n.text.trim();
+  const visibleHtml = n.html ? htmlBodyVisibleText(n.html) : "";
+
+  if (!n.html || !looksLikeHtmlEmailContent(n.html)) {
+    return { text: textFallback || n.text, html: null };
+  }
+
+  if (isGmailStructuredHtml(n.html) && htmlBodyVisibleText(n.html).length > 15) {
+    return { text: n.text || textFallback, html: n.html };
+  }
+
+  const htmlNearlyEmpty =
+    visibleHtml.length < 48 && textFallback.length > visibleHtml.length + 20;
+  const outlookShell =
+    isOutlookEmptyHtmlShell(n.html) && textFallback.length > 40;
+
+  if (htmlNearlyEmpty || outlookShell) {
+    return { text: textFallback || visibleHtml || n.text, html: null };
+  }
+
+  if (plainTextNotRepresentedInHtml(textFallback, n.html)) {
+    return { text: textFallback, html: null };
+  }
+
+  if (visibleHtml.length > 0) {
+    return { text: n.text || textFallback, html: n.html };
+  }
+
+  return { text: textFallback || n.text, html: null };
 }
 
 /** 判断字符串是否像 HTML 邮件正文（Gmail 等常把 HTML 落在 body_text） */
@@ -77,17 +373,17 @@ export function normalizeEmailBodyForDisplay(
     const decoded = decodeQuotedPrintableLoose(text);
     if (looksLikeHtmlEmailContent(decoded)) {
       html = decoded;
-      text = htmlToPlainText(decoded);
+      text = htmlBodyVisibleText(decoded);
     } else {
       text = decoded;
     }
   }
   if (!html && text && looksLikeHtmlEmailContent(text)) {
     html = text;
-    text = htmlToPlainText(text);
+    text = htmlBodyVisibleText(text);
   }
   if (html && !text) {
-    text = htmlToPlainText(html);
+    text = htmlBodyVisibleText(html);
   }
   return { text, html };
 }

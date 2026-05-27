@@ -1107,7 +1107,8 @@ export default function LinkedOrders() {
                         <div className="pt-2 border-t">
                           <div className="text-muted-foreground mb-1">正文</div>
                           <EmailBody
-                            content={String(detailRow.email.body_text ?? "")}
+                            bodyText={detailRow.email.body_text}
+                            bodyHtml={detailRow.email.body_html}
                             className="text-xs max-h-56 overflow-y-auto"
                           />
                         </div>

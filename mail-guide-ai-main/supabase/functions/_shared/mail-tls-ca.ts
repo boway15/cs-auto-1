@@ -84,7 +84,7 @@ export async function getMailTlsCaCerts(logPrefix: string): Promise<string[] | u
       const raw = await Deno.readTextFile(path);
       appendPemMaterial(certs, raw, logPrefix, path);
     } catch (e) {
-      console.error(`${logPrefix}failed to read CA cert path=${path}:`, e);
+      console.warn(`${logPrefix}optional CA cert unreadable path=${path}:`, e);
     }
   }
 
@@ -98,8 +98,8 @@ export async function getMailTlsCaCerts(logPrefix: string): Promise<string[] | u
         const raw = await Deno.readTextFile(cand);
         appendPemMaterial(certs, raw, logPrefix, String(cand));
         if (certs.length > 0) break;
-      } catch (e) {
-        console.error(`${logPrefix}optional default CA unreadable (${String(cand)}):`, e);
+      } catch {
+        // 将回退到内置 163 CA
       }
     }
   }

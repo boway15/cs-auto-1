@@ -19,6 +19,7 @@ import {
   mailboxAccessCorsJsonHeaders,
   type StaffActor,
 } from "../_shared/mailbox-access.ts";
+import { actorUserIdOrNull } from "../_shared/actor-user-id.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -249,8 +250,8 @@ async function persistRiskInterceptFailure(admin: any, opts: {
       await admin.from("email_processing_events").insert({
         email_id: opts.email_id,
         event_type: "risk_intercept_failed",
-        actor_type: opts.actor.userId ? "user" : "system",
-        actor_id: opts.actor.userId,
+        actor_type: actorUserIdOrNull(opts.actor) ? "user" : "system",
+        actor_id: actorUserIdOrNull(opts.actor),
         title: failTitle,
         detail: timelineDetail || `失败原因：${opts.message}`,
         metadata: {
@@ -338,7 +339,7 @@ async function runInterceptLinkedOrder(payload: any, actor: { userId: string | n
       trigger_source,
       status: "pending",
       retry_count: existing ? existing.retry_count + 1 : 0,
-      operated_by: actor.userId,
+      operated_by: actorUserIdOrNull(actor),
       idempotency_key: idempotencyKey,
       ...mergeComp,
     }, { onConflict: "idempotency_key" })
@@ -346,6 +347,7 @@ async function runInterceptLinkedOrder(payload: any, actor: { userId: string | n
     .single();
   if (logErr) throw logErr;
 
+  const operatorId = actorUserIdOrNull(actor);
   let shopifyResponse: any = null;
   let erpResponse: Record<string, unknown> | null = null;
   try {
@@ -370,7 +372,7 @@ async function runInterceptLinkedOrder(payload: any, actor: { userId: string | n
           shipping_hold: true,
           hold_reason: intercept_reason ?? null,
           hold_at: new Date().toISOString(),
-          hold_by: actor.userId,
+          hold_by: operatorId,
         }
       : { shipping_hold: false, hold_reason: null, hold_at: null, hold_by: null };
     await admin.from("orders").update(updates).eq("id", order_id);
@@ -393,7 +395,7 @@ async function runInterceptLinkedOrder(payload: any, actor: { userId: string | n
       reason_category: reason_category ?? null,
       shopify_synced: !!shopifyResponse?.ok,
       shopify_sync_error: shopifyResponse?.skipped ? shopifyResponse.reason : null,
-      performed_by: actor.userId,
+      performed_by: operatorId,
     });
     if (email_id) {
       await admin.from("emails").update({
@@ -420,8 +422,8 @@ async function runInterceptLinkedOrder(payload: any, actor: { userId: string | n
         await admin.from("email_processing_events").insert({
           email_id,
           event_type: "risk_intercepted",
-          actor_type: actor.userId ? "user" : "system",
-          actor_id: actor.userId,
+          actor_type: operatorId ? "user" : "system",
+          actor_id: operatorId,
           title: timelineTitle,
           detail: timelineDetail || null,
           metadata: {
@@ -511,7 +513,7 @@ async function syncEmailProvidedHoldToLinkedOrders(
       shipping_hold: true,
       hold_reason: params.intercept_reason ?? null,
       hold_at: new Date().toISOString(),
-      hold_by: params.actor.userId,
+      hold_by: actorUserIdOrNull(params.actor),
     };
     const { error: upErr } = await admin.from("orders").update(updates).eq("id", oid);
     if (upErr) {
@@ -521,6 +523,7 @@ async function syncEmailProvidedHoldToLinkedOrders(
     synced++;
     if (!alreadyHeld) {
       const sr = params.shopifyResponse;
+      const operatorId = actorUserIdOrNull(params.actor);
       await admin.from("order_hold_logs").insert({
         order_id: oid,
         email_id: params.email_id,
@@ -529,7 +532,7 @@ async function syncEmailProvidedHoldToLinkedOrders(
         reason_category: params.reason_category ?? null,
         shopify_synced: !!(sr as any)?.ok,
         shopify_sync_error: (sr as any)?.skipped ? String((sr as any).reason ?? "") : null,
-        performed_by: params.actor.userId,
+        performed_by: operatorId,
       });
     }
   }
@@ -590,7 +593,7 @@ async function runInterceptEmailProvidedOrderNo(payload: any, actor: { userId: s
       trigger_source,
       status: "pending",
       retry_count: existing ? existing.retry_count + 1 : 0,
-      operated_by: actor.userId,
+      operated_by: actorUserIdOrNull(actor),
       idempotency_key: idempotencyKey,
       ...(trigger_source === "manual"
         ? {
@@ -612,6 +615,7 @@ async function runInterceptEmailProvidedOrderNo(payload: any, actor: { userId: s
     .single();
   if (logErr) throw logErr;
 
+  const operatorId = actorUserIdOrNull(actor);
   let shopifyResponse: any = null;
   let erpResponse: Record<string, unknown> | null = null;
   try {
@@ -661,8 +665,8 @@ async function runInterceptEmailProvidedOrderNo(payload: any, actor: { userId: s
       await admin.from("email_processing_events").insert({
         email_id,
         event_type: "risk_intercepted",
-        actor_type: actor.userId ? "user" : "system",
-        actor_id: actor.userId,
+        actor_type: operatorId ? "user" : "system",
+        actor_id: operatorId,
         title: timelineTitle,
         detail: timelineDetail || null,
         metadata: {

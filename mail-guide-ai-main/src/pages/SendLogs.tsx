@@ -55,6 +55,18 @@ function templateCodeFromLog(log: Log): string | null {
   return null;
 }
 
+function siteCodeFromLog(log: Log): string | null {
+  const meta = log.metadata;
+  if (meta && typeof meta.site_code === "string") return meta.site_code;
+  return null;
+}
+
+function siteNameFromLog(log: Log): string | null {
+  const meta = log.metadata;
+  if (meta && typeof meta.site_name === "string") return meta.site_name;
+  return null;
+}
+
 export default function SendLogs() {
   const { hasMailboxAccess, grantsLoading } = useAuth();
   const [logs, setLogs] = useState<Log[]>([]);
@@ -375,6 +387,12 @@ export default function SendLogs() {
                 <div><span className="text-muted-foreground">订单号：</span>{orderNoFromLog(detail) || "—"}</div>
                 {templateCodeFromLog(detail) && (
                   <div><span className="text-muted-foreground">ERP 场景：</span>{templateCodeFromLog(detail)}</div>
+                )}
+                {siteCodeFromLog(detail) && (
+                  <div><span className="text-muted-foreground">站点编码：</span>{siteCodeFromLog(detail)}</div>
+                )}
+                {siteNameFromLog(detail) && (
+                  <div><span className="text-muted-foreground">站点名称：</span>{siteNameFromLog(detail)}</div>
                 )}
                 <div className="col-span-2"><span className="text-muted-foreground">SMTP响应：</span>{detail.smtp_response || "—"}</div>
               </div>

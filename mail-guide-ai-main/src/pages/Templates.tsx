@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { supabase } from "@/lib/supabase";
 import { Button } from "@/components/ui/button";
@@ -101,6 +101,118 @@ function rowToDraft(row: any, fallback: SlotDraft): SlotDraft {
   };
 }
 
+function toggleIntent(
+  draft: SlotDraft,
+  setDraft: (d: SlotDraft) => void,
+  value: string,
+  checked: boolean,
+) {
+  const next = new Set(draft.enabled_business_intents);
+  if (checked) next.add(value);
+  else next.delete(value);
+  setDraft({ ...draft, enabled_business_intents: Array.from(next) });
+}
+
+function SlotEditor({
+  title,
+  description,
+  draft,
+  setDraft,
+  onSave,
+  onPreview,
+}: {
+  title: string;
+  description: string;
+  draft: SlotDraft;
+  setDraft: (d: SlotDraft) => void;
+  onSave: (draft: SlotDraft) => void;
+  onPreview: (title: string, draft: SlotDraft) => void;
+}) {
+  return (
+    <Card className="p-4">
+      <div className="flex flex-col gap-3">
+        <div>
+          <div className="font-medium flex items-center gap-2 flex-wrap">
+            {title}
+            <Badge variant="outline">{draft.trigger_type}</Badge>
+            {draft.auto_send && <Badge>自动回复</Badge>}
+          </div>
+          <p className="text-sm text-muted-foreground mt-1">{description}</p>
+        </div>
+        <div>
+          <Label>适用意图（可多选）</Label>
+          <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 border rounded-md p-3">
+            {BUSINESS_INTENT_OPTIONS.map((opt) => (
+              <label key={opt.value} className="flex items-center gap-2 text-sm cursor-pointer">
+                <Checkbox
+                  checked={draft.enabled_business_intents.includes(opt.value)}
+                  onCheckedChange={(v) => toggleIntent(draft, setDraft, opt.value, v === true)}
+                />
+                <span>{opt.label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+        <div>
+          <Label>主题模板</Label>
+          <Input
+            value={draft.subject_template}
+            onChange={(e) => setDraft({ ...draft, subject_template: e.target.value })}
+            placeholder="支持 {{subject}} {{from_name}} 等占位符"
+          />
+        </div>
+        <div>
+          <Label>正文模板</Label>
+          <Textarea
+            rows={8}
+            value={draft.body_template}
+            onChange={(e) => setDraft({ ...draft, body_template: e.target.value })}
+            placeholder="支持 {{from_name}} {{from_email}} {{subject}} {{order_no}} {{missing_elements}}"
+          />
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Label className="text-xs text-muted-foreground">自动回复</Label>
+          <Switch checked={draft.auto_send} onCheckedChange={(v) => setDraft({ ...draft, auto_send: v })} />
+        </div>
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+          <Label className="shrink-0 text-xs text-muted-foreground">首封窗口</Label>
+          <Select
+            value={String(draft.auto_reply_first_contact_days)}
+            onValueChange={(v) => setDraft({ ...draft, auto_reply_first_contact_days: Number(v) })}
+          >
+            <SelectTrigger className="sm:max-w-md">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent position="popper" sideOffset={4}>
+              {FIRST_CONTACT_OPTIONS.map((o) => (
+                <SelectItem key={o.value} value={String(o.value)}>
+                  {o.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <p className="text-xs text-muted-foreground -mt-1">
+          仅对本条模板生效：选定天数内同一发件人无其它邮件才视为首封；选「不限首封」则不做该校验（与 process-email 一致）。
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onPreview(title, draft)}
+          >
+            <Eye className="w-4 h-4 mr-1" />
+            变量预览
+          </Button>
+          <Button size="sm" onClick={() => onSave(draft)} disabled={!draft.id}>
+            保存本条
+          </Button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 export default function TemplatesPage() {
   const location = useLocation();
   const [slotOrder, setSlotOrder] = useState<SlotDraft>(() => emptySlotDraft(SLOT_ORDER));
@@ -108,6 +220,8 @@ export default function TemplatesPage() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewBody, setPreviewBody] = useState({ subject: "", body: "" });
   const [previewSlotLabel, setPreviewSlotLabel] = useState("");
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const hashScrollKeyRef = useRef<string | null>(null);
 
   async function load() {
     const { data: rows, error } = await supabase
@@ -131,10 +245,16 @@ export default function TemplatesPage() {
   }, []);
 
   useEffect(() => {
-    if (location.hash !== "#auto-reply-settings") return;
+    if (location.hash !== "#auto-reply-settings") {
+      hashScrollKeyRef.current = null;
+      return;
+    }
+    const scrollKey = `${location.pathname}${location.hash}`;
+    if (hashScrollKeyRef.current === scrollKey) return;
+    hashScrollKeyRef.current = scrollKey;
     const el = document.getElementById("auto-reply-settings");
     if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [location.hash]);
+  }, [location.hash, location.pathname]);
 
   function intentsOverlap(a: string[], b: string[]): string[] {
     const setB = new Set(b);
@@ -146,6 +266,7 @@ export default function TemplatesPage() {
       toast.error("模板未加载，无法保存");
       return;
     }
+    const scrollTop = scrollContainerRef.current?.scrollTop ?? 0;
     const other = draft.trigger_type === SLOT_ORDER ? slotOrderOrAtt : slotOrder;
     const overlap = intentsOverlap(draft.enabled_business_intents, other.enabled_business_intents);
     if (overlap.length > 0) {
@@ -171,127 +292,24 @@ export default function TemplatesPage() {
     if (error) toast.error(error.message);
     else {
       toast.success("已保存");
-      load();
+      await load();
+      requestAnimationFrame(() => {
+        if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = scrollTop;
+      });
     }
   }
 
-  function toggleIntent(
-    draft: SlotDraft,
-    setDraft: (d: SlotDraft) => void,
-    value: string,
-    checked: boolean,
-  ) {
-    const next = new Set(draft.enabled_business_intents);
-    if (checked) next.add(value);
-    else next.delete(value);
-    setDraft({ ...draft, enabled_business_intents: Array.from(next) });
-  }
-
-  function SlotEditor({
-    title,
-    description,
-    draft,
-    setDraft,
-  }: {
-    title: string;
-    description: string;
-    draft: SlotDraft;
-    setDraft: (d: SlotDraft) => void;
-  }) {
-    return (
-      <Card className="p-4">
-        <div className="flex flex-col gap-3">
-          <div>
-            <div className="font-medium flex items-center gap-2 flex-wrap">
-              {title}
-              <Badge variant="outline">{draft.trigger_type}</Badge>
-              {draft.auto_send && <Badge>自动回复</Badge>}
-            </div>
-            <p className="text-sm text-muted-foreground mt-1">{description}</p>
-          </div>
-          <div>
-            <Label>适用意图（可多选）</Label>
-            <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 border rounded-md p-3">
-              {BUSINESS_INTENT_OPTIONS.map((opt) => (
-                <label key={opt.value} className="flex items-center gap-2 text-sm cursor-pointer">
-                  <Checkbox
-                    checked={draft.enabled_business_intents.includes(opt.value)}
-                    onCheckedChange={(v) => toggleIntent(draft, setDraft, opt.value, v === true)}
-                  />
-                  <span>{opt.label}</span>
-                </label>
-              ))}
-            </div>
-          </div>
-          <div>
-            <Label>主题模板</Label>
-            <Input
-              value={draft.subject_template}
-              onChange={(e) => setDraft({ ...draft, subject_template: e.target.value })}
-              placeholder="支持 {{subject}} {{from_name}} 等占位符"
-            />
-          </div>
-          <div>
-            <Label>正文模板</Label>
-            <Textarea
-              rows={8}
-              value={draft.body_template}
-              onChange={(e) => setDraft({ ...draft, body_template: e.target.value })}
-              placeholder="支持 {{from_name}} {{from_email}} {{subject}} {{order_no}} {{missing_elements}}"
-            />
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Label className="text-xs text-muted-foreground">自动回复</Label>
-            <Switch checked={draft.auto_send} onCheckedChange={(v) => setDraft({ ...draft, auto_send: v })} />
-          </div>
-          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-            <Label className="shrink-0 text-xs text-muted-foreground">首封窗口</Label>
-            <Select
-              value={String(draft.auto_reply_first_contact_days)}
-              onValueChange={(v) => setDraft({ ...draft, auto_reply_first_contact_days: Number(v) })}
-            >
-              <SelectTrigger className="sm:max-w-md">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {FIRST_CONTACT_OPTIONS.map((o) => (
-                  <SelectItem key={o.value} value={String(o.value)}>
-                    {o.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <p className="text-xs text-muted-foreground -mt-1">
-            仅对本条模板生效：选定天数内同一发件人无其它邮件才视为首封；选「不限首封」则不做该校验（与 process-email 一致）。
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setPreviewSlotLabel(title);
-                setPreviewBody({
-                  subject: applyReplyTemplatePreview(draft.subject_template || "Re: {{subject}}"),
-                  body: applyReplyTemplatePreview(draft.body_template),
-                });
-                setPreviewOpen(true);
-              }}
-            >
-              <Eye className="w-4 h-4 mr-1" />
-              变量预览
-            </Button>
-            <Button size="sm" onClick={() => saveSlot(draft)} disabled={!draft.id}>
-              保存本条
-            </Button>
-          </div>
-        </div>
-      </Card>
-    );
+  function openPreview(title: string, draft: SlotDraft) {
+    setPreviewSlotLabel(title);
+    setPreviewBody({
+      subject: applyReplyTemplatePreview(draft.subject_template || "Re: {{subject}}"),
+      body: applyReplyTemplatePreview(draft.body_template),
+    });
+    setPreviewOpen(true);
   }
 
   return (
-    <div className="p-6 h-full overflow-auto">
+    <div ref={scrollContainerRef} className="p-6 h-full overflow-auto">
       <div className="mb-4">
         <h1 className="text-xl font-semibold">自动回邮模板</h1>
         <p className="text-sm text-muted-foreground mt-1">
@@ -305,12 +323,16 @@ export default function TemplatesPage() {
           description="适用于取消订单、改地址、物流等仅需补充订单号的场景（以 process-email 判定为准）。"
           draft={slotOrder}
           setDraft={setSlotOrder}
+          onSave={saveSlot}
+          onPreview={openPreview}
         />
         <SlotEditor
           title="模板二：缺失订单号或附件"
           description="适用于破损、缺陷、描述不符等需单号或附件（或两者）的场景；一封内可同时说明。"
           draft={slotOrderOrAtt}
           setDraft={setSlotOrderOrAtt}
+          onSave={saveSlot}
+          onPreview={openPreview}
         />
       </div>
 
