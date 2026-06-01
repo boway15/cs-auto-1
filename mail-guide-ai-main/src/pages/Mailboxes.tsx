@@ -504,11 +504,14 @@ export default function MailboxesPage() {
                 <div className="col-span-2">
                   <Label>签名内容（纯文本）</Label>
                   <Textarea
-                    className="mt-1 min-h-[80px] text-sm"
+                    className="mt-1 min-h-[100px] text-sm font-mono"
                     value={form.signature_text}
                     onChange={(e) => setForm({ ...form, signature_text: e.target.value })}
-                    placeholder="例如：Best regards,&#10;Customer Support Team"
+                    placeholder={"Customer Service\nservice@example.com\nhttps://example.com"}
                   />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    每行一条信息即可。发信时会附带 HTML 版本：邮箱地址与 https:// 链接在常见邮件客户端中可点击；纯文本客户端仍会显示完整地址。
+                  </p>
                 </div>
               )}
             </div>

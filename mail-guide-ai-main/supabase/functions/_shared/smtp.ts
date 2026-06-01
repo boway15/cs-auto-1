@@ -2,6 +2,7 @@
 // 仅实现：EHLO / STARTTLS / AUTH LOGIN / MAIL FROM / RCPT TO / DATA / QUIT
 
 import { connectMailImapTls, startMailSmtpTls } from "./mail-tls-ca.ts";
+import { plainTextToHtmlEmail } from "./mail-body-html.ts";
 
 interface Mailbox {
   smtp_host: string;
@@ -41,6 +42,32 @@ function encodeSubject(s: string) {
   // RFC 2047 UTF-8 Base64 编码（避免中文主题乱码）
   if (/^[\x20-\x7E]*$/.test(s)) return s;
   return `=?UTF-8?B?${b64(s)}?=`;
+}
+
+function foldBase64(encoded: string): string {
+  return encoded.replace(/(.{76})/g, "$1\r\n");
+}
+
+/** multipart/alternative：纯文本 + HTML（HTML 内邮箱/URL 可点击） */
+function buildMultipartAlternativeBody(plain: string, html: string): string {
+  const boundary = `mg_${crypto.randomUUID().replace(/-/g, "")}`;
+  const plainPart = foldBase64(b64(plain));
+  const htmlPart = foldBase64(b64(html));
+  return [
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    "",
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: base64",
+    "",
+    plainPart,
+    `--${boundary}`,
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Transfer-Encoding: base64",
+    "",
+    htmlPart,
+    `--${boundary}--`,
+  ].join("\r\n");
 }
 
 export async function sendMail(mb: Mailbox, opts: SendOpts): Promise<string> {
@@ -129,15 +156,13 @@ export async function sendMail(mb: Mailbox, opts: SendOpts): Promise<string> {
       `Subject: ${encodeSubject(opts.subject)}`,
       `Message-ID: ${messageId}`,
       `MIME-Version: 1.0`,
-      `Content-Type: text/plain; charset=UTF-8`,
-      `Content-Transfer-Encoding: base64`,
       `Date: ${new Date().toUTCString()}`,
     ];
     if (opts.inReplyTo) headers.push(`In-Reply-To: ${opts.inReplyTo}`);
     if (opts.references) headers.push(`References: ${opts.references}`);
 
-    // 正文 base64，按 76 字符换行
-    const body = b64(opts.text).replace(/(.{76})/g, "$1\r\n");
+    const html = plainTextToHtmlEmail(opts.text);
+    const body = buildMultipartAlternativeBody(opts.text, html);
     const data = headers.join("\r\n") + "\r\n\r\n" + body + "\r\n.\r\n";
     await write(data);
     await expect("250", "BODY");
