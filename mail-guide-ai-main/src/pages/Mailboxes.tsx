@@ -237,6 +237,8 @@ export default function MailboxesPage() {
         port,
         user,
         use_ssl: form.use_ssl,
+        smtp_host: form.smtp_host.trim(),
+        smtp_port: Number(form.smtp_port),
       };
       if (useStoredCreds) {
         body.mailbox_id = editingId;
@@ -252,7 +254,7 @@ export default function MailboxesPage() {
         toast.error("连接失败：" + message);
       } else {
         setTestResult(data);
-        if (data?.ok) toast.success("连接成功，可保存");
+        if (data?.ok) toast.success(data?.smtp ? "IMAP/SMTP 均通过，可保存" : "IMAP 连接成功，可保存");
         else toast.error("连接失败：" + (data?.message ?? "未知错误"));
       }
     } finally {

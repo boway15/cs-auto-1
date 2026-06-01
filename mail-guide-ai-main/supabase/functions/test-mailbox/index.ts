@@ -3,6 +3,7 @@
 // body：host/port/user/pass/use_ssl；或 mailbox_id（编辑时留空授权码则用库内凭据）+ 可选覆盖 host/port/use_ssl
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { connectMailImapTls } from "../_shared/mail-tls-ca.ts";
+import { testSmtpAuth } from "../_shared/smtp.ts";
 import {
   assertCanAccessMailbox,
   getStaffActor,
@@ -147,6 +148,13 @@ Deno.serve(async (req) => {
     let pass = typeof body?.pass === "string" ? body.pass : "";
     let useSsl = body?.use_ssl !== false;
     let usedStoredPass = false;
+    let smtpMb: {
+      smtp_host: string;
+      smtp_port: number;
+      auth_user: string;
+      auth_password: string;
+      email_address: string;
+    } | null = null;
 
     if (mailboxId) {
       if (!actor.isService) {
@@ -154,7 +162,9 @@ Deno.serve(async (req) => {
       }
       const { data: mb, error: mbErr } = await admin
         .from("mailboxes")
-        .select("incoming_host, incoming_port, use_ssl, auth_user, auth_password, email_address")
+        .select(
+          "incoming_host, incoming_port, use_ssl, auth_user, auth_password, email_address, smtp_host, smtp_port",
+        )
         .eq("id", mailboxId)
         .maybeSingle();
       if (mbErr || !mb) {
@@ -171,6 +181,15 @@ Deno.serve(async (req) => {
         usedStoredPass = true;
       }
       if (body?.use_ssl === undefined) useSsl = mb.use_ssl !== false;
+      if (mb.smtp_host && mb.smtp_port) {
+        smtpMb = {
+          smtp_host: mb.smtp_host,
+          smtp_port: Number(mb.smtp_port),
+          auth_user: (mb.auth_user || mb.email_address || "").trim(),
+          auth_password: pass,
+          email_address: (mb.email_address || "").trim(),
+        };
+      }
     }
 
     pass = pass.trim();
@@ -190,22 +209,48 @@ Deno.serve(async (req) => {
     }
 
     const r = await testImap({ host, port, user, pass, useSsl });
-    const note = usedStoredPass && r.ok
-      ? "（使用已保存的授权码与登录名测试成功）"
-      : usedStoredPass && !r.ok
-        ? "（使用已保存的授权码测试失败，若同步正常请检查 IMAP 登录用户名或收件服务器是否已改）"
-        : undefined;
-    const message = note ? [r.message, note].filter(Boolean).join(" ") : r.message;
 
-    if (MAIL_LOCAL_TEST_MODE && r.ok) {
+    let smtp: { ok: boolean; message?: string } | undefined;
+    if (smtpMb) {
+      smtpMb.auth_password = pass;
+      smtpMb.auth_user = user;
+      smtp = await testSmtpAuth(smtpMb);
+    } else if (
+      typeof body?.smtp_host === "string" && body.smtp_host.trim() &&
+      body?.smtp_port != null && Number(body.smtp_port) > 0 && pass
+    ) {
+      smtp = await testSmtpAuth({
+        smtp_host: body.smtp_host.trim(),
+        smtp_port: Number(body.smtp_port),
+        auth_user: user,
+        auth_password: pass,
+        email_address: user,
+      });
+    }
+
+    const ok = r.ok && (smtp?.ok ?? true);
+    const parts: string[] = [];
+    parts.push(r.ok ? "IMAP 连接成功" : `IMAP 失败：${r.message ?? "未知"}`);
+    if (smtp) {
+      parts.push(smtp.ok ? "SMTP 认证成功" : `SMTP 失败：${smtp.message ?? "未知"}`);
+    }
+    const note = usedStoredPass
+      ? "（使用已保存的授权码）"
+      : undefined;
+    let message = [parts.join("；"), note].filter(Boolean).join(" ");
+
+    if (MAIL_LOCAL_TEST_MODE && ok) {
       return new Response(JSON.stringify({
-        ...r,
+        ok,
+        step: r.step,
+        imap: r,
+        smtp,
         message: "本地测试模式已开启：当前使用明文连接（未校验证书），仅限本地调试。",
       }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-    return new Response(JSON.stringify({ ...r, message }), {
+    return new Response(JSON.stringify({ ok, step: r.step, imap: r, smtp, message }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (e) {
