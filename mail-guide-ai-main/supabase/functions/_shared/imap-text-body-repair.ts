@@ -1,6 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-import { extractTextFromMime, parseFullMime } from "./mime-parse.ts";
-import { getMailTlsCaCerts } from "./mail-tls-ca.ts";
+import { extractTextFromMime, hasReadableEmailBody, parseFullMime } from "./mime-parse.ts";
+import { connectMailImapTls } from "./mail-tls-ca.ts";
 import {
   buildMessageIdSearchCandidates,
   messageIdMatchesHeader,
@@ -51,7 +51,7 @@ const IMAP_SEARCH_TIMEOUT_MS = envPositiveInt("EMAIL_BODY_REPAIR_IMAP_SEARCH_TIM
 const IMAP_FETCH_TEXT_TIMEOUT_MS = envPositiveInt("EMAIL_BODY_REPAIR_IMAP_FETCH_TEXT_TIMEOUT_MS", 10_000);
 
 function isBodyEmpty(bodyText: string | null | undefined, bodyHtml: string | null | undefined): boolean {
-  return !String(bodyText ?? "").trim() && !String(bodyHtml ?? "").trim();
+  return !hasReadableEmailBody(bodyText, bodyHtml);
 }
 
 function sliceImapLiteral(resp: string, path: string): string | null {
@@ -215,16 +215,6 @@ function parseTextOnlyBody(rawBody: string): { bodyText: string; bodyHtml: strin
   return { bodyText, bodyHtml };
 }
 
-async function connectImapTls(host: string, port: number, signal: AbortSignal): Promise<Deno.TlsConn> {
-  const caCerts = await getMailTlsCaCerts("[body-repair] ");
-  return await Deno.connectTls({
-    hostname: host,
-    port,
-    signal,
-    ...(caCerts ? { caCerts } : {}),
-  });
-}
-
 class ImapTextClient {
   private conn!: Deno.Conn | Deno.TlsConn;
   private reader!: ReadableStreamDefaultReader<Uint8Array>;
@@ -240,7 +230,7 @@ class ImapTextClient {
     const timer = setTimeout(() => abort.abort(new Error(`IMAP connect timeout ${timeoutMs}ms`)), timeoutMs);
     try {
       this.conn = this.useSsl
-        ? await connectImapTls(this.host, this.port, abort.signal)
+        ? await connectMailImapTls(this.host, this.port, abort.signal, "[body-repair] ")
         : await Deno.connect({ hostname: this.host, port: this.port, transport: "tcp" });
     } finally {
       clearTimeout(timer);

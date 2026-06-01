@@ -1,7 +1,7 @@
 // 极简 Deno 原生 SMTP 客户端，支持 SSL(465) / STARTTLS(587/25)
 // 仅实现：EHLO / STARTTLS / AUTH LOGIN / MAIL FROM / RCPT TO / DATA / QUIT
 
-import { getMailTlsCaCerts } from "./mail-tls-ca.ts";
+import { connectMailImapTls, startMailSmtpTls } from "./mail-tls-ca.ts";
 
 interface Mailbox {
   smtp_host: string;
@@ -53,10 +53,8 @@ export async function sendMail(mb: Mailbox, opts: SendOpts): Promise<string> {
   if (MAIL_LOCAL_TEST_MODE && port === 465) {
     throw new Error("本地测试模式已开启：SMTP 465 需要 TLS，请改用 25/587 或关闭 MAIL_LOCAL_TEST_MODE。");
   }
-  const caCerts = await getMailTlsCaCerts("[smtp] ");
-
   let conn: Deno.Conn = useSSL
-    ? await Deno.connectTls({ hostname: mb.smtp_host, port, ...(caCerts ? { caCerts } : {}) })
+    ? await connectMailImapTls(mb.smtp_host, port, undefined, "[smtp] ")
     : await Deno.connect({ hostname: mb.smtp_host, port });
 
   const dec = new TextDecoder();
@@ -99,10 +97,7 @@ export async function sendMail(mb: Mailbox, opts: SendOpts): Promise<string> {
     if (!useSSL && /STARTTLS/i.test(ehlo) && !MAIL_LOCAL_TEST_MODE) {
       await write(`STARTTLS\r\n`);
       await expect("220", "STARTTLS");
-      const tls = await Deno.startTls(conn as Deno.TcpConn, {
-        hostname: mb.smtp_host,
-        ...(caCerts ? { caCerts } : {}),
-      });
+      const tls = await startMailSmtpTls(conn as Deno.TcpConn, mb.smtp_host, "[smtp] ");
       conn = tls;
       await write(`EHLO lovable\r\n`);
       ehlo = await expect("250", "EHLO2");

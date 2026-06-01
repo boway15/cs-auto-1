@@ -57,10 +57,14 @@ import {
 import {
   BODY_REPAIR_COOLDOWN_MS,
   deriveBodyRepairUiStatusFromTask,
+  fetchAttachmentRepairTaskStatus,
   fetchBodyRepairTaskStatus,
+  formatAttachmentRepairTaskHint,
   formatBodyRepairTaskHint,
   invokeProcessEmailAfterBodyRepair,
   invokeRepairEmailBody,
+  hasReadableEmailBodyForDisplay,
+  needsEmailBodyRepair,
   isEmailBodyEmpty,
   type BodyRepairUiStatus,
 } from "@/lib/email-body";
@@ -134,14 +138,27 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useNavigate } from "react-router-dom";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 
 type Email = any;
 type Order = any;
 type Draft = any;
 const ATTACHMENT_REPAIR_COOLDOWN_MS = 6 * 60 * 1000;
+const WORKBENCH_EMAIL_ID_PARAM = "email";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function readEmailIdFromUrl(): string | null {
+  const id = new URLSearchParams(window.location.search).get(WORKBENCH_EMAIL_ID_PARAM);
+  return id && UUID_RE.test(id) ? id : null;
+}
 
 /** 用于邮箱筛选：兼容 `Name <a@b.com>` 与纯地址 */
 function normalizeEmailAddress(s: string | null | undefined): string {
@@ -153,6 +170,7 @@ function normalizeEmailAddress(s: string | null | undefined): string {
 
 export default function Workbench() {
   const navigate = useNavigate();
+  const [, setSearchParams] = useSearchParams();
   const {
     hasAllMailboxAccess,
     hasMailboxAccess,
@@ -161,8 +179,10 @@ export default function Workbench() {
     authGateLoading,
   } = useAuth();
   const canOperate = hasMailboxAccess && !grantsLoading;
+  const initialSelectedId = readEmailIdFromUrl();
   const [emails, setEmails] = useState<Email[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId);
+  const selectedIdRef = useRef<string | null>(initialSelectedId);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [listDays, setListDays] = useState(30);
@@ -197,6 +217,7 @@ export default function Workbench() {
   const repairEmailBodyIfNeededRef = useRef<(emailId: string, force?: boolean) => void>(() => {});
   const missingAnalysisInFlightRef = useRef<string | null>(null);
   const [bodyRepairTaskHint, setBodyRepairTaskHint] = useState<string | null>(null);
+  const [attachmentRepairTaskHint, setAttachmentRepairTaskHint] = useState<string | null>(null);
   const [conversationCollapsed, setConversationCollapsed] = useState(true);
   const [timelineCollapsed, setTimelineCollapsed] = useState(true);
   /** 更多查询（时间/意图/关联/分类/时效），默认收起；上行邮箱、中行状态、下行搜索+更多查询 */
@@ -331,8 +352,24 @@ export default function Workbench() {
     search,
   ]);
 
+  const listFiltersKey = useMemo(() => JSON.stringify(listFilters), [listFilters]);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (selectedId) next.set(WORKBENCH_EMAIL_ID_PARAM, selectedId);
+        else next.delete(WORKBENCH_EMAIL_ID_PARAM);
+        return next;
+      },
+      { replace: true },
+    );
+  }, [selectedId, setSearchParams]);
+
   const loadEmails = useCallback(
-    async (opts?: { keepSelection?: boolean }): Promise<Email[]> => {
+    async (opts?: { keepSelection?: boolean; selectFirst?: boolean }): Promise<Email[]> => {
+      const keepSelection = opts?.keepSelection ?? true;
       setListLoading(true);
       try {
         const { rows, total } = await fetchWorkbenchEmailList(
@@ -344,13 +381,16 @@ export default function Workbench() {
         setEmails(list);
         setListTotal(total);
         await loadCompensationHints(list);
-        if (!opts?.keepSelection) {
+        const currentSelectedId = selectedIdRef.current;
+        if (opts?.selectFirst || !keepSelection) {
           if (list.length === 0) {
             setSelectedId(null);
             setSelectedEmailDetail(null);
-          } else if (!selectedId || !list.some((e) => e.id === selectedId)) {
+          } else {
             setSelectedId(list[0].id);
           }
+        } else if (!currentSelectedId && list.length > 0) {
+          setSelectedId(list[0].id);
         }
         return list;
       } catch (error) {
@@ -367,7 +407,7 @@ export default function Workbench() {
         setListLoading(false);
       }
     },
-    [listFilters, listPage, loadCompensationHints, selectedId],
+    [listFilters, listPage, loadCompensationHints],
   );
 
   const loadEmailsRef = useRef(loadEmails);
@@ -375,7 +415,7 @@ export default function Workbench() {
 
   const triggerMissingAnalysisIfNeeded = useCallback(async (emailId: string, emailRow: Email) => {
     if (missingAnalysisInFlightRef.current === emailId) return;
-    if (isEmailBodyEmpty(emailRow) || emailRow.ai_analyzed_at) return;
+    if (needsEmailBodyRepair(emailRow) || emailRow.ai_analyzed_at) return;
     missingAnalysisInFlightRef.current = emailId;
     try {
       const r = await invokeProcessEmailAfterBodyRepair(emailId);
@@ -407,10 +447,14 @@ export default function Workbench() {
       setEmails((prev) =>
         prev.map((row) => (row.id === emailId ? { ...row, ...(fullRow as Email) } : row)),
       );
-      if (!options?.skipBodyRepair && isEmailBodyEmpty(fullRow as Email)) {
+      if (!options?.skipBodyRepair && needsEmailBodyRepair(fullRow as Email)) {
         setBodyRepairUiStatus("idle");
         void repairEmailBodyIfNeededRef.current(emailId);
-      } else if (!options?.skipAnalysisCompensation && !isEmailBodyEmpty(fullRow as Email) && !fullRow.ai_analyzed_at) {
+      } else if (
+        !options?.skipAnalysisCompensation &&
+        hasReadableEmailBodyForDisplay(fullRow.body_text, fullRow.body_html) &&
+        !fullRow.ai_analyzed_at
+      ) {
         void triggerMissingAnalysisIfNeeded(emailId, fullRow as Email);
       }
     }
@@ -645,6 +689,22 @@ export default function Workbench() {
     });
   }, [selected?.id, selected?.attachments, repairSelectedEmailAttachments]);
 
+  useEffect(() => {
+    if (!selectedId) {
+      setAttachmentRepairTaskHint(null);
+      return;
+    }
+    let cancelled = false;
+    const loadHint = async () => {
+      const task = await fetchAttachmentRepairTaskStatus(selectedId);
+      if (!cancelled) setAttachmentRepairTaskHint(formatAttachmentRepairTaskHint(task));
+    };
+    void loadHint();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, selected?.attachments, repairingSelectedAttachments]);
+
   const repairEmailBodyIfNeeded = useCallback(async (emailId: string, force = false) => {
     if (bodyRepairInFlightRef.current === emailId) return;
     const cooldownUntil = bodyRepairCooldownUntilRef.current.get(emailId) ?? 0;
@@ -683,7 +743,7 @@ export default function Workbench() {
           .select("ai_analyzed_at, body_text, body_html")
           .eq("id", emailId)
           .maybeSingle();
-        if (row && !isEmailBodyEmpty(row as Email) && !row.ai_analyzed_at) {
+        if (row && hasReadableEmailBodyForDisplay(row.body_text, row.body_html) && !row.ai_analyzed_at) {
           setBodyRepairUiStatus("done");
           const base =
             selectedEmailDetail?.id === emailId
@@ -751,7 +811,7 @@ export default function Workbench() {
         .maybeSingle();
       if (cancelled) return;
 
-      const hasBody = row ? !isEmailBodyEmpty(row as Email) : false;
+      const hasBody = row ? hasReadableEmailBodyForDisplay(row.body_text, row.body_html) : false;
       const analyzed = Boolean(row?.ai_analyzed_at);
       if (!hasBody) {
         setBodyRepairUiStatus("failed");
@@ -776,7 +836,7 @@ export default function Workbench() {
   useEffect(() => {
     if (bodyRepairUiStatus !== "done" || !selectedId) return;
     const base = selectedEmailDetail?.id === selectedId ? selectedEmailDetail : null;
-    if (!base || isEmailBodyEmpty(base) || base.ai_analyzed_at) return;
+    if (!base || !hasReadableEmailBodyForDisplay(base.body_text, base.body_html) || base.ai_analyzed_at) return;
 
     let cancelled = false;
     let attempts = 0;
@@ -808,17 +868,24 @@ export default function Workbench() {
     return () => clearTimeout(t);
   }, [searchInput]);
 
-  const prevListFilters = useRef(listFilters);
+  const prevListFiltersKey = useRef(listFiltersKey);
+  const prevListPage = useRef(listPage);
   useEffect(() => {
-    if (prevListFilters.current !== listFilters) {
-      prevListFilters.current = listFilters;
-      if (listPage !== 0) {
-        setListPage(0);
-        return;
-      }
+    const filtersChanged = prevListFiltersKey.current !== listFiltersKey;
+    const pageChanged = prevListPage.current !== listPage;
+    prevListFiltersKey.current = listFiltersKey;
+    prevListPage.current = listPage;
+
+    if (filtersChanged && listPage !== 0) {
+      setListPage(0);
+      return;
     }
-    void loadEmails();
-  }, [listFilters, listPage, loadEmails]);
+
+    void loadEmails({
+      keepSelection: !(filtersChanged || pageChanged),
+      selectFirst: filtersChanged || pageChanged,
+    });
+  }, [listFiltersKey, listPage, loadEmails]);
 
   useEffect(() => {
     if (authGateLoading) return;
@@ -916,11 +983,29 @@ export default function Workbench() {
     };
   }, [selected?.id, selected?.attachments, selected?.body_html, selected?.body_text]);
 
-  // 仅随选中邮件 id 拉详情，避免 loadDetail 更新 selectedEmailDetail 后 selected 引用变化导致反复加载、历史邮件计数闪烁
+  // 列表中有行时按行拉详情
   useEffect(() => {
-    if (!selectedListRow) return;
+    if (!selectedId || !selectedListRow) return;
     void loadDetail(selectedListRow);
-  }, [selectedListRow?.id, loadDetail]);
+  }, [selectedId, selectedListRow?.id, loadDetail]);
+
+  // 刷新后邮件不在当前筛选页时，按 id 直连库加载详情
+  useEffect(() => {
+    if (!selectedId || selectedListRow) return;
+    let cancelled = false;
+    void (async () => {
+      const { data, error } = await supabase
+        .from("emails")
+        .select("*")
+        .eq("id", selectedId)
+        .maybeSingle();
+      if (cancelled || error || !data) return;
+      void loadDetail(data as Email);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, selectedListRow, loadDetail]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -1989,6 +2074,8 @@ export default function Workbench() {
                       <EmailBody
                         bodyText={selected.body_text}
                         bodyHtml={selected.body_html}
+                        attachments={selected.attachments as Record<string, unknown>[] | undefined}
+                        attachmentPreviewUrls={attachmentPreviewUrls}
                       />
                       {(() => {
                         const { inlineImages } = partitionWorkbenchAttachments(
@@ -2061,6 +2148,9 @@ export default function Workbench() {
                     <p className="mb-2 text-xs text-muted-foreground">
                       检测到历史占位附件，正在自动补拉本邮件附件…
                     </p>
+                  )}
+                  {hasPlaceholderAttachments && attachmentRepairTaskHint && (
+                    <p className="mb-2 text-xs text-muted-foreground">{attachmentRepairTaskHint}</p>
                   )}
                   <div className="grid grid-cols-2 gap-2">
                     {fileAttachments.map(({ item: a, index: i }) => {

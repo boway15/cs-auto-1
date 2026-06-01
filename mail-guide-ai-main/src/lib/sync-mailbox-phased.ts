@@ -8,6 +8,12 @@ export type SyncMailboxInvokeBody = {
   force_bulk?: boolean;
   repair_empty_body?: boolean;
   repair_missing_attachments?: boolean;
+  /** YYYY-MM-DD，仅补同步该日（近 30 天） */
+  sync_on_date?: string;
+  /** 可选：仅补该发件人，如 stevehortz@gmail.com */
+  sync_from_email?: string;
+  /** 按日补同步续扫：IMAP UID 列表已扫描下标 */
+  date_scan_offset?: number;
 };
 
 export type RepairSingleEmailInvokeBody = {
@@ -27,6 +33,11 @@ export type SyncMailboxResultRow = {
   error?: string;
   queued?: boolean;
   queue_reason?: string;
+  degraded?: boolean;
+  date_imap_total?: number;
+  date_skipped_existing?: number;
+  date_skipped_header?: number;
+  date_scan_offset?: number;
 };
 
 export type PhasedSyncProgress = {
@@ -46,10 +57,16 @@ export type PhasedSyncOutcome = {
   totalRepaired: number;
   failed: boolean;
   errorMessage?: string;
+  /** 部分阶段已转入后台队列，非硬失败 */
+  degraded?: boolean;
+  /** 按日补同步：该日仍未处理完的约剩封数 */
+  dateRemaining?: number;
 };
 
 const DEFAULT_MAX_ROUNDS = 50;
 const DEFAULT_MAX_BATCHES = 10;
+/** 按日补同步可能上百封，需更多 HTTP 批次（每批仅处理少量 UID） */
+const DEFAULT_DATE_SYNC_MAX_BATCHES = 120;
 const DEFAULT_ROUND_DELAY_MS = 1500;
 const DEFAULT_BATCH_DELAY_MS = 20_000;
 const DEFAULT_WORKER_CANCEL_RETRY_DELAY_MS = 8000;
@@ -101,20 +118,183 @@ function buildInvokeBody(mailboxId: string, phase: SyncMailboxPhase): SyncMailbo
   return body;
 }
 
+export async function invokeSyncMailboxDate(
+  mailboxId: string,
+  syncOnDate: string,
+  syncFromEmail?: string,
+  dateScanOffset?: number,
+): Promise<{ row: SyncMailboxResultRow | null; errorMessage?: string; degraded?: boolean }> {
+  const body: SyncMailboxInvokeBody = { mailbox_id: mailboxId, sync_on_date: syncOnDate };
+  const from = syncFromEmail?.trim();
+  if (from) body.sync_from_email = from;
+  if (typeof dateScanOffset === "number" && Number.isFinite(dateScanOffset) && dateScanOffset > 0) {
+    body.date_scan_offset = Math.floor(dateScanOffset);
+  }
+  const { data, error } = await supabase.functions.invoke("sync-mailbox", { body });
+  if (error) {
+    const detail = await formatFunctionsInvokeError(error);
+    return { row: null, errorMessage: detail };
+  }
+  if (data?.error && typeof data.error === "string") {
+    return { row: null, errorMessage: data.error };
+  }
+  const row = (data?.results?.[0] ?? data) as SyncMailboxResultRow;
+  if (row?.error) {
+    return { row: null, errorMessage: row.error };
+  }
+  if (data?.degraded && data?.message) {
+    return {
+      row: { ...row, degraded: true, queued: true, queue_reason: data.message },
+      degraded: true,
+    };
+  }
+  return { row, degraded: Boolean(row?.degraded) };
+}
+
+/** 近 30 天内可选日期的 YYYY-MM-DD（本地日历） */
+export function getDateResyncBounds(): { min: string; max: string } {
+  const max = new Date();
+  const min = new Date();
+  min.setDate(min.getDate() - 30);
+  const fmt = (d: Date) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  };
+  return { min: fmt(min), max: fmt(max) };
+}
+
+export type RunDateMailboxSyncOptions = {
+  mailboxId: string;
+  syncOnDate: string;
+  syncFromEmail?: string;
+  maxBatches?: number;
+  roundDelayMs?: number;
+  onProgress?: (p: { batch: number; inserted: number; remaining: number }) => void;
+  wait?: (ms: number) => Promise<void>;
+};
+
+/** 按指定日期补同步（可多批直到该日邮件处理完或达批次数上限） */
+export async function runDateMailboxSync(
+  options: RunDateMailboxSyncOptions,
+): Promise<PhasedSyncOutcome> {
+  const {
+    mailboxId,
+    syncOnDate,
+    syncFromEmail,
+    maxBatches = DEFAULT_DATE_SYNC_MAX_BATCHES,
+    roundDelayMs = DEFAULT_ROUND_DELAY_MS,
+    onProgress,
+    wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  } = options;
+
+  let totalInserted = 0;
+  let failed = false;
+  let errorMessage: string | undefined;
+  let degraded = false;
+  let remaining = 1;
+  let scanOffset = 0;
+  let lastRemaining = -1;
+  let stallBatches = 0;
+  let workerCancelRetries = 0;
+
+  for (let batch = 1; batch <= maxBatches && remaining > 0; batch++) {
+    const { row, errorMessage: invokeErr, degraded: invokeDegraded } = await invokeSyncMailboxDate(
+      mailboxId,
+      syncOnDate,
+      syncFromEmail,
+      scanOffset,
+    );
+    if (invokeErr) {
+      if (
+        workerCancelRetries < 3 &&
+        (isWorkerRequestCancelledError(invokeErr) || shouldEnqueueAttachmentRepairOnFailure(invokeErr))
+      ) {
+        workerCancelRetries++;
+        degraded = true;
+        batch--;
+        await wait(DEFAULT_WORKER_CANCEL_RETRY_DELAY_MS);
+        continue;
+      }
+      if (totalInserted > 0) {
+        degraded = true;
+        errorMessage = invokeErr;
+        break;
+      }
+      failed = true;
+      errorMessage = invokeErr;
+      break;
+    }
+    workerCancelRetries = 0;
+    if (invokeDegraded) degraded = true;
+    const inserted = row?.inserted ?? 0;
+    remaining = row?.remaining ?? 0;
+    if (typeof row?.date_scan_offset === "number" && Number.isFinite(row.date_scan_offset)) {
+      scanOffset = Math.max(0, Math.floor(row.date_scan_offset));
+    }
+    totalInserted += inserted;
+    onProgress?.({ batch, inserted, remaining });
+    if (remaining === lastRemaining && inserted === 0) {
+      stallBatches++;
+      if (stallBatches >= 3) {
+        failed = true;
+        errorMessage = "按日补同步进度停滞，请稍后重试或检查发件人筛选";
+        break;
+      }
+    } else {
+      stallBatches = 0;
+    }
+    lastRemaining = remaining;
+    if (remaining > 0 && batch < maxBatches) await wait(roundDelayMs);
+  }
+
+  return {
+    totalInserted,
+    historyRemaining: 0,
+    emptyBodyRemaining: 0,
+    totalRepaired: 0,
+    failed,
+    errorMessage,
+    degraded,
+    dateRemaining: remaining,
+  };
+}
+
 export async function invokeSyncMailboxPhase(
   mailboxId: string,
   phase: SyncMailboxPhase,
-): Promise<{ row: SyncMailboxResultRow | null; errorMessage?: string }> {
+): Promise<{ row: SyncMailboxResultRow | null; errorMessage?: string; degraded?: boolean }> {
   const { data, error } = await supabase.functions.invoke("sync-mailbox", {
     body: buildInvokeBody(mailboxId, phase),
   });
   if (error) {
-    return { row: null, errorMessage: await formatFunctionsInvokeError(error) };
+    const rawMessage =
+      typeof error === "object" && error !== null && "message" in error
+        ? String((error as { message?: unknown }).message ?? "")
+        : "";
+    return {
+      row: null,
+      errorMessage: rawMessage || (await formatFunctionsInvokeError(error)),
+    };
+  }
+  if (data?.degraded && data?.message) {
+    const row = (data?.results?.[0] ?? {
+      inserted: 0,
+      remaining: 0,
+      queued: true,
+      degraded: true,
+      queue_reason: String(data.message),
+    }) as SyncMailboxResultRow;
+    return { row, degraded: true };
   }
   if (data?.error) {
     return { row: null, errorMessage: String(data.error) };
   }
   const row = (data?.results?.[0] ?? null) as SyncMailboxResultRow | null;
+  if (row?.degraded || row?.queued) {
+    return { row, degraded: true };
+  }
   if (row?.error) {
     return { row: null, errorMessage: row.error };
   }
@@ -231,6 +411,7 @@ export async function runPhasedMailboxSync(
   let emptyBodyRemaining = 0;
   let failed = false;
   let errorMessage: string | undefined;
+  let degraded = false;
 
   const phases: SyncMailboxPhase[] = ["incremental", "historical", "repair_body", "repair_attachments"];
 
@@ -246,22 +427,35 @@ export async function runPhasedMailboxSync(
 
       while (rounds < maxRoundsPerPhase) {
         rounds++;
-        const { row, errorMessage: invokeErr } = await invokeSyncMailboxPhase(mailboxId, phase);
+        const { row, errorMessage: invokeErr, degraded: invokeDegraded } = await invokeSyncMailboxPhase(
+          mailboxId,
+          phase,
+        );
         if (invokeErr) {
           if (
-            phase !== "repair_body" &&
             workerCancelRetries < 2 &&
-            isWorkerRequestCancelledError(invokeErr)
+            shouldEnqueueAttachmentRepairOnFailure(invokeErr)
           ) {
             workerCancelRetries++;
             rounds--;
             await wait(workerCancelRetryDelayMs);
             continue;
           }
+          if (
+            (phase === "repair_body" || phase === "repair_attachments") &&
+            shouldEnqueueAttachmentRepairOnFailure(invokeErr)
+          ) {
+            degraded = true;
+            phaseDone = true;
+            break;
+          }
           failed = true;
           errorMessage = invokeErr;
           phaseDone = true;
           break;
+        }
+        if (invokeDegraded) {
+          degraded = true;
         }
 
         const inserted = row?.inserted ?? 0;
@@ -355,5 +549,6 @@ export async function runPhasedMailboxSync(
     totalRepaired,
     failed,
     errorMessage,
+    degraded,
   };
 }

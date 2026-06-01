@@ -4,7 +4,7 @@
 
 **发版类型**：v1.2.2 → **v1.3.0**  
 **代码分支**：GitLab `main`  
-**提交号**：`142eee8c0c956d5b629051161f360c509133cac9`（标签 `v1.3.0`）  
+**提交号**：`8cbe548b1275cc14a1e026e8a987de7c866fb076`（标签 `v1.3.0`，含 `142eee8` 主功能提交）  
 **建议顺序**：同步代码 → 后端脚本 → 环境变量（含邮件体积上限）→ 前端重新构建部署 → 验收
 
 ---
@@ -17,7 +17,7 @@
 | **ERP 拦截通知** | 接口 **必填 `site_code`**，发件邮箱按「站点邮箱关联」解析；422 写发送日志且不占用幂等键 |
 | **附件补拉** | `email_attachment_repair_tasks` 队列 + 定时任务，解决超大附件 Worker 超时 |
 | **邮件同步体积** | `.env.functions` 配置 `MAIL_SYNC_FULL_BODY_MAX_BYTES`、`MAIL_SYNC_FULL_BODY_WITH_ATTACH_MAX_BYTES`（见第 3 步） |
-| **前端** | 工作台附件展示/下载、迅捷回邮模板「站点邮箱关联」、发送日志、模板页与工作台体验优化 |
+| **前端** | 工作台附件展示/下载、分阶段同步增强、邮箱配置页优化；迅捷回邮模板「站点邮箱关联」、发送日志 |
 | **对 ERP 的 Breaking** | 拦截客户通知须增加字段 `site_code`（无需传 `site_name`），详见 `mail-guide-ai-main/docs/erp-notify-customer-api.md` |
 
 ---

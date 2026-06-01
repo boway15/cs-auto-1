@@ -22,9 +22,11 @@
 
 说明：**产品流程仅强调「已回复」**；若库中仍存 `closed` 历史数据，不作为本期主流程与验收重点。
 
-## 3. 意图定义（唯一枚举）
+## 3. 意图定义（唯一枚举，11 个存库值）
 
 主字段：`emails.business_intent`
+
+**售后与履约（7）**
 
 - `order_cancel`：订单取消
 - `address_change`：订单改地址
@@ -33,6 +35,15 @@
 - `description_mismatch`：商品描述不符
 - `logistics`：物流问题
 - `other`：其他问题
+
+**渠道 / 咨询 / 会话（4）**
+
+- `amazon_marketplace`：亚马逊渠道
+- `product_inquiry`：售前/安装咨询
+- `conversation_idle`：会话收尾（感谢/结案/无新诉求）
+- `solution_accepted`：接受方案（待履约）
+
+自动回邮（双槽）仅适用于 R1/R2 售后类；上述新增 3 类默认不参与。分析以邮件**最新正文**（剥离引用）为准。
 
 兼容字段：`emails.intent` 与 `emails.intent_legacy`（过渡期保留）
 

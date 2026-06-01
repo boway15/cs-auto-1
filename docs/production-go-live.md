@@ -72,8 +72,7 @@
 
 ### 3.3 数据库迁移
 
-1. 按 `self-hosted-supabase.md` 为 `db` **临时**暴露宿主机端口（如 `54323:5432`），执行：
-   `npx supabase db push --db-url "postgresql://postgres:<密码>@127.0.0.1:54323/postgres"`（`PGSSLMODE=disable` 等见原文档）。
+1. 本地/首次全量迁移见 `self-hosted-supabase.md`：优先 **`docker compose cp` + `psql -f`**；`db push` 用本仓库 **`15432`**（非 `54323`），密码勿用占位符（`PGSSLMODE=disable` 等见原文档）。
 2. **迁移完成后删除** `db` 的临时 `ports` 映射，避免 Postgres 长期暴露在宿主机。
 
 ### 3.4 Vault 与 pg_cron（必做）

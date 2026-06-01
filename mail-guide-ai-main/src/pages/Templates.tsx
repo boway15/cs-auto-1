@@ -14,6 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Eye } from "lucide-react";
 import { toast } from "sonner";
+import { BUSINESS_INTENT_OPTIONS } from "@/lib/customerService";
 
 const SLOT_ORDER = "ar_missing_order";
 const SLOT_ORDER_OR_ATT = "ar_missing_order_or_attachment";
@@ -23,16 +24,6 @@ const SLOT_FIXED_DB_NAME: Record<string, string> = {
   [SLOT_ORDER]: "自动回复-缺失订单号",
   [SLOT_ORDER_OR_ATT]: "自动回复-缺失订单号或附件",
 };
-
-const BUSINESS_INTENT_OPTIONS: { value: string; label: string }[] = [
-  { value: "order_cancel", label: "订单取消" },
-  { value: "address_change", label: "订单改地址" },
-  { value: "logistics", label: "物流问题" },
-  { value: "damaged", label: "破损" },
-  { value: "defect", label: "产品缺陷" },
-  { value: "description_mismatch", label: "商品描述不符" },
-  { value: "other", label: "其它" },
-];
 
 const FIRST_CONTACT_OPTIONS: { value: number; label: string }[] = [
   { value: 0, label: "不限首封（不校验窗口，满足其它条件即可自动回复）" },
@@ -46,7 +37,8 @@ const FIRST_CONTACT_OPTIONS: { value: number; label: string }[] = [
 const REPLY_TEMPLATE_PLACEHOLDER_REF: { key: string; desc: string; previewSample: string }[] = [
   { key: "from_name", desc: "发件人显示名；为空时发信端会退回为邮箱地址", previewSample: "Alice" },
   { key: "from_email", desc: "发件人邮箱", previewSample: "alice@example.com" },
-  { key: "subject", desc: "客户邮件主题", previewSample: "Need help with my order" },
+  { key: "subject", desc: "客户邮件主题；无主题时自动回退为自动回复收件人邮箱（来信 from_email）", previewSample: "Need help with my order" },
+  { key: "reply_to_email", desc: "自动回复实际收件人邮箱（与 SMTP To 一致）", previewSample: "alice@example.com" },
   { key: "order_no", desc: "解析到的订单号（可能为空）", previewSample: "SO20260428001" },
   { key: "missing_elements", desc: "缺失要素（英文键，与发信端 join 一致）", previewSample: "order_no, attachment" },
 ];

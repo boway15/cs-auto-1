@@ -1,4 +1,4 @@
-// 客服域：业务意图（7 类）、关联状态、SLA 桶 的展示与计算工具
+// 客服域：业务意图（10 类）、关联状态、SLA 桶 的展示与计算工具
 // 与后端 emails.business_intent / association_status / received_at 的口径保持一致
 
 export type BusinessIntent =
@@ -8,8 +8,13 @@ export type BusinessIntent =
   | "defect"
   | "description_mismatch"
   | "logistics"
-  | "other";
+  | "other"
+  | "amazon_marketplace"
+  | "product_inquiry"
+  | "conversation_idle"
+  | "solution_accepted";
 
+/** 工作台/模板下拉顺序；「其他问题」置末，不展示分组标题 */
 export const BUSINESS_INTENT_OPTIONS: ReadonlyArray<{ value: BusinessIntent; label: string }> = [
   { value: "order_cancel", label: "订单取消" },
   { value: "address_change", label: "订单改地址" },
@@ -17,6 +22,10 @@ export const BUSINESS_INTENT_OPTIONS: ReadonlyArray<{ value: BusinessIntent; lab
   { value: "defect", label: "产品缺陷" },
   { value: "description_mismatch", label: "商品描述不符" },
   { value: "logistics", label: "物流问题" },
+  { value: "amazon_marketplace", label: "亚马逊渠道" },
+  { value: "product_inquiry", label: "售前/安装咨询" },
+  { value: "conversation_idle", label: "会话收尾" },
+  { value: "solution_accepted", label: "接受方案" },
   { value: "other", label: "其他问题" },
 ];
 

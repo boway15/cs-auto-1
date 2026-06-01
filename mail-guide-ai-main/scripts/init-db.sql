@@ -84,7 +84,8 @@ CREATE TABLE IF NOT EXISTS emails (
   intent          TEXT,
   business_intent TEXT
                   CHECK (business_intent IS NULL OR business_intent IN (
-                    'order_cancel','address_change','damaged','defect','description_mismatch','logistics','other'
+                    'order_cancel','address_change','damaged','defect','description_mismatch','logistics','other',
+                    'amazon_marketplace','product_inquiry','conversation_idle','solution_accepted'
                   )),
   intent_legacy   TEXT,
   ai_summary      TEXT,

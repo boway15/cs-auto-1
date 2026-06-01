@@ -135,11 +135,15 @@ npx supabase link --project-ref <your-project-ref>
 完整说明见 **`mail-guide-ai-main/docs/self-hosted-supabase.md`**。**从零搭栈、逐项勾选与排错**请优先阅读该文档中的 **「本地从零到可用：总清单」**；下面为最小命令链速查。
 
 ```powershell
-# 1) 临时给 db 暴露 54323:5432（写在 supabase-selfhost/docker-compose.yml 的 db 服务下），然后：
-cd d:\Docker\project\cs-main\mail-guide-ai-main
-$env:PGSSLMODE = "disable"
-npx supabase db push --db-url "postgresql://postgres:<POSTGRES_PASSWORD>@127.0.0.1:54323/postgres"
-# 推完后删除临时 ports 并 docker compose up -d
+# 1) 单条 migration（推荐，勿用管道灌中文 SQL）— 见 self-hosted-supabase.md「单条 migration」
+cd d:\Docker\project\cs-main\supabase-selfhost
+docker compose cp "d:\Docker\project\cs-main\mail-guide-ai-main\supabase\migrations\<文件名>.sql" db:/tmp/mig.sql
+docker compose exec -T db psql -v ON_ERROR_STOP=1 -U postgres -d postgres -f /tmp/mig.sql
+
+# 备选：全量 db push（compose 已映射 15432:5432，勿写 54323；密码用 .env 真实值，勿留占位符）
+# cd d:\Docker\project\cs-main\mail-guide-ai-main
+# $env:PGSSLMODE = "disable"
+# npx supabase db push --db-url "postgresql://postgres:你的密码@127.0.0.1:15432/postgres"
 
 # 2) Vault + pg_cron 指向栈内 Kong
 cd d:\Docker\project\cs-main\mail-guide-ai-main\scripts\selfhosted
@@ -201,7 +205,7 @@ Dashboard 中 Functions / Cron 与团队云端迁移一致即可；新环境不�
 ### 自建 Supabase（Docker）
 
 - `docker compose ps`（在 `supabase-selfhost`）主要服务 healthy
-- 已在 **`scripts/selfhosted/Apply-VaultAndCron.ps1`** 执行后，Postgres 中 **4 条** 业务 cron 齐全（与 [`docs/self-hosted-supabase.md`](./self-hosted-supabase.md) 一致；**无** `compensating-alerts-every-30min`），含 **`run-compensation-tasks-every-30min`**、**`retry-risk-intercept-hourly-at-45`**（二者 schedule 均为 **`*/20 * * * *`**）。
+- 已在 **`scripts/selfhosted/Apply-VaultAndCron.ps1`** 执行后，Postgres 中 **9 条** 业务 cron 齐全（与 [`docs/self-hosted-supabase.md`](./self-hosted-supabase.md) 一致；**无** `compensating-alerts-every-30min`），含 **`run-compensation-tasks-every-30min`**、**`retry-risk-intercept-hourly-at-45`**、**`run-sla-mailbox-sync-every-10min`**、**`run-mailbox-history-backfill-every-5min`** 等。
 - 校验 SQL（勿把输出中的密钥贴到公共环境）：
 
 ```sql
@@ -210,10 +214,15 @@ WHERE jobname IN (
   'auto-sync-mailbox-every-5min',
   'auto-draft-every-30min',
   'run-compensation-tasks-every-30min',
-  'retry-risk-intercept-hourly-at-45'
+  'retry-risk-intercept-hourly-at-45',
+  'email-body-repair-tasks-every-3min',
+  'email-attachment-repair-tasks-every-5min',
+  'email-fetch-tasks-every-3min',
+  'run-sla-mailbox-sync-every-10min',
+  'run-mailbox-history-backfill-every-5min'
 )
 ORDER BY jobname;
--- 预期 4 行；不应含 compensating-alerts-every-30min；command 中不应含 *.supabase.co
+-- 预期 9 行；不应含 compensating-alerts-every-30min；command 中不应含 *.supabase.co
 SELECT name FROM vault.secrets WHERE name = 'service_role_key';
 ```
 

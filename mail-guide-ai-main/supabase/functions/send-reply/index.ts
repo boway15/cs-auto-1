@@ -2,6 +2,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { sendMail } from "../_shared/smtp.ts";
 import { appendMailboxSignature } from "../_shared/mail-signature.ts";
+import { buildReplySubject, resolveAutoReplyRecipient } from "../_shared/mail-reply-subject.ts";
 import { assertCanAccessEmail } from "../_shared/mailbox-access.ts";
 
 const corsHeaders = {
@@ -76,8 +77,8 @@ Deno.serve(async (req) => {
       .eq("email_id", email_id)
       .limit(1);
 
-    const replySubject = subject_override
-      || (email.subject?.startsWith("Re:") ? email.subject : `Re: ${email.subject ?? ""}`);
+    const replyToEmail = resolveAutoReplyRecipient(email);
+    const replySubject = subject_override || buildReplySubject(email, replyToEmail);
 
     let messageId = "";
     let sendError: string | null = null;
@@ -85,7 +86,7 @@ Deno.serve(async (req) => {
 
     try {
       messageId = await sendMail(mb, {
-        to: email.from_email,
+        to: replyToEmail,
         subject: replySubject,
         text: bodyWithSignature,
         inReplyTo: email.message_id ?? undefined,
@@ -100,7 +101,7 @@ Deno.serve(async (req) => {
       email_id,
       mailbox_id: mb.id,
       order_id: linkRows?.[0]?.order_id ?? null,
-      to_email: email.from_email,
+      to_email: replyToEmail,
       from_email: mb.email_address,
       subject: replySubject,
       content: bodyWithSignature,

@@ -33,6 +33,15 @@ verify_jwt = false
 [functions.run-email-attachment-repair-tasks]
 verify_jwt = false
 
+[functions.run-email-fetch-tasks]
+verify_jwt = false
+
+[functions.run-sla-mailbox-sync]
+verify_jwt = false
+
+[functions.run-mailbox-history-backfill]
+verify_jwt = false
+
 [functions.retry-risk-intercept-compensation]
 verify_jwt = false
 

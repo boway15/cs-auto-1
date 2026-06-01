@@ -12,7 +12,14 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const CRON_KEY = Deno.env.get("CRON_SERVICE_ROLE_KEY");
-const BATCH_LIMIT = 1;
+function parseEnvPositiveInt(name: string, fallback: number): number {
+  const raw = Deno.env.get(name)?.trim();
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+const BATCH_LIMIT = parseEnvPositiveInt("MAIL_ATTACHMENT_REPAIR_BATCH_LIMIT", 1);
 const WORKER_ID = `att-repair-${crypto.randomUUID().slice(0, 8)}`;
 
 function isAuthorizedServiceToken(token: string): boolean {
@@ -71,13 +78,20 @@ Deno.serve(async (req) => {
         .select("attachments")
         .eq("id", locked.email_id)
         .maybeSingle();
-      const hasStoragePath = Array.isArray(emailRow?.attachments) &&
-        emailRow.attachments.some((a: unknown) =>
-          a && typeof a === "object" &&
-          typeof (a as Record<string, unknown>).storage_path === "string" &&
-          String((a as Record<string, unknown>).storage_path ?? "").trim().length > 0
-        );
-      if (hasStoragePath) {
+      const hasValidStoragePath = Array.isArray(emailRow?.attachments) &&
+        emailRow.attachments.some((a: unknown) => {
+          if (!a || typeof a !== "object") return false;
+          const o = a as Record<string, unknown>;
+          const path = typeof o.storage_path === "string" ? o.storage_path.trim() : "";
+          if (!path) return false;
+          const size = o.size;
+          if (typeof size === "number" && size <= 0) return false;
+          const fn = String(o.filename ?? "").trim().toLowerCase();
+          const ct = String(o.contentType ?? "").split(";")[0].trim().toLowerCase();
+          if (/^attachment-\d+\./i.test(fn) && ct === "application/octet-stream") return false;
+          return true;
+        });
+      if (hasValidStoragePath) {
         await admin.from("email_attachment_repair_tasks").update({
           status: "resolved",
           repaired_at: new Date().toISOString(),

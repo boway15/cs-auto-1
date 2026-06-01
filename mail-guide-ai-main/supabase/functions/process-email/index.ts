@@ -1,6 +1,11 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { sendMail } from "../_shared/smtp.ts";
 import { appendMailboxSignature } from "../_shared/mail-signature.ts";
+import {
+  buildReplySubject,
+  replySubjectBase,
+  resolveAutoReplyRecipient,
+} from "../_shared/mail-reply-subject.ts";
 import { createAlertAndNotify } from "../_shared/ops-notify.ts";
 import { notifyAutoInterceptFirstFailure } from "../_shared/automation-intercept-alerts.ts";
 import { notifyAutoAssociationFirstFailure } from "../_shared/automation-association-alerts.ts";
@@ -22,6 +27,12 @@ import {
   getStaffActor,
   isServiceRoleToken,
 } from "../_shared/mailbox-access.ts";
+import { enqueueBodyRepairTask } from "../_shared/email-body-repair-queue.ts";
+import { hasReadableEmailBody } from "../_shared/mime-parse.ts";
+import {
+  getAnalysisText,
+  getLatestBodyText,
+} from "../_shared/email-quote-strip.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -73,7 +84,11 @@ type BusinessIntent =
   | "defect"
   | "description_mismatch"
   | "logistics"
-  | "other";
+  | "other"
+  | "amazon_marketplace"
+  | "product_inquiry"
+  | "conversation_idle"
+  | "solution_accepted";
 
 const VALID_BUSINESS_INTENTS: ReadonlyArray<BusinessIntent> = [
   "order_cancel",
@@ -83,7 +98,75 @@ const VALID_BUSINESS_INTENTS: ReadonlyArray<BusinessIntent> = [
   "description_mismatch",
   "logistics",
   "other",
+  "amazon_marketplace",
+  "product_inquiry",
+  "conversation_idle",
+  "solution_accepted",
 ];
+
+function isValidBusinessIntent(value: string): value is BusinessIntent {
+  return VALID_BUSINESS_INTENTS.includes(value as BusinessIntent);
+}
+
+function normalizeBusinessIntent(raw: unknown): BusinessIntent | null {
+  const s = typeof raw === "string" ? raw.trim() : "";
+  if (!s || !isValidBusinessIntent(s)) return null;
+  return s;
+}
+
+function tryParseJsonObject(raw: unknown): Record<string, unknown> | null {
+  if (raw == null) return null;
+  if (typeof raw === "object" && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>;
+  }
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/** 解析 Dify 工作流 outputs（含 text 内嵌 JSON） */
+function parseDifyAnalyzeOutputs(outputs: unknown): Record<string, unknown> {
+  const top = tryParseJsonObject(outputs) ?? {};
+  if (normalizeBusinessIntent(top.business_intent) || typeof top.intent === "string") {
+    return top;
+  }
+  const nested = tryParseJsonObject(top.text);
+  return nested ? { ...top, ...nested } : top;
+}
+
+/**
+ * Dify 返回合法 business_intent 时原样采用；否则用 intent + 正文规则映射（本地兜底同逻辑）。
+ */
+function resolveBusinessIntent(
+  biRaw: string,
+  intentRaw: string,
+  text: string,
+  fallbackIntent: string | undefined,
+  fromEmail?: string | null,
+): BusinessIntent {
+  const fromDify = normalizeBusinessIntent(biRaw);
+  if (fromDify) return fromDify;
+  const effective = intentRaw || fallbackIntent || "";
+  return mapToBusinessIntent(effective || undefined, text, fromEmail);
+}
+
+function categoryForBusinessIntent(bi: BusinessIntent, isAfterSaleLegacy: boolean): string {
+  if (isR1BusinessIntent(bi) || isR2BusinessIntent(bi) || (bi === "other" && isAfterSaleLegacy)) {
+    return "售后";
+  }
+  if (bi === "product_inquiry" || bi === "amazon_marketplace") return "咨询";
+  if (bi === "conversation_idle" || bi === "solution_accepted") return "咨询";
+  return isAfterSaleLegacy ? "售后" : "咨询";
+}
 
 type Analysis = {
   intent: string;
@@ -173,11 +256,24 @@ function isR2BusinessIntent(bi: BusinessIntent): boolean {
   return bi === "damaged" || bi === "defect" || bi === "description_mismatch";
 }
 
-/** R1/R2：写库前归一化 missing_elements 与 is_info_complete（其它意图不改） */
+function isAutomationEligibleIntent(bi: BusinessIntent): boolean {
+  return isR1BusinessIntent(bi) || isR2BusinessIntent(bi);
+}
+
+function isNonActionBusinessIntent(bi: BusinessIntent): boolean {
+  return bi === "amazon_marketplace" ||
+    bi === "product_inquiry" ||
+    bi === "conversation_idle" ||
+    bi === "solution_accepted";
+}
+
+/** R1/R2：写库前归一化 missing_elements 与 is_info_complete（非 R1/R2 意图不改） */
 function applyR1R2Completeness(analysis: Analysis, email: { has_attachment?: boolean | null }): void {
+  const bi = analysis.business_intent;
+  if (!isAutomationEligibleIntent(bi)) return;
+
   const hasOrder = String(analysis.order_no ?? "").trim().length > 0;
   const hasAtt = !!email.has_attachment;
-  const bi = analysis.business_intent;
 
   if (isR2BusinessIntent(bi)) {
     analysis.is_info_complete = hasOrder && hasAtt;
@@ -195,28 +291,86 @@ function applyR1R2Completeness(analysis: Analysis, email: { has_attachment?: boo
 
 function extractOrderNo(text: string) {
   const patterns = [
+    /\b\d{3}-\d{7}-\d{7}\b/,
     /\b(?:order|订单|orderno|order\s*no\.?)\s*[:#：]?\s*([A-Z0-9][A-Z0-9-]{5,})\b/i,
     /\b(SO\d{6,}|[A-Z]{2,4}-?\d{6,}|\d{8,})\b/i,
   ];
   for (const pattern of patterns) {
     const match = text.match(pattern);
-    if (match?.[1]) return match[1].replace(/^#/, "").trim();
+    if (match) {
+      const raw = match[1] ?? match[0];
+      return String(raw).replace(/^#/, "").trim();
+    }
   }
   return null;
 }
 
-/** 将 Dify/本地 intent 与关键词信号映射到 7 类 business_intent */
-function mapToBusinessIntent(rawIntent: string | undefined, text: string): BusinessIntent {
-  // 规则优先：取消、改地址直接锁死
+function looksLikeAmazonChannel(text: string, fromEmail?: string | null): boolean {
+  if (/@amazon\.(com|co\.uk|de|fr|it|es|ca|com\.au|co\.jp)\b/i.test(String(fromEmail ?? ""))) {
+    return true;
+  }
+  if (/\b\d{3}-\d{7}-\d{7}\b/.test(text)) return true;
+  return /在亚马逊|亚马逊(上)?购买|purchased on amazon|amazon order|bought on amazon|from amazon/i.test(text);
+}
+
+function looksLikeSolutionAccepted(text: string): boolean {
+  return /同意.{0,12}(方案|处理|退款|换货)|接受.{0,8}方案|按.{0,6}说的|accept (the )?(offer|solution|refund)|agree to (the )?(refund|replacement|solution)|proceed with (the )?(refund|replacement)|sounds good.*refund|ok.*refund/i
+    .test(text);
+}
+
+function looksLikeConversationIdle(text: string): boolean {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (compact.length > 600) return false;
+  if (looksLikeSolutionAccepted(text)) return false;
+  if (/问题已解决|已解决|结案|no further (action|help)|case closed|resolved|all set now/i.test(text)) {
+    return true;
+  }
+  if (/^(thanks?|thank you|thx|many thanks|appreciate it|收到|好的收到|感谢)[\s!.，,]*$/i.test(compact)) {
+    return true;
+  }
+  if (/谢谢|感谢|多谢|thanks|thank you|appreciate/i.test(text) &&
+    !/破损|损坏|退款|取消|defect|damage|broken|投诉|refund|cancel/i.test(text)) {
+    return true;
+  }
+  return false;
+}
+
+function looksLikeProductInquiry(text: string): boolean {
+  if (/怎么安装|如何安装|安装步骤|assembly|how to install|instruction manual|说明书|规格|多少钱|price\b|in stock|有货|售前|before (i )?order/i.test(text)) {
+    return true;
+  }
+  return false;
+}
+
+function inferClosureKind(text: string): string | null {
+  if (/问题已解决|已解决|结案|resolved|case closed|all set/i.test(text)) return "case_closed";
+  if (/^(thanks?|thank you|谢谢|感谢)/i.test(text.trim())) return "acknowledgment";
+  return "no_new_request";
+}
+
+function inferInquirySubtype(text: string): string {
+  if (/安装|assembly|install|manual|说明书/i.test(text)) return "installation";
+  return "pre_sales";
+}
+
+/** 将 legacy intent / 关键词映射到 business_intent（Dify 未给出合法枚举时的兜底；text 应为最新正文） */
+function mapToBusinessIntent(
+  rawIntent: string | undefined,
+  text: string,
+  fromEmail?: string | null,
+): BusinessIntent {
+  if (looksLikeAmazonChannel(text, fromEmail)) return "amazon_marketplace";
+  if (looksLikeSolutionAccepted(text)) return "solution_accepted";
+  if (looksLikeConversationIdle(text)) return "conversation_idle";
+  if (looksLikeProductInquiry(text)) return "product_inquiry";
+
   if (rawIntent === "cancel_order" || /取消订单|cancel\s*order|cancel\s*the\s*order/i.test(text)) {
     return "order_cancel";
   }
   if (rawIntent === "change_address" || /修改地址|change\s*address|update\s*address/i.test(text)) {
     return "address_change";
   }
-  // 关键词识别细分售后
   if (/破损|broken|damage|damaged|crushed/i.test(text)) return "damaged";
-  // 质量问题 / 品质差等口语归入 defect（与「缺陷」同档，区别于单纯描述不符）
   if (
     /缺陷|defect|defective|not\s*working|malfunction|质量问题|品质问题|质量差|做工差|品控差|品控问题|次品|劣质/i.test(text)
   ) {
@@ -225,7 +379,6 @@ function mapToBusinessIntent(rawIntent: string | undefined, text: string): Busin
   if (/描述不符|与描述不符|不符|mismatch|not\s*as\s*described|wrong\s*item/i.test(text)) {
     return "description_mismatch";
   }
-  // logistics / shipping_query
   if (
     rawIntent === "shipping_query" ||
     rawIntent === "logistics" ||
@@ -233,65 +386,69 @@ function mapToBusinessIntent(rawIntent: string | undefined, text: string): Busin
   ) {
     return "logistics";
   }
-  // 已知映射的兜底
   if (rawIntent && VALID_BUSINESS_INTENTS.includes(rawIntent as BusinessIntent)) {
     return rawIntent as BusinessIntent;
   }
-  // Dify/本地 legacy：intent 为 after_sale、refund 时，上面细分关键词未命中则不再一律 other（常见中文售后用语）
-  if (
-    rawIntent === "after_sale" ||
-    rawIntent === "refund"
-  ) {
-    if (/退款|退货|换货|赔偿|补偿|质量问题|瑕疵|次品|少发|漏发|错发|发错|不符|描述|假货|仿品|不满意|投诉|差评|坏了|破损|损坏|缺陷|不能用|故障|漏液|开裂|碎裂|变形|污渍|褪色|掉色|缩水|起球|异味|过期|变质/i.test(text)) {
+  if (rawIntent === "after_sale" || rawIntent === "refund") {
+    if (/退款|退货|换货|赔偿|补偿|质量问题|瑕疵|次品|少发|漏发|错发|发错|不符|描述|假货|仿品|不满意|投诉|差评|坏了|破损|损坏|缺陷|不能用|故障/i.test(text)) {
       return "description_mismatch";
     }
   }
   return "other";
 }
 
+function enrichAnalysisEntities(analysis: Analysis, analysisText: string): void {
+  const base = { ...(analysis.entities ?? {}) };
+  if (analysis.business_intent === "conversation_idle") {
+    base.closure_kind = inferClosureKind(analysisText);
+  }
+  if (analysis.business_intent === "product_inquiry") {
+    base.inquiry_subtype = inferInquirySubtype(analysisText);
+  }
+  analysis.entities = base;
+}
+
 function analyzeLocally(email: any): Analysis {
-  const rawText = `${email.subject ?? ""}\n${email.body_text ?? ""}`;
-  const text = rawText.toLowerCase();
-  const orderNo = extractOrderNo(rawText);
+  const analysisText = getAnalysisText(email.subject, email.body_text);
+  const textLower = analysisText.toLowerCase();
+  const orderNo = extractOrderNo(analysisText);
   const missing = new Set<string>();
-  const isAfterSale = /refund|return|broken|damage|wrong|missing|replace|cancel|address|退款|退货|损坏|取消|地址/.test(text);
-  const risk = /cancel|change address|修改地址|取消订单|拦截|stop shipment/.test(text);
+  const isAfterSale = /refund|return|broken|damage|wrong|missing|replace|cancel|address|退款|退货|损坏|取消|地址/.test(textLower);
+  const risk = /cancel|change address|修改地址|取消订单|拦截|stop shipment/.test(textLower);
 
   const intent = risk
-    ? (/address|地址/.test(text) ? "change_address" : "cancel_order")
-    : /refund|退款/.test(text)
+    ? (/address|地址/.test(textLower) ? "change_address" : "cancel_order")
+    : /refund|退款/.test(textLower)
     ? "refund"
-    : /track|shipping|物流|快递|发货/.test(text)
+    : /track|shipping|物流|快递|发货/.test(textLower)
     ? "shipping_query"
     : isAfterSale
     ? "after_sale"
     : "general";
 
-  const business_intent = mapToBusinessIntent(intent, rawText);
+  const business_intent = mapToBusinessIntent(intent, analysisText, email.from_email);
 
   if (isR2BusinessIntent(business_intent)) {
     if (!orderNo) missing.add("order_no");
     if (!email.has_attachment) missing.add("attachment");
   } else if (isR1BusinessIntent(business_intent)) {
     if (!orderNo) missing.add("order_no");
-  } else {
-    const needsImage = /broken|damage|wrong item|defect|损坏|破损|错发|瑕疵/.test(text);
+  } else if (!isNonActionBusinessIntent(business_intent) && business_intent !== "other") {
+    const needsImage = /broken|damage|wrong item|defect|损坏|破损|错发|瑕疵/.test(textLower);
     if (isAfterSale && !orderNo) missing.add("order_no");
     if (needsImage && !email.has_attachment) missing.add("image");
   }
 
-  // 语言识别：检测中文字符
-  const hasChinese = /[\u4e00-\u9fa5]/.test(rawText);
+  const hasChinese = /[\u4e00-\u9fa5]/.test(analysisText);
   const detectedLanguage = hasChinese ? "zh" : "en";
+  const isAngry = /angry|frustrated|terrible|awful|horrible|worst|unacceptable|outrageous|投诉|愤怒|太差|极差|不满|差评|欺骗|骗子/.test(textLower);
 
-  // 情绪识别：关键词信号
-  const isAngry = /angry|frustrated|terrible|awful|horrible|worst|unacceptable|outrageous|投诉|愤怒|太差|极差|不满|差评|欺骗|骗子/.test(text);
-
-  const summarySource = (email.body_text ?? email.subject ?? "").replace(/\s+/g, " ").trim();
-  return {
+  const latestBody = getLatestBodyText(email.body_text);
+  const summarySource = (latestBody || email.subject || "").replace(/\s+/g, " ").trim();
+  const analysis: Analysis = {
     intent,
     business_intent,
-    category: isAfterSale ? "售后" : "咨询",
+    category: categoryForBusinessIntent(business_intent, isAfterSale),
     order_no: orderNo,
     missing_elements: Array.from(missing),
     is_info_complete: missing.size === 0,
@@ -302,6 +459,8 @@ function analyzeLocally(email: any): Analysis {
     language: detectedLanguage,
     sentiment: isAngry ? "frustrated" : "neutral",
   };
+  enrichAnalysisEntities(analysis, analysisText);
+  return analysis;
 }
 
 async function analyzeWithAi(email: any): Promise<{
@@ -334,6 +493,7 @@ async function analyzeWithAi(email: any): Promise<{
           subject: String(email.subject ?? ""),
           from_email: String(email.from_email ?? ""),
           body_text: String(email.body_text ?? ""),
+          body_latest: getLatestBodyText(email.body_text),
           // Dify 工作流将 attachments 定义为 text-input(string)，必须序列化
           attachments: Array.isArray(email.attachments)
             ? JSON.stringify(email.attachments)
@@ -346,31 +506,43 @@ async function analyzeWithAi(email: any): Promise<{
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
     const json = await response.json();
+    const data = json.data ?? json;
+    if (data?.status === "failed" || data?.status === "stopped") {
+      const errMsg =
+        typeof data.error === "string"
+          ? data.error
+          : (data.error && JSON.stringify(data.error)) || data.message || JSON.stringify(data);
+      throw new Error(`Dify 工作流执行失败: ${errMsg}`);
+    }
     const workflowRunId =
       typeof json.workflow_run_id === "string"
         ? json.workflow_run_id
-        : typeof json?.data?.workflow_run_id === "string"
-        ? json.data.workflow_run_id
-        : typeof json?.data?.id === "string"
-        ? json.data.id
+        : typeof data?.workflow_run_id === "string"
+        ? data.workflow_run_id
+        : typeof data?.id === "string"
+        ? data.id
         : null;
-    const outputs = json.data?.outputs ?? json.answer ?? json;
-    const parsed = typeof outputs === "string" ? JSON.parse(outputs) : outputs;
+    const outputs = data?.outputs ?? json.answer ?? data;
+    const parsed = parseDifyAnalyzeOutputs(outputs);
     const local = analyzeLocally(email);
-    const merged: Analysis = { ...local, ...parsed };
-    // 统一映射到 7 类（即便 Dify 直接给了 business_intent，也要校验）
-    const text = `${email.subject ?? ""}\n${email.body_text ?? ""}`;
-    const p = parsed as Record<string, unknown>;
-    const biRaw = typeof p?.business_intent === "string" ? p.business_intent.trim() : "";
-    const intentRaw = typeof p?.intent === "string" ? p.intent.trim() : "";
-    // Dify 可能返回 business_intent 为空串；或模型把 business_intent 一律标 other 但 intent 仍有 after_sale 等语义
-    let effective = biRaw || intentRaw || String(merged.intent ?? "");
-    if (biRaw === "other" && intentRaw && intentRaw !== "general") {
-      effective = intentRaw;
-    }
-    merged.business_intent = mapToBusinessIntent(effective, text);
-    merged.language = normalizeLanguage(p?.language ?? merged.language);
-    merged.sentiment = normalizeSentiment(p?.sentiment ?? merged.sentiment);
+    const merged: Analysis = { ...local, ...parsed } as Analysis;
+    const analysisText = getAnalysisText(email.subject, email.body_text);
+    const biRaw = typeof parsed.business_intent === "string" ? parsed.business_intent.trim() : "";
+    const intentRaw = typeof parsed.intent === "string" ? parsed.intent.trim() : "";
+    merged.business_intent = resolveBusinessIntent(
+      biRaw,
+      intentRaw,
+      analysisText,
+      String(merged.intent ?? ""),
+      email.from_email,
+    );
+    merged.category = categoryForBusinessIntent(
+      merged.business_intent,
+      /after_sale|refund/i.test(String(merged.intent ?? "")),
+    );
+    enrichAnalysisEntities(merged, analysisText);
+    merged.language = normalizeLanguage(parsed.language ?? merged.language);
+    merged.sentiment = normalizeSentiment(parsed.sentiment ?? merged.sentiment);
     return { analysis: merged, source: "dify", workflowRunId };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -379,11 +551,18 @@ async function analyzeWithAi(email: any): Promise<{
   }
 }
 
-function renderTemplate(template: string, email: any, analysis: Analysis) {
+function renderTemplate(
+  template: string,
+  email: any,
+  analysis: Analysis,
+  replyToEmail?: string | null,
+) {
+  const replyTo = resolveAutoReplyRecipient(email, replyToEmail);
   const values: Record<string, string> = {
     from_name: sanitizeDisplayName(email.from_name) || (email.from_email ?? ""),
     from_email: email.from_email,
-    subject: email.subject ?? "",
+    subject: replySubjectBase(email, replyTo),
+    reply_to_email: replyTo,
     order_no: analysis.order_no ?? "",
     missing_elements: analysis.missing_elements.join(", "),
   };
@@ -447,14 +626,20 @@ async function sendAutoReplyBySlot(
   const { data: mailbox } = await admin.from("mailboxes").select("*").eq("id", email.mailbox_id).single();
   if (!mailbox?.smtp_host || !mailbox?.smtp_port) return false;
 
-  const subject = renderTemplate(template.subject_template || `Re: ${email.subject ?? ""}`, email, analysis);
-  let content = renderTemplate(template.body_template, email, analysis);
+  const replyToEmail = resolveAutoReplyRecipient(email);
+  const subject = renderTemplate(
+    template.subject_template || buildReplySubject(email, replyToEmail),
+    email,
+    analysis,
+    replyToEmail,
+  );
+  let content = renderTemplate(template.body_template, email, analysis, replyToEmail);
   content = appendMailboxSignature(content, mailbox);
   let messageId = "";
   let sendError: string | null = null;
   try {
     messageId = await sendMail(mailbox, {
-      to: email.from_email,
+      to: replyToEmail,
       subject,
       text: content,
       inReplyTo: email.message_id ?? undefined,
@@ -467,7 +652,7 @@ async function sendAutoReplyBySlot(
   await admin.from("email_send_logs").insert({
     email_id: email.id,
     mailbox_id: mailbox.id,
-    to_email: email.from_email,
+    to_email: replyToEmail,
     from_email: mailbox.email_address,
     subject,
     content,
@@ -606,16 +791,11 @@ function computeSlaBucket(receivedAt: string | null | undefined): string | null 
 
 type ProcessEmailOptions = { analyzeOnly?: boolean; afterBodyRepair?: boolean };
 
-/** 仅重跑 AI 分析并写回分析字段，不触发关联订单、风控、自动回复等（用于人工/Dify 联调） */
-async function processEmailAnalyzeOnly(
-  admin: any,
-  emailId: string,
+function buildAnalysisEmailPatch(
   analysis: Analysis,
-  analyzeSource: "dify" | "local",
-  analyzeDifyError: string | null | undefined,
-  workflowRunId: string | null | undefined,
-) {
-  await admin.from("emails").update({
+  extra?: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
     intent: analysis.intent,
     intent_legacy: analysis.intent,
     business_intent: analysis.business_intent,
@@ -629,7 +809,33 @@ async function processEmailAnalyzeOnly(
     ai_analyzed_at: new Date().toISOString(),
     priority: analysis.priority,
     risk_level: analysis.risk_level,
-  }).eq("id", emailId);
+    ...extra,
+  };
+}
+
+async function persistAnalysisToEmail(
+  admin: any,
+  emailId: string,
+  analysis: Analysis,
+  extra?: Record<string, unknown>,
+): Promise<void> {
+  const { error } = await admin
+    .from("emails")
+    .update(buildAnalysisEmailPatch(analysis, extra))
+    .eq("id", emailId);
+  if (error) throw new Error(`更新邮件分析结果失败: ${error.message}`);
+}
+
+/** 仅重跑 AI 分析并写回分析字段，不触发关联订单、风控、自动回复等（用于人工/Dify 联调） */
+async function processEmailAnalyzeOnly(
+  admin: any,
+  emailId: string,
+  analysis: Analysis,
+  analyzeSource: "dify" | "local",
+  analyzeDifyError: string | null | undefined,
+  workflowRunId: string | null | undefined,
+) {
+  await persistAnalysisToEmail(admin, emailId, analysis);
 
   if (analyzeSource === "local" && analyzeDifyError) {
     await recordEvent(
@@ -665,6 +871,24 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
   const admin = createClient(SUPABASE_URL, SERVICE_KEY);
   const { data: email, error } = await admin.from("emails").select("*").eq("id", emailId).single();
   if (error || !email) throw new Error("邮件不存在");
+
+  if (!analyzeOnly && !afterBodyRepair) {
+    const hasBody = hasReadableEmailBody(email.body_text, email.body_html);
+    if (!hasBody) {
+      await enqueueBodyRepairTask(admin, emailId, "process_email_deferred_empty_body", "background");
+      await recordEvent(
+        admin,
+        emailId,
+        "process_email_deferred",
+        "正文为空，已入队补拉；补全后再分析/风控/自动回复",
+      );
+      return {
+        analysis: null,
+        associationStatus: email.association_status,
+        routed: "deferred_empty_body",
+      };
+    }
+  }
 
   if (!analyzeOnly) {
     await admin.from("emails").update({ processing_status: "analyzing" }).eq("id", emailId);
@@ -715,24 +939,11 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
 
   const slaBucket = computeSlaBucket(email.received_at);
 
-  await admin.from("emails").update({
-    intent: analysis.intent,
-    intent_legacy: analysis.intent,
-    business_intent: analysis.business_intent,
-    category: analysis.category,
-    missing_elements: analysis.missing_elements,
-    ai_entities: analysis.entities,
-    is_info_complete: analysis.is_info_complete,
-    ai_summary: analysis.summary,
-    ai_language: analysis.language,
-    ai_sentiment: analysis.sentiment,
-    ai_analyzed_at: new Date().toISOString(),
-    priority: analysis.priority,
-    risk_level: analysis.risk_level,
+  await persistAnalysisToEmail(admin, emailId, analysis, {
     thread_id: email.thread_id ?? email.message_id ?? email.id,
     is_first_email: isFirstEmail,
     sla_bucket: ["pending", "processing"].includes(email.status) ? slaBucket : null,
-  }).eq("id", emailId);
+  });
   await recordEvent(
     admin,
     emailId,
@@ -861,10 +1072,21 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
   const hasAtt = !!email.has_attachment;
   const needOrder = ((isR1 && !linkedOrders.length) || isR2) && !hasOrder;
   const needAtt = isR2 && !hasAtt;
-  const baseMissingInfoEligible = !skipAutoAssociation && (needOrder || needAtt);
+  const baseMissingInfoEligible = !skipAutoAssociation &&
+    isAutomationEligibleIntent(analysis.business_intent) &&
+    (needOrder || needAtt);
 
   let missingInfoTemplateSent = false;
-  if (baseMissingInfoEligible) {
+  if (!isAutomationEligibleIntent(analysis.business_intent)) {
+    await recordEvent(
+      admin,
+      emailId,
+      "auto_reply_skipped",
+      "非 R1/R2 意图，跳过缺信息自动回邮",
+      String(analysis.business_intent),
+      { reason: "non_r1_r2_intent", business_intent: analysis.business_intent },
+    );
+  } else if (baseMissingInfoEligible) {
     try {
       if (isR2 && (needOrder || needAtt)) {
         const daysR2 = await getTemplateFirstContactDaysByTrigger(admin, AUTO_SLOT_MISSING_ORDER_OR_ATTACHMENT);

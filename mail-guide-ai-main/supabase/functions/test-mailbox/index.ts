@@ -1,22 +1,23 @@
 // 测试 IMAP 邮箱连通性：connect → login → select INBOX → logout
 // 仅做一次性轻量校验，不拉邮件，超时 20s
-import { getMailTlsCaCerts } from "../_shared/mail-tls-ca.ts";
+// body：host/port/user/pass/use_ssl；或 mailbox_id（编辑时留空授权码则用库内凭据）+ 可选覆盖 host/port/use_ssl
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { connectMailImapTls } from "../_shared/mail-tls-ca.ts";
+import {
+  assertCanAccessMailbox,
+  getStaffActor,
+} from "../_shared/mailbox-access.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-const MAIL_LOCAL_TEST_MODE = Deno.env.get("MAIL_LOCAL_TEST_MODE") === "true";
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 
-async function connectImapTls(host: string, port: number): Promise<Deno.TlsConn> {
-  const caCerts = await getMailTlsCaCerts("[test-mailbox] ");
-  return await Deno.connectTls({
-    hostname: host,
-    port,
-    ...(caCerts ? { caCerts } : {}),
-  });
-}
+const MAIL_LOCAL_TEST_MODE = Deno.env.get("MAIL_LOCAL_TEST_MODE") === "true";
 
 async function testImap(opts: {
   host: string;
@@ -30,8 +31,8 @@ async function testImap(opts: {
   try {
     const effectiveUseSsl = MAIL_LOCAL_TEST_MODE ? false : opts.useSsl;
     conn = effectiveUseSsl
-      ? await connectImapTls(opts.host, opts.port)
-      : await Deno.connect({ hostname: opts.host, port: opts.port });
+      ? await connectMailImapTls(opts.host, opts.port, undefined, "[test-mailbox] ")
+      : await Deno.connect({ hostname: opts.host, port: opts.port, transport: "tcp" });
     const reader = conn.readable.getReader();
     const enc = new TextEncoder();
     const dec = new TextDecoder();
@@ -56,17 +57,13 @@ async function testImap(opts: {
       const raw = await readUntil(re);
       return { ok: raw.match(re)![1] === "OK", raw };
     }
-    // literal LOGIN（兼容含特殊字符密码 / 网易企业邮）
     async function loginLiteral(user: string, pass: string) {
       const tag = `A${++tagN}`;
       buf = "";
-      // 先发命令头 + 用户名 literal 长度
       const userBytes = enc.encode(user);
       await conn!.write(enc.encode(`${tag} LOGIN {${userBytes.length}}\r\n`));
-      // 等待续行符 +
       await readUntil(/\+ /);
       buf = "";
-      // 写用户名 + 空格 + 密码 literal 长度
       await conn!.write(userBytes);
       const passBytes = enc.encode(pass);
       await conn!.write(enc.encode(` {${passBytes.length}}\r\n`));
@@ -81,17 +78,29 @@ async function testImap(opts: {
 
     await readUntil(/^\* OK/m);
     step = "id";
-    try { await cmd(`ID ("name" "Lovable" "version" "1.0")`); } catch { /* 部分服务器不支持 ID 命令，忽略 */ }
+    try {
+      await cmd(`ID ("name" "Lovable" "version" "1.0" "vendor" "Lovable")`);
+    } catch { /* 部分服务器不支持 ID 命令，忽略 */ }
 
     step = "login";
-    // 优先尝试 literal 形式（更兼容）
-    let r = await loginLiteral(opts.user, opts.pass);
-    if (!r.ok) {
-      // 回退：传统带引号 LOGIN
+    let r: { ok: boolean; raw: string };
+    try {
+      r = await loginLiteral(opts.user, opts.pass);
+      if (r.ok) {
+        // ok
+      } else {
+        throw new Error("literal login failed");
+      }
+    } catch {
       const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
       r = await cmd(`LOGIN "${esc(opts.user)}" "${esc(opts.pass)}"`);
       if (!r.ok) {
-        return { ok: false, step, message: `登录失败：${r.raw.slice(-300).trim()}（请检查授权码是否正确、是否已在邮箱后台开启 IMAP/SMTP 服务）` };
+        return {
+          ok: false,
+          step,
+          message:
+            `登录失败：${r.raw.slice(-300).trim()}（请检查 IMAP 登录用户名与授权码；网易/QQ 需使用应用专用密码而非网页登录密码；确认已在邮箱后台开启 IMAP）`,
+        };
       }
     }
 
@@ -110,7 +119,8 @@ async function testImap(opts: {
       return {
         ok: false,
         step,
-        message: "[connect] 邮箱服务器证书不被当前 Edge Functions 信任。请将该邮箱服务器的根证书/中间证书 PEM 配置到 MAIL_TLS_CA_CERT_PATH 或 MAIL_TLS_CA_CERT_PEM 后重启 functions。",
+        message:
+          "[connect] TLS 证书校验失败（UnknownIssuer）。若 163 可连而 Gmail 不行，多为公司网络 SSL 审计：请确认 MAIL_TLS_CA_CERT_PATH 指向 TecSign/企业邮 CA（mail-ca.pem），并同步 functions 后重建；也可设置 MAIL_TLS_FORCE_CUSTOM_CA=true。",
       };
     }
     return { ok: false, step, message: `[${step}] ${msg}` };
@@ -122,21 +132,71 @@ async function testImap(opts: {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
   try {
-    const body = await req.json();
-    const { host, port, user, pass, use_ssl } = body ?? {};
-    if (!host || !port || !user || !pass) {
-      return new Response(JSON.stringify({ ok: false, message: "host/port/user/pass 必填" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-    const r = await testImap({
-      host,
-      port: Number(port),
-      user,
-      pass,
-      useSsl: use_ssl !== false,
+    const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const actor = await getStaffActor(req, admin, {
+      supabaseUrl: SUPABASE_URL,
+      anonKey: SUPABASE_ANON_KEY,
+      serviceKey: SUPABASE_SERVICE_ROLE_KEY,
     });
+
+    const body = await req.json();
+    const mailboxId = typeof body?.mailbox_id === "string" ? body.mailbox_id.trim() : "";
+    let host = typeof body?.host === "string" ? body.host.trim() : "";
+    let port = body?.port != null ? Number(body.port) : NaN;
+    let user = typeof body?.user === "string" ? body.user.trim() : "";
+    let pass = typeof body?.pass === "string" ? body.pass : "";
+    let useSsl = body?.use_ssl !== false;
+    let usedStoredPass = false;
+
+    if (mailboxId) {
+      if (!actor.isService) {
+        await assertCanAccessMailbox(admin, actor.userId, mailboxId);
+      }
+      const { data: mb, error: mbErr } = await admin
+        .from("mailboxes")
+        .select("incoming_host, incoming_port, use_ssl, auth_user, auth_password, email_address")
+        .eq("id", mailboxId)
+        .maybeSingle();
+      if (mbErr || !mb) {
+        return new Response(JSON.stringify({ ok: false, message: "邮箱不存在" }), {
+          status: 404,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      if (!host) host = mb.incoming_host?.trim() ?? "";
+      if (!Number.isFinite(port) || port <= 0) port = Number(mb.incoming_port);
+      if (!user) user = (mb.auth_user || mb.email_address || "").trim();
+      if (!pass) {
+        pass = mb.auth_password ?? "";
+        usedStoredPass = true;
+      }
+      if (body?.use_ssl === undefined) useSsl = mb.use_ssl !== false;
+    }
+
+    pass = pass.trim();
+    if (!host || !Number.isFinite(port) || port <= 0 || !user || !pass) {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          message: mailboxId && !pass
+            ? "库内无授权码，请填写新授权码后再测试"
+            : "host/port/user/pass 必填（编辑已有邮箱可只传 mailbox_id 使用已保存授权码）",
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    const r = await testImap({ host, port, user, pass, useSsl });
+    const note = usedStoredPass && r.ok
+      ? "（使用已保存的授权码与登录名测试成功）"
+      : usedStoredPass && !r.ok
+        ? "（使用已保存的授权码测试失败，若同步正常请检查 IMAP 登录用户名或收件服务器是否已改）"
+        : undefined;
+    const message = note ? [r.message, note].filter(Boolean).join(" ") : r.message;
+
     if (MAIL_LOCAL_TEST_MODE && r.ok) {
       return new Response(JSON.stringify({
         ...r,
@@ -145,10 +205,11 @@ Deno.serve(async (req) => {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-    return new Response(JSON.stringify(r), {
+    return new Response(JSON.stringify({ ...r, message }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (e) {
+    if (e instanceof Response) return e;
     return new Response(
       JSON.stringify({ ok: false, message: e instanceof Error ? e.message : "未知错误" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }

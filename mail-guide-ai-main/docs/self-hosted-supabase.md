@@ -87,32 +87,47 @@ docker compose up -d --force-recreate kong supavisor
 
 自建库是空库，需要应用 `mail-guide-ai-main/supabase/migrations/` 下的 SQL。
 
-### 推荐：临时暴露 `db` 的 5432 到宿主机（便于 `db push`）
+### 本地 Windows：单条 migration（推荐，优先于 `db push`）
 
-Supavisor 会话端口（如 `POOLER_PORT_PUBLISHED=54322`）的用户名格式为 `postgres.<POOLER_TENANT_ID>`，**不适合**直接当 `supabase db push` 的 URL。最省事的做法是给 **`db` 容器** 临时加端口映射：
-
-1. 编辑 `supabase-selfhost/docker-compose.yml`，在 **`db`** 服务下增加（与 `healthcheck` 同级）：
-
-```yaml
-    ports:
-      - "54323:5432"
-```
-
-2. 重启 db（或整栈）：
+适用：研发自测、发版前在本地验证**一条**新增 SQL（如 `20260601120000_*.sql`）。
 
 ```powershell
 cd d:\Docker\project\cs-main\supabase-selfhost
 docker compose up -d db
+docker compose ps db   # 应为 healthy
+
+docker compose cp "d:\Docker\project\cs-main\mail-guide-ai-main\supabase\migrations\<文件名>.sql" db:/tmp/mig.sql
+docker compose exec -T db psql -v ON_ERROR_STOP=1 -U postgres -d postgres -f /tmp/mig.sql
 ```
 
-3. 从 `supabase-selfhost/.env` 读取 **`POSTGRES_PASSWORD`**，执行迁移：
+**禁止**用下面方式执行含中文 `COMMENT` 的 migration（PowerShell 管道易导致 UTF-8 乱码，`COMMENT ON COLUMN` 报错；`ALTER TABLE` 可能已成功）：
+
+```powershell
+# 不推荐
+Get-Content -Raw "...\xxx.sql" | docker compose exec -T db psql ...
+```
+
+线上发版仍用 `apply-backend-release.sh` + `deploy/backend-release.env` 的 `MIGRATIONS`；本地单条验证用本节即可。
+
+### 备选：宿主机 `db push`（全量 migrations）
+
+Supavisor 端口（如 `54322`）用户名格式为 `postgres.<tenant>`，**不能**用于 `db push`。请连 **`db` 容器** 映射端口：
+
+- 本仓库 `supabase-selfhost/docker-compose.yml` 默认已为 **`db` 配置 `15432:5432`**（Windows 上 `54323` 常被保留，故不用 54323）。
+- 若 compose **没有** `ports`，可临时增加 `"15432:5432"`，推完再删。
 
 ```powershell
 cd d:\Docker\project\cs-main\mail-guide-ai-main
-npx supabase db push --db-url "postgresql://postgres:<POSTGRES_PASSWORD>@127.0.0.1:54323/postgres"
+$env:PGSSLMODE = "disable"
+# 密码从 supabase-selfhost/.env 的 POSTGRES_PASSWORD 复制，勿保留 <POSTGRES_PASSWORD> 占位符
+npx supabase db push --db-url "postgresql://postgres:你的密码@127.0.0.1:15432/postgres"
 ```
 
-4. **迁移完成后**删除上述 `ports` 块并再次 `docker compose up -d`，避免 Postgres 长期暴露在宿主机。
+| 报错 | 原因 | 处理 |
+|------|------|------|
+| `invalid userinfo` | 连接串里仍是占位符 `<...>` | 换成真实密码 |
+| `127.0.0.1:54323 ... refused` | 端口错误或未映射 | 用 **15432** 或 `docker compose ps db` 看实际映射 |
+| `unterminated quoted string` + `????` | 管道执行中文 SQL | 改用 **`docker compose cp` + `psql -f`** |
 
 ### 四步续：Vault + pg_cron 指向自建 Kong（必做）
 
@@ -219,7 +234,7 @@ ORDER BY jobname;
 ## 推荐执行顺序（小结）
 
 1. 三步：启动自建栈（含 Windows CRLF / 5432 冲突处理见上文）。
-2. 四步：临时 `db` 端口 **`54323:5432`** → `supabase db push` → 去掉端口映射。
+2. 四步：**单条 migration** 用 `docker compose cp` + `psql -f`（见上文）；全量用 **`15432`** 做 `db push`（勿用 `54323`、勿管道灌中文 SQL）。
 3. 四步续：**`scripts/selfhosted/Apply-VaultAndCron.ps1`**（vault + cron）。
 4. 五步：**`sync-functions-to-selfhost.ps1`** → **`Ensure-FunctionsEnvFileInCompose.ps1`** → 填写 **`.env.functions`** → 重建 `functions`。
 5. 六步：前端 **`.env`**（见 `.env.selfhosted.example`）。
@@ -263,15 +278,14 @@ ORDER BY jobname;
 | 3.1 | `cd d:\Docker\project\cs-main\supabase-selfhost` → `docker compose pull` → `docker compose up -d` → `docker compose ps` | **`db`、`kong`** 等为 **Up**（**healthy** 更佳） | 端口冲突 → 见上文 **5432 / POOLER** |
 | 3.2 | 浏览器打开 **`SUPABASE_PUBLIC_URL`**（常为本机 `http://localhost:8000`） | 出现 Studio 登录页 | Kong 日志 `no such file` / `carriage return` → 执行 **`fix-supabase-selfhost-crlf.ps1`** 后 `docker compose up -d --force-recreate kong supavisor` |
 
-### 4. 数据库迁移（`db push`）与临时端口 **54323**
+### 4. 数据库迁移（优先 `psql -f`，备选 `db push`）
 
 | 步骤 | 做什么 | 成功标志 | 常见失败 |
 |------|--------|----------|----------|
-| 4.1 | 编辑 **`docker-compose.yml`**，在 **`db`** 服务下增加 **`ports: - "54323:5432"`**，保存后 `docker compose up -d db` | `docker compose ps` 中 db 仍 healthy | `db push` 报连接拒绝 → 确认 54323 已映射且 db 已起 |
-| 4.2 | 从 **`supabase-selfhost/.env`** 取 **`POSTGRES_PASSWORD`**，在 **`mail-guide-ai-main`** 执行：<br>`$env:PGSSLMODE = "disable"`<br>`npx supabase db push --db-url "postgresql://postgres:<密码>@127.0.0.1:54323/postgres"` | 命令结束无 Error，迁移全部 Applied | 认证失败 → 密码是否含特殊字符需 URL 编码；是否连错端口 |
-| 4.3 | **立刻** 删除 **`db`** 下的临时 **`ports`** 块，再执行 `docker compose up -d` | `docker compose.yml` 中 db 不再暴露 54323 | 勿长期把 Postgres 暴露在宿主机 |
-
-> **何时可以删 54323**：仅在 **`npx supabase db push` 成功之后**。以后若还要对自建库跑新的 migration，可临时再加回 54323、推完再删。
+| 4.0（推荐） | `docker compose cp` migration 到 `db:/tmp/mig.sql`，再 `docker compose exec -T db psql ... -f /tmp/mig.sql` | `ALTER` / CHECK 无 Error | **`Get-Content \| psql` 管道** → 中文 `COMMENT` 乱码；改用 cp + `-f` |
+| 4.1 | 全量：确认 compose 中 **`db` 已映射 `15432:5432`**（本仓库默认），`docker compose up -d db` | `docker compose ps` 显示 `15432->5432` | 连 **54323** → connection refused |
+| 4.2 | 从 **`.env`** 取真实 **`POSTGRES_PASSWORD`**（勿留 `<POSTGRES_PASSWORD>`），执行：<br>`$env:PGSSLMODE = "disable"`<br>`npx supabase db push --db-url "postgresql://postgres:<密码>@127.0.0.1:15432/postgres"` | 迁移全部 Applied | `invalid userinfo` → 占位符未替换 |
+| 4.3 | 若你为 `db push` **临时**加了 `ports`，推完后删除该块并 `docker compose up -d` | 无多余暴露 | 本仓库长期用 15432 时可保留映射，按安全策略决定 |
 
 ### 5. Vault + pg_cron（必做；否则定时任务仍打云端）
 
@@ -329,23 +343,32 @@ docker compose up -d
 
 ---
 
-### B. 数据库迁移：`supabase db push`（必做）
+### B. 数据库迁移（必做）
 
-迁移会把 `mail-guide-ai-main\supabase\migrations\` 里的表、RLS、cron 等装进自建 Postgres。**不要**用 Supavisor 的 `54322` 做 `db push`（用户名格式不同），请用下面「直连 `db` 容器」的方式。
+迁移会把 `mail-guide-ai-main\supabase\migrations\` 里的表、RLS、cron 等装进自建 Postgres。
 
-#### B1. 临时给 `db` 暴露宿主机端口
+#### B0. 单条 SQL（本地 Windows 推荐）
 
-1. 用编辑器打开 **`d:\Docker\project\cs-main\supabase-selfhost\docker-compose.yml`**。
-2. 找到 **`db:`** 服务（`container_name: supabase-db`），在 **`healthcheck:` 同级** 增加 **`ports`**（缩进与 `healthcheck` 一致，均为 4 空格），例如：
+```powershell
+cd d:\Docker\project\cs-main\supabase-selfhost
+docker compose cp "d:\Docker\project\cs-main\mail-guide-ai-main\supabase\migrations\<文件名>.sql" db:/tmp/mig.sql
+docker compose exec -T db psql -v ON_ERROR_STOP=1 -U postgres -d postgres -f /tmp/mig.sql
+```
+
+**不要**用 `Get-Content -Raw ... | docker compose exec psql` 执行含中文 `COMMENT` 的脚本。
+
+#### B1. 全量 `db push`：确认 `db` 宿主机端口
+
+**不要**用 Supavisor 的 `54322`（用户名格式 `postgres.<tenant>` 不同）。
+
+本仓库 **`docker-compose.yml`** 中 **`db` 默认已映射 `15432:5432`**。若无映射，在 **`db:`** 服务下增加：
 
 ```yaml
     ports:
-      - "54323:5432"
+      - "15432:5432"
 ```
 
-> 若该服务下已有 `ports`，不要重复添加；改用空闲端口（如 54324）并记住。
-
-3. 保存文件后执行：
+然后：
 
 ```powershell
 cd d:\Docker\project\cs-main\supabase-selfhost
@@ -368,15 +391,15 @@ $env:PGSSLMODE = "disable"
 
 ```powershell
 cd d:\Docker\project\cs-main\mail-guide-ai-main
-npx supabase db push --db-url "postgresql://postgres:你的POSTGRES密码@127.0.0.1:54323/postgres"
+npx supabase db push --db-url "postgresql://postgres:你的POSTGRES密码@127.0.0.1:15432/postgres"
 ```
 
 - 若密码含 `@`、`:` 等特殊字符，建议用脚本读取 `.env` 再拼 URL，或对密码做 URL 编码（`[uri]::EscapeDataString`）。
-- 成功时 CLI 会列出并应用迁移；若 **connection refused**，检查 `54323` 是否映射、`db` 容器是否 Up。
+- 成功时 CLI 会列出并应用迁移；若 **connection refused**，检查 **15432** 是否映射、`db` 容器是否 Up（勿误用 **54323**）。
 
-#### B4. 去掉临时端口（建议）
+#### B4. 去掉临时端口（仅当你为 B1 临时加了映射时）
 
-迁移成功后，**删除** `docker-compose.yml` 里刚加的 **`ports:` 整段**，再执行：
+若仅为 `db push` 临时加了 **`ports`**，迁移成功后**删除**该段，再执行：
 
 ```powershell
 cd d:\Docker\project\cs-main\supabase-selfhost
@@ -530,6 +553,11 @@ curl.exe -s -o NUL -w "HTTP %{http_code}\n" http://localhost:8000/functions/v1/h
 
 # 在 Studio SQL 或 psql 中执行（cron 是否已改成本地 Kong）
 # SELECT jobname, command FROM cron.job;
+
+# 邮件拉取/补拉队列积压排查
+# SELECT status, count(*) FROM email_fetch_tasks GROUP BY status;
+# SELECT status, count(*) FROM email_body_repair_tasks GROUP BY status;
+# SELECT status, count(*) FROM email_attachment_repair_tasks GROUP BY status;
 ```
 
 ---
@@ -538,7 +566,8 @@ curl.exe -s -o NUL -w "HTTP %{http_code}\n" http://localhost:8000/functions/v1/h
 
 | 现象 | 处理 |
 |------|------|
-| `db push` 连不上 | 确认 `54323:5432` 已写进 compose 且 `docker compose up -d db`；防火墙放行本机回环。 |
+| `db push` 连不上 | 用 **`15432`**（本仓库默认），非 `54323`；`docker compose ps db` 确认 `Up` 且端口已映射；密码勿用占位符。单条 SQL 优先 **`docker compose cp` + `psql -f`**。 |
+| migration 管道报 `????` / `unterminated quoted string` | PowerShell 管道编码破坏中文 `COMMENT` | 用 `docker compose cp` 进容器后 `psql -f`；`ALTER` 已成功可只补英文 COMMENT。 |
 | Kong / Pooler 启动报 `no such file` / `carriage return` | 执行 **`mail-guide-ai-main\scripts\fix-supabase-selfhost-crlf.ps1`** 后重建 kong / supavisor。 |
 | 池化端口冲突 5432 | 使用 **`.env`** 里 **`POOLER_PORT_PUBLISHED=54322`**（或见上文「宿主机 5432 已被占用」）。 |
 | 前端 CORS / Auth | `SITE_URL`、`SUPABASE_PUBLIC_URL` 与浏览器访问地址一致；检查 Kong 日志。 |

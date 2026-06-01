@@ -32,6 +32,10 @@ export function placeholderAttachmentCount(
   }, 0);
 }
 
+function emailBodyBlob(email: { body_text?: string | null; body_html?: string | null }): string {
+  return `${email.body_html ?? ""}\n${email.body_text ?? ""}`.toLowerCase();
+}
+
 /** 邮件内嵌图（multipart/related、Outlook image001 等），应在正文区展示而非仅列在附件 */
 export function isLikelyInlineImageAttachment(
   item: Record<string, unknown>,
@@ -39,15 +43,29 @@ export function isLikelyInlineImageAttachment(
 ): boolean {
   const ct = String(item.contentType ?? "").split(";")[0].trim().toLowerCase();
   if (!ct.startsWith("image/")) return false;
-  const html = String(email.body_html ?? "");
+  const body = emailBodyBlob(email);
   const fn = String(item.filename ?? "").trim();
-  if (/cid:/i.test(html) && fn) {
+  const contentId = String(item.contentId ?? item.content_id ?? "").trim();
+  if (/cid:/i.test(body) && fn) {
     const base = fn.replace(/\.[a-z0-9]{2,8}$/i, "");
-    const lower = html.toLowerCase();
-    if (lower.includes(`cid:${fn.toLowerCase()}`) || lower.includes(`cid:${base.toLowerCase()}`)) {
+    const fnLower = fn.toLowerCase();
+    const baseLower = base.toLowerCase();
+    if (
+      body.includes(`cid:${fnLower}`) ||
+      body.includes(`cid:${baseLower}`) ||
+      body.includes(`[cid:${fnLower}]`) ||
+      body.includes(`[cid:${baseLower}]`)
+    ) {
       return true;
     }
   }
+  if (contentId) {
+    const cidLower = contentId.replace(/^<|>$/g, "").toLowerCase();
+    if (body.includes(`[cid:${cidLower}]`) || body.includes(`cid:${cidLower}`)) {
+      return true;
+    }
+  }
+  const html = String(email.body_html ?? "");
   if (/^image\d{3}\.(jpe?g|png|gif|webp|bmp)$/i.test(fn) && !/<img\b/i.test(html)) {
     return true;
   }

@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  decodeBase64BodyLoose,
   decodePlainTextEntities,
   decodeQuotedPrintableLoose,
   formatPlainTextEmailForDisplay,
   formatGmailCollapsedPlainBody,
+  hasReadableEmailBodyForDisplay,
   isEmailBodyEmpty,
+  needsEmailBodyRepair,
   isGmailCollapsedPlainBody,
   isGmailStructuredHtml,
   isOutlookEmptyHtmlShell,
+  isUndecodedBase64Body,
   looksLikeHtmlEmailContent,
   normalizeEmailBodyForDisplay,
   pickRenderableEmailBody,
@@ -25,6 +29,15 @@ describe("isEmailBodyEmpty", () => {
   it("有 text 或 html 时返回 false", () => {
     expect(isEmailBodyEmpty({ body_text: "hello", body_html: null })).toBe(false);
     expect(isEmailBodyEmpty({ body_text: "", body_html: "<p>x</p>" })).toBe(false);
+  });
+
+  it("未解码 base64 在库内仍视为有存储（非空）", () => {
+    const plain = "您好，请提供订单号";
+    const payload = btoa(unescape(encodeURIComponent(plain)));
+    expect(isUndecodedBase64Body(payload)).toBe(true);
+    expect(isEmailBodyEmpty({ body_text: payload, body_html: null })).toBe(false);
+    expect(needsEmailBodyRepair({ body_text: payload, body_html: null })).toBe(true);
+    expect(hasReadableEmailBodyForDisplay(payload, null)).toBe(false);
   });
 });
 
@@ -49,6 +62,15 @@ describe("normalizeEmailBodyForDisplay", () => {
     expect(n.html).toContain("Dear customer service representative");
     expect(n.text).toContain("Dear customer service representative");
     expect(looksLikeHtmlEmailContent(html)).toBe(true);
+  });
+
+  it("解码 body_text 中的 base64（历史 BODY[TEXT] 脏数据）", () => {
+    const plain = "您好，\n\n请直接回复本邮件并提供您的订单号。";
+    const payload = btoa(unescape(encodeURIComponent(plain)));
+    const n = normalizeEmailBodyForDisplay(payload, null);
+    expect(n.text).toContain("您好");
+    expect(n.text).toContain("订单号");
+    expect(decodeBase64BodyLoose(payload)).toContain("订单号");
   });
 });
 

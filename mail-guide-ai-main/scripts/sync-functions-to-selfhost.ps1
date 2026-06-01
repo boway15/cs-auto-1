@@ -43,18 +43,22 @@ Get-ChildItem -Path $SrcFunctions -Directory | ForEach-Object {
     Copy-Item -Path $_.FullName -Destination $dest -Recurse -Force
 }
 
-# 显式校验 TLS 证书（MAIL_TLS_CA_CERT_PATH 默认指向此文件）
-$srcCa = Join-Path $SrcFunctions "certs\mail-ca.pem"
-$dstCa = Join-Path $DstFunctions "certs\mail-ca.pem"
-if (Test-Path $srcCa) {
-    $dstCaDir = Split-Path $dstCa -Parent
-    if (-not (Test-Path $dstCaDir)) {
-        New-Item -ItemType Directory -Path $dstCaDir -Force | Out-Null
+# TLS 证书：163 自定义 CA + Gmail/Outlook 公网 CA 包（Edge 沙箱无法读 /etc/ssl）
+$certsDir = Join-Path $DstFunctions "certs"
+if (-not (Test-Path $certsDir)) {
+    New-Item -ItemType Directory -Path $certsDir -Force | Out-Null
+}
+foreach ($name in @("mail-ca.pem", "public-ca.pem")) {
+    $srcCa = Join-Path $SrcFunctions "certs\$name"
+    $dstCa = Join-Path $certsDir $name
+    if (Test-Path $srcCa) {
+        Copy-Item -Path $srcCa -Destination $dstCa -Force
+        Write-Host "Sync: certs/$name -> $dstCa"
+    } elseif ($name -eq "mail-ca.pem") {
+        Write-Warning "Missing $srcCa — IMAP TLS will rely on bundled 163 CA only."
+    } elseif ($name -eq "public-ca.pem") {
+        Write-Warning "Missing $srcCa — Gmail TLS may fail; run: docker cp supabase-edge-functions:/etc/ssl/certs/ca-certificates.crt `"$srcCa`""
     }
-    Copy-Item -Path $srcCa -Destination $dstCa -Force
-    Write-Host "Sync: certs/mail-ca.pem -> $dstCa"
-} else {
-    Write-Warning "Missing $srcCa — IMAP TLS will rely on bundled 163 CA only."
 }
 
 Write-Host "Done. Next: cd `"$SelfhostRoot`"; docker compose up -d --force-recreate --no-deps functions"

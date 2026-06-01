@@ -109,7 +109,7 @@ export default function Alerts() {
   const [mailboxOptions, setMailboxOptions] = useState<{ email_address: string; display_name: string | null }[]>([]);
   const [senderSelect, setSenderSelect] = useState<string>(OPS_ALERT_SENDER_USE_ENV);
   const [recipientsInput, setRecipientsInput] = useState("");
-  /** null = 尚未拉取；对象内 null 表示库中为 NULL（走环境变量） */
+  /** null = 尚未拉取；sender null 表示走环境变量；recipients null 表示不发送邮件告警 */
   const [opsSummary, setOpsSummary] = useState<{ sender: string | null; recipients: string | null } | null>(null);
 
   async function loadOpsAlertSummary() {
@@ -285,7 +285,7 @@ export default function Alerts() {
                 {opsSummary.recipients ? (
                   <span className="text-foreground/80">{opsSummary.recipients}</span>
                 ) : (
-                  "未指定（环境变量 ALERT_EMAIL_TO）"
+                  "未配置（不发送邮件告警）"
                 )}
               </div>
             )}
@@ -316,7 +316,7 @@ export default function Alerts() {
           <DialogHeader>
             <DialogTitle>运营告警通知</DialogTitle>
             <DialogDescription>
-              发件须为「邮箱配置」中已绑定且填写 SMTP 的账号；收件可填多个，英文逗号或分号分隔。留空发件或收件表示使用服务器环境变量（ALERT_SENDER_ADDRESS / ALERT_EMAIL_TO）。
+              发件须为「邮箱配置」中已绑定且填写 SMTP 的账号；收件可填多个，英文逗号或分号分隔。留空发件表示使用服务器环境变量 ALERT_SENDER_ADDRESS；收件留空则不发送邮件告警。
             </DialogDescription>
           </DialogHeader>
           {configLoading ? (
@@ -349,7 +349,7 @@ export default function Alerts() {
                   onChange={(e) => setRecipientsInput(e.target.value)}
                   className="h-9"
                 />
-                <p className="text-[11px] text-muted-foreground">多个地址请用英文逗号或分号分隔；留空则使用 ALERT_EMAIL_TO。</p>
+                <p className="text-[11px] text-muted-foreground">多个地址请用英文逗号或分号分隔；留空则不发送邮件告警。</p>
               </div>
             </div>
           )}
@@ -462,7 +462,7 @@ export default function Alerts() {
                         <span className="text-[10px] text-muted-foreground">{new Date(row.email_sent_at).toLocaleString("zh-CN")}</span>
                       </div>
                     ) : row.email_send_error ? (
-                      <div className="text-destructive line-clamp-2" title={row.email_send_error}>
+                      <div className="text-muted-foreground line-clamp-2" title={row.email_send_error}>
                         失败：{row.email_send_error}
                       </div>
                     ) : (

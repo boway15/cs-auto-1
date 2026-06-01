@@ -220,6 +220,39 @@ describe("runPhasedMailboxSync", () => {
     expect(repairCalls.length).toBe(2);
   });
 
+  it("补附件阶段 WorkerRequestCancelled 不判硬失败", async () => {
+    vi.mocked(supabase.functions.invoke)
+      .mockResolvedValueOnce({
+        data: { results: [{ inserted: 0, remaining: 0 }] },
+        error: null,
+      } as never)
+      .mockResolvedValueOnce({
+        data: { results: [{ inserted: 0, remaining: 0 }] },
+        error: null,
+      } as never)
+      .mockResolvedValueOnce({
+        data: { results: [{ repaired: 0, empty_body_remaining: 0, remaining: 0 }] },
+        error: null,
+      } as never)
+      .mockResolvedValue({
+        data: null,
+        error: { message: "WorkerRequestCancelled: request has been cancelled by supervisor" },
+      } as never);
+
+    const outcome = await runPhasedMailboxSync({
+      mailboxId: "mb-1",
+      maxBatches: 1,
+      maxRoundsPerPhase: 1,
+      roundDelayMs: 0,
+      batchDelayMs: 0,
+      workerCancelRetryDelayMs: 0,
+      wait: async () => {},
+    });
+
+    expect(outcome.failed).toBe(false);
+    expect(outcome.degraded).toBe(true);
+  });
+
   it("formatSyncPhaseProgress 区分补正文与补附件", () => {
     expect(getSyncPhaseLabel("repair_attachments")).toBe("补附件");
     expect(
@@ -243,5 +276,70 @@ describe("runPhasedMailboxSync", () => {
         repaired: 0,
       }),
     ).toContain("仍剩占位约 3 封");
+  });
+});
+
+describe("runDateMailboxSync", () => {
+  beforeEach(() => {
+    vi.mocked(supabase.functions.invoke).mockReset();
+  });
+
+  it("invokeSyncMailboxDate 传递 date_scan_offset 并在多批间续扫", async () => {
+    const { invokeSyncMailboxDate, runDateMailboxSync } = await import("@/lib/sync-mailbox-phased");
+
+    vi.mocked(supabase.functions.invoke)
+      .mockResolvedValueOnce({
+        data: { results: [{ inserted: 0, remaining: 159, total: 161, date_scan_offset: 2 }] },
+        error: null,
+      } as never)
+      .mockResolvedValueOnce({
+        data: { results: [{ inserted: 1, remaining: 157, total: 161, date_scan_offset: 4 }] },
+        error: null,
+      } as never)
+      .mockResolvedValueOnce({
+        data: { results: [{ inserted: 0, remaining: 0, total: 161, date_scan_offset: 161 }] },
+        error: null,
+      } as never)
+      .mockResolvedValue({
+        data: { results: [{ inserted: 0, remaining: 0, total: 161, date_scan_offset: 60 }] },
+        error: null,
+      } as never);
+
+    const outcome = await runDateMailboxSync({
+      mailboxId: "mb-1",
+      syncOnDate: "2026-05-29",
+      syncFromEmail: "stevehortz",
+      roundDelayMs: 0,
+      wait: async () => {},
+    });
+
+    expect(outcome.totalInserted).toBe(1);
+    expect(outcome.dateRemaining).toBe(0);
+    expect(supabase.functions.invoke).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(supabase.functions.invoke).mock.calls[0]?.[1]).toEqual({
+      body: {
+        mailbox_id: "mb-1",
+        sync_on_date: "2026-05-29",
+        sync_from_email: "stevehortz",
+      },
+    });
+    expect(vi.mocked(supabase.functions.invoke).mock.calls[1]?.[1]).toEqual({
+      body: {
+        mailbox_id: "mb-1",
+        sync_on_date: "2026-05-29",
+        sync_from_email: "stevehortz",
+        date_scan_offset: 2,
+      },
+    });
+
+    await invokeSyncMailboxDate("mb-1", "2026-05-29", "stevehortz", 40);
+    expect(supabase.functions.invoke).toHaveBeenLastCalledWith("sync-mailbox", {
+      body: {
+        mailbox_id: "mb-1",
+        sync_on_date: "2026-05-29",
+        sync_from_email: "stevehortz",
+        date_scan_offset: 40,
+      },
+    });
   });
 });

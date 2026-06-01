@@ -1,5 +1,17 @@
 import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { parseFullMime } from "./mime-parse.ts";
+import { decodeBytesWithCharset, hasReadableEmailBody, parseFullMime } from "./mime-parse.ts";
+
+Deno.test("decodeBytesWithCharset decodes gb2312 body", () => {
+  const bytes = new Uint8Array([0xd6, 0xd0, 0xce, 0xc4, 0xb2, 0xe2, 0xca, 0xd4]);
+  const text = decodeBytesWithCharset(bytes, "gb2312");
+  assertStringIncludes(text, "中文");
+});
+
+Deno.test("decodeBytesWithCharset prefers valid utf-8 over mislabeled charset", () => {
+  const bytes = new TextEncoder().encode("hello utf-8");
+  const text = decodeBytesWithCharset(bytes, "gb2312");
+  assertStringIncludes(text, "hello");
+});
 
 Deno.test("parseFullMime falls back to text/html part when structured parse is empty", () => {
   const raw = [
@@ -148,4 +160,21 @@ Deno.test("parseFullMime decodes quoted-printable body_text fragment", () => {
 
   assertStringIncludes(parsed.bodyText, "You received a new message");
   assertStringIncludes(parsed.bodyText, "Country Code");
+});
+
+Deno.test("parseFullMime decodes headerless base64 BODY[TEXT] payload", () => {
+  const plain = "您好，\n\n请直接回复本邮件并提供您的订单号，以便我们为您处理。\n谢谢！\n客服团队";
+  const payload = btoa(unescape(encodeURIComponent(plain)));
+  const parsed = parseFullMime(payload);
+
+  assertStringIncludes(parsed.bodyText, "您好");
+  assertStringIncludes(parsed.bodyText, "订单号");
+  assertStringIncludes(parsed.bodyText, "客服团队");
+});
+
+Deno.test("hasReadableEmailBody treats undecoded base64 as missing", () => {
+  const plain = "您好，请提供订单号";
+  const payload = btoa(unescape(encodeURIComponent(plain)));
+  assertEquals(hasReadableEmailBody(payload, null), false);
+  assertEquals(hasReadableEmailBody(plain, null), true);
 });

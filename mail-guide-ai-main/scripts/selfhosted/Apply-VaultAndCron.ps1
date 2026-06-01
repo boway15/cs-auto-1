@@ -4,7 +4,8 @@
   Self-hosted Supabase: update vault.service_role_key and pg_cron to call the in-stack Kong Functions URL.
   Registers business cron jobs for self-hosted Kong (no *.supabase.co):
   sync-mailbox, schedule-draft-generation, run-compensation-tasks, retry-risk-intercept-compensation,
-  run-email-body-repair-tasks, run-email-attachment-repair-tasks.
+  run-email-body-repair-tasks, run-email-attachment-repair-tasks, run-email-fetch-tasks,
+  run-sla-mailbox-sync, run-mailbox-history-backfill.
   compensating-alerts is removed and replaced by first/final ops alerts.
 
 .PARAMETER SelfhostRoot
@@ -80,6 +81,9 @@ $uComp = Sql-EscapeLiteral ($base + "/functions/v1/run-compensation-tasks")
 $uRiskRetry = Sql-EscapeLiteral ($base + "/functions/v1/retry-risk-intercept-compensation")
 $uBodyRepair = Sql-EscapeLiteral ($base + "/functions/v1/run-email-body-repair-tasks")
 $uAttRepair = Sql-EscapeLiteral ($base + "/functions/v1/run-email-attachment-repair-tasks")
+$uFetchTasks = Sql-EscapeLiteral ($base + "/functions/v1/run-email-fetch-tasks")
+$uSlaSync = Sql-EscapeLiteral ($base + "/functions/v1/run-sla-mailbox-sync")
+$uHistoryBackfill = Sql-EscapeLiteral ($base + "/functions/v1/run-mailbox-history-backfill")
 
 $tag = "mga_" + [Guid]::NewGuid().ToString("N")
 if ($serviceRoleKey.Contains($tag)) { throw "SERVICE_ROLE_KEY delimiter collision; retry." }
@@ -144,6 +148,9 @@ $lines.Add("")
 Add-CronBlock -Out $lines -JobName "retry-risk-intercept-hourly-at-45" -Schedule "*/20 * * * *" -UrlEscaped $uRiskRetry
 Add-CronBlock -Out $lines -JobName "email-body-repair-tasks-every-3min" -Schedule "1-59/3 * * * *" -UrlEscaped $uBodyRepair
 Add-CronBlock -Out $lines -JobName "email-attachment-repair-tasks-every-5min" -Schedule "2-59/5 * * * *" -UrlEscaped $uAttRepair
+Add-CronBlock -Out $lines -JobName "email-fetch-tasks-every-3min" -Schedule "3-59/3 * * * *" -UrlEscaped $uFetchTasks
+Add-CronBlock -Out $lines -JobName "run-sla-mailbox-sync-every-10min" -Schedule "5,15,25,35,45,55 * * * *" -UrlEscaped $uSlaSync
+Add-CronBlock -Out $lines -JobName "run-mailbox-history-backfill-every-5min" -Schedule "8,18,28,38,48,58 * * * *" -UrlEscaped $uHistoryBackfill
 
 $sql = ($lines -join "`n") + "`n"
 $tempSql = [IO.Path]::GetTempFileName() + ".sql"

@@ -69,7 +69,7 @@ export default function RiskLogs() {
 
       let query = supabase
         .from("risk_intercept_logs")
-        .select("*, orders(order_no, customer_email), emails(subject, from_email)", { count: "exact" });
+        .select("*, orders(order_no, customer_email), emails(subject, from_email, message_id)", { count: "exact" });
       if (status !== "all") query = query.eq("status", status);
       if (searchDebounced) {
         const s = `%${searchDebounced}%`;
@@ -290,7 +290,23 @@ export default function RiskLogs() {
                 <div className="min-w-0 break-words"><span className="text-muted-foreground">动作：</span>{detail.action === "hold" ? "暂停发货" : "恢复发货"}</div>
                 <div className="min-w-0 break-words"><span className="text-muted-foreground">状态：</span>{statusMap[detail.status] ?? detail.status}</div>
                 <div className="min-w-0 break-words"><span className="text-muted-foreground">重试：</span>{detail.retry_count}</div>
+                <div className="min-w-0 break-words">
+                  <span className="text-muted-foreground">创建时间：</span>
+                  {new Date(detail.created_at).toLocaleString("zh-CN")}
+                </div>
+                <div className="min-w-0 break-words">
+                  <span className="text-muted-foreground">更新时间：</span>
+                  {new Date(detail.updated_at).toLocaleString("zh-CN")}
+                </div>
                 <div className="col-span-2 min-w-0 break-words"><span className="text-muted-foreground">邮件：</span>{detail.emails?.subject ?? "—"}</div>
+                {detail.emails?.message_id?.trim() ? (
+                  <div className="col-span-2 min-w-0 break-words">
+                    <span className="text-muted-foreground">Message-ID：</span>
+                    <span className="font-mono text-xs break-all" title={detail.emails.message_id.trim()}>
+                      {detail.emails.message_id.trim()}
+                    </span>
+                  </div>
+                ) : null}
                 <div className="col-span-2 min-w-0 break-words">
                   <span className="text-muted-foreground">引用单号：</span>
                   {detail.referenced_order_no ?? detail.orders?.order_no ?? "—"}

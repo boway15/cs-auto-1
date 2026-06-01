@@ -122,6 +122,12 @@ workflow:
               required: true
               type: paragraph
               variable: body_text
+            - label: 客户最新回复（无引用）
+              max_length: 50000
+              options: []
+              required: false
+              type: paragraph
+              variable: body_latest
             - label: 发件人邮箱
               max_length: 500
               options: []
@@ -182,12 +188,16 @@ workflow:
                 - business_intent: REQUIRED, exactly one of:
                     "order_cancel"          (订单取消)
                     "address_change"        (订单改地址)
-                    "damaged"               (破损 - 收到商品破损/毁坏)
-                    "defect"                (产品缺陷 - 功能性问题/不工作/瑕疵)
-                    "description_mismatch"  (商品描述不符 - 与详情页/图片不一致)
-                    "logistics"             (物流问题 - 发货/快递/丢件/未到)
-                    "other"                 (其他问题 - 含一般咨询、退款、模糊不清等)
-                - category: "售后" for after_sale/refund/cancel_order/change_address/damaged/defect/description_mismatch, "咨询" for shipping_query/logistics/general/other
+                    "damaged"               (破损)
+                    "defect"                (产品缺陷)
+                    "description_mismatch"  (商品描述不符)
+                    "logistics"             (物流问题)
+                    "other"                 (其他问题)
+                    "amazon_marketplace"    (亚马逊渠道购买/沟通)
+                    "product_inquiry"       (售前/安装咨询)
+                    "conversation_idle"     (感谢/结案/无新诉求)
+                    "solution_accepted"     (接受客服已提出的方案，待履约)
+                - category: "售后" for order_cancel/address_change/damaged/defect/description_mismatch; "咨询" for logistics/other/amazon_marketplace/product_inquiry/conversation_idle/solution_accepted
                 - order_no: extract order number if present. Typical shape: one or more Latin letters followed by one or more digits (lengths variable); an optional single - / _ may appear between letters and digits. Also honor labeled lines (订单号 / Order No). Use null if not found.
                 - is_info_complete: for damaged/defect/description_mismatch: true only if order_no is present AND the email has at least one attachment; for order_cancel/address_change/logistics: true if order_no is present; otherwise follow rules below
                 - missing_elements: array of what's missing. Values: "order_no", "attachment" (no file attached when quality/damage/defect/mismatch context needs evidence; use "attachment" not "image"), "image" (legacy), "product" (unclear product). Empty array if complete.
@@ -206,14 +216,22 @@ workflow:
                 5. If customer says product does not match description / wrong color / wrong size / "not as described" → business_intent: "description_mismatch"; if no attachment add "attachment" when evidence is needed
                 6. Shipping/tracking/delivery/late package questions → intent: "shipping_query", business_intent: "logistics"
                 7. For after-sale issues without any order number → add "order_no" to missing_elements; for logistics/cancel/address without order_no in text → add "order_no"
-                8. If email is very brief, unclear, just says "hello", or none of above categories fit → business_intent: "other"
-                9. Chinese customers using Chinese → set language to "zh", write summary in Chinese; English customers → "en"
-                10. business_intent must be exactly one value from the list above (single-select).
+                8. Classify using ONLY the customer's latest reply in "Latest body" below. Quoted thread history must NOT drive business_intent (e.g. do not label "damaged" because an old quote mentions defect).
+                9. Thank you / case closed / no new issue in latest reply → business_intent: "conversation_idle"
+                10. Customer agrees to a refund/replacement/solution already offered → business_intent: "solution_accepted"
+                11. Purchase or inquiry clearly on Amazon / Amazon order id 123-1234567-1234567 → business_intent: "amazon_marketplace"
+                12. Pre-sales or installation/how-to questions → business_intent: "product_inquiry"
+                13. If none fit → business_intent: "other"
+                14. Chinese customers → language "zh"; English → "en"
+                15. business_intent must be exactly one value from the list (single-select).
             - role: user
               text: |
                 Subject: {{#start.subject#}}
                 From: {{#start.from_email#}}
-                Body:
+                Latest body (customer's new reply only):
+                {{#start.body_latest#}}
+
+                Full body (with quotes, reference only):
                 {{#start.body_text#}}
 
                 Attachments: {{#start.attachments#}}
@@ -327,13 +345,14 @@ workflow:
                 if result["intent"] not in valid_intents:
                     result["intent"] = "general"
 
-                # Validate business_intent (7 categories, single-select)
+                # Validate business_intent (10 categories, single-select)
                 valid_business_intents = [
                     "order_cancel", "address_change", "damaged", "defect",
                     "description_mismatch", "logistics", "other",
+                    "amazon_marketplace", "product_inquiry",
+                    "conversation_idle", "solution_accepted",
                 ]
                 if result["business_intent"] not in valid_business_intents:
-                    # Heuristic fallback from intent
                     fallback = {
                         "cancel_order": "order_cancel",
                         "change_address": "address_change",

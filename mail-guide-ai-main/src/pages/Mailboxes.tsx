@@ -9,11 +9,13 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, Trash2, Mail, RefreshCw, PlugZap, AlertTriangle, CheckCircle2, Edit3 } from "lucide-react";
+import { Plus, Trash2, Mail, RefreshCw, PlugZap, AlertTriangle, CheckCircle2, Edit3, CalendarDays } from "lucide-react";
 import { toast } from "sonner";
 import {
   formatSyncPhaseProgress,
   getSyncPhaseLabel,
+  getDateResyncBounds,
+  runDateMailboxSync,
   runPhasedMailboxSync,
 } from "@/lib/sync-mailbox-phased";
 
@@ -217,21 +219,32 @@ export default function MailboxesPage() {
     const host = form.incoming_host.trim();
     const user = (form.auth_user || form.email_address).trim();
     const port = Number(form.incoming_port);
-    if (!host || !port || !user || !form.auth_password) {
-      toast.error("请先填写收件服务器、端口、邮箱地址、授权码");
+    const pass = form.auth_password.trim();
+    const useStoredCreds = Boolean(editingId && !pass);
+    if (!host || !port || !user || (!pass && !useStoredCreds)) {
+      toast.error(
+        useStoredCreds
+          ? "请先填写收件服务器、端口、邮箱地址"
+          : "请先填写收件服务器、端口、邮箱地址、授权码",
+      );
       return;
     }
     setTesting(true);
     setTestResult(null);
     try {
+      const body: Record<string, unknown> = {
+        host,
+        port,
+        user,
+        use_ssl: form.use_ssl,
+      };
+      if (useStoredCreds) {
+        body.mailbox_id = editingId;
+      } else {
+        body.pass = pass;
+      }
       const { data, error } = await supabase.functions.invoke("test-mailbox", {
-        body: {
-          host,
-          port,
-          user,
-          pass: form.auth_password,
-          use_ssl: form.use_ssl,
-        },
+        body,
       });
       if (error) {
         const message = await getFunctionErrorMessage(error);
@@ -302,12 +315,67 @@ export default function MailboxesPage() {
   }
 
   const [syncingId, setSyncingId] = useState<string | null>(null);
+  const [dateSyncOpen, setDateSyncOpen] = useState(false);
+  const [dateSyncMailboxId, setDateSyncMailboxId] = useState<string | null>(null);
+  const [dateSyncValue, setDateSyncValue] = useState(() => getDateResyncBounds().max);
+  const [dateSyncFromEmail, setDateSyncFromEmail] = useState("");
+  const dateResyncBounds = getDateResyncBounds();
 
   function presetLabel(): string | null {
     if (!selectedPreset || selectedPreset === "custom") return null;
     const idx = parseInt(selectedPreset.replace("preset-", ""), 10);
     return PROVIDER_PRESETS[idx]?.label ?? null;
   }
+  function openDateSync(mailboxId: string) {
+    setDateSyncMailboxId(mailboxId);
+    setDateSyncValue(getDateResyncBounds().max);
+    setDateSyncFromEmail("");
+    setDateSyncOpen(true);
+  }
+
+  async function runDateSync() {
+    if (!dateSyncMailboxId) return;
+    setDateSyncOpen(false);
+    setSyncingId(dateSyncMailboxId);
+    try {
+      const outcome = await runDateMailboxSync({
+        mailboxId: dateSyncMailboxId,
+        syncOnDate: dateSyncValue,
+        syncFromEmail: dateSyncFromEmail.trim() || undefined,
+        onProgress: (p) => {
+          toast.message(
+            `补同步 ${dateSyncValue} · 第 ${p.batch} 批：本批新增 ${p.inserted} 封，IMAP 待扫约 ${p.remaining} 个 UID`,
+          );
+        },
+      });
+      if (outcome.failed && outcome.totalInserted === 0) {
+        toast.error("补同步失败：" + (outcome.errorMessage ?? "未知错误"));
+        return;
+      }
+      if (outcome.degraded) {
+        toast.message("部分邮件已转入后台队列", {
+          description: "超大邮件将由后台任务继续拉取，请稍后刷新。",
+        });
+      }
+      const remain = outcome.dateRemaining ?? 0;
+      if (remain > 0 || outcome.errorMessage) {
+        toast.success(
+          `「${dateSyncValue}」共新增 ${outcome.totalInserted} 封；IMAP 列表还有约 ${remain} 个 UID 未扫完`,
+          {
+            description:
+              "剩余=扫描进度（扩窗后 UID 会变多，不等于还缺几封）。查漏请填发件人如 stevehortz@gmail.com；未扫完请再点一次同一天。",
+          },
+        );
+      } else {
+        toast.success(`「${dateSyncValue}」补同步完成：新增 ${outcome.totalInserted} 封`);
+      }
+    } finally {
+      setSyncingId(null);
+      setDateSyncMailboxId(null);
+      load();
+    }
+  }
+
   async function syncOne(id: string) {
     setSyncingId(id);
     try {
@@ -323,8 +391,21 @@ export default function MailboxesPage() {
         toast.error("同步失败：" + (outcome.errorMessage ?? "未知错误"));
         return;
       }
+      if (outcome.degraded) {
+        toast.message("部分邮件已转入后台队列", {
+          description: "超大附件或邮箱响应较慢的邮件将由后台任务继续拉取，请稍后刷新查看。",
+        });
+      }
       const tail: string[] = [];
-      if (outcome.historyRemaining > 0) tail.push(`历史约 ${outcome.historyRemaining} 封`);
+      if (outcome.historyRemaining > 0) {
+        toast.success(
+          `本次新增 ${outcome.totalInserted} 封；历史邮件已转入后台同步，无需重复点击`,
+          {
+            description: "后台 worker 将自动续跑近 30 天历史回补，进度可在邮箱列表查看。",
+          },
+        );
+        return;
+      }
       if (outcome.emptyBodyRemaining > 0) tail.push(`空正文约 ${outcome.emptyBodyRemaining} 封`);
       const repairedNote = outcome.totalRepaired > 0 ? `，补正文 ${outcome.totalRepaired} 封` : "";
       if (tail.length > 0) {
@@ -387,9 +468,34 @@ export default function MailboxesPage() {
               <div className="flex items-center gap-2 pt-6"><Switch checked={form.use_ssl} onCheckedChange={(v) => setForm({ ...form, use_ssl: v })} /> <Label>使用 SSL</Label></div>
               <div><Label>收件服务器</Label><Input value={form.incoming_host} onChange={(e) => setForm({ ...form, incoming_host: e.target.value })} placeholder="imap.gmail.com" />{presetLabel() && <span className="text-[10px] text-muted-foreground mt-0.5 block">按照 {presetLabel()} 预设</span>}</div>
               <div><Label>收件端口</Label><Input type="number" value={form.incoming_port} onChange={(e) => setForm({ ...form, incoming_port: +e.target.value })} /></div>
+              <div className="col-span-2">
+                <Label>IMAP 登录用户名</Label>
+                <Input
+                  value={form.auth_user}
+                  onChange={(e) => setForm({ ...form, auth_user: e.target.value })}
+                  placeholder="默认与邮箱地址相同；网易企业邮等若后台要求独立账号请填写"
+                />
+              </div>
               <div><Label>SMTP 服务器（发件）</Label><Input value={form.smtp_host} onChange={(e) => setForm({ ...form, smtp_host: e.target.value })} placeholder="smtp.gmail.com" />{presetLabel() && <span className="text-[10px] text-muted-foreground mt-0.5 block">按照 {presetLabel()} 预设</span>}</div>
               <div><Label>SMTP 端口</Label><Input type="number" value={form.smtp_port} onChange={(e) => setForm({ ...form, smtp_port: +e.target.value })} /></div>
-              <div className="col-span-2"><Label>授权码 / 应用专用密码</Label><Input type="password" value={form.auth_password} onChange={(e) => setForm({ ...form, auth_password: e.target.value })} placeholder={editingId ? "留空则保持原授权码；修改时请重新填写" : "非邮箱登录密码，需到邮箱后台生成应用专用密码"} /></div>
+              <div className="col-span-2">
+                <Label>授权码 / 应用专用密码</Label>
+                <Input
+                  type="password"
+                  value={form.auth_password}
+                  onChange={(e) => setForm({ ...form, auth_password: e.target.value })}
+                  placeholder={
+                    editingId
+                      ? "留空则测试/保存时使用已保存授权码；更换授权码时请填写新值"
+                      : "非邮箱登录密码，需到邮箱后台生成应用专用密码"
+                  }
+                />
+                {editingId && (
+                  <span className="text-[10px] text-muted-foreground mt-0.5 block">
+                    编辑时授权码可留空：点「测试连接」将用数据库中已保存的凭据（与自动同步相同）。
+                  </span>
+                )}
+              </div>
               <div className="col-span-2 flex items-center gap-2 pt-1">
                 <Switch checked={form.signature_enabled} onCheckedChange={(v) => setForm({ ...form, signature_enabled: v })} />
                 <Label>发信时追加邮箱签名</Label>
@@ -446,6 +552,21 @@ export default function MailboxesPage() {
                 </div>
               </div>
               <Badge variant={mb.is_active ? "default" : "secondary"}>{mb.is_active ? "启用中" : "已停用"}</Badge>
+              {mb.history_backfill_auto_continue && (
+                <Badge variant="outline" className="text-amber-700 border-amber-300 bg-amber-50">
+                  历史同步中
+                </Badge>
+              )}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => openDateSync(mb.id)}
+                disabled={syncingId === mb.id}
+                title="补同步近 30 天内某一天的漏收邮件"
+              >
+                <CalendarDays className="w-3.5 h-3.5 mr-1" />
+                按日补同步
+              </Button>
               <Button size="sm" variant="outline" onClick={() => syncOne(mb.id)} disabled={syncingId === mb.id}>
                 <RefreshCw className={`w-3.5 h-3.5 mr-1 ${syncingId === mb.id ? "animate-spin" : ""}`} />
                 {syncingId === mb.id ? "同步中" : "立即同步"}
@@ -465,9 +586,50 @@ export default function MailboxesPage() {
         {list.length === 0 && <Card className="p-8 text-center text-muted-foreground">暂无邮箱，点击右上角添加</Card>}
       </div>
 
+      <Dialog open={dateSyncOpen} onOpenChange={setDateSyncOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>按日期补同步</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            用于找回增量同步漏掉的邮件。仅支持近 30 天内的某一天。已在库中的邮件会自动跳过，只补缺失的；点一次「开始」会自动连续跑多批，一般无需反复点击。
+          </p>
+          <div>
+            <Label>选择日期</Label>
+            <Input
+              type="date"
+              className="mt-1"
+              min={dateResyncBounds.min}
+              max={dateResyncBounds.max}
+              value={dateSyncValue}
+              onChange={(e) => setDateSyncValue(e.target.value)}
+            />
+          </div>
+          <div>
+            <Label>发件人筛选（可选）</Label>
+            <Input
+              className="mt-1"
+              placeholder="例如 stevehortz@gmail.com"
+              value={dateSyncFromEmail}
+              onChange={(e) => setDateSyncFromEmail(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              只补该发件人的漏信；留空则扫当天全部 UID。仅同步收件箱 INBOX。
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDateSyncOpen(false)}>取消</Button>
+            <Button onClick={runDateSync} disabled={!dateSyncValue}>开始补同步</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Card className="p-4 mt-6 bg-info/10 border-info/30 text-sm">
         <div className="font-medium mb-1">📥 收件说明</div>
         <p className="text-muted-foreground">添加邮箱时<strong>必须先点"测试连接"成功</strong>才能保存，避免无效配置。系统每 5 分钟自动增量同步一次；首次同步会拉取最近 30 天邮件。</p>
+        <p className="text-muted-foreground mt-1">
+          若发现某天邮件缺失，可使用<strong>「按日补同步」</strong>（近 30 天）。日期按北京时间（UTC+8）当天 0 点至 24 点匹配 IMAP 邮件。
+        </p>
         <p className="text-muted-foreground mt-1">⚠️ 授权码须到邮箱后台生成"客户端授权码"或"应用专用密码"，不能用普通登录密码。网易企业邮（qiye.163.com）需先在管理后台启用 IMAP/SMTP 服务。</p>
       </Card>
     </div>

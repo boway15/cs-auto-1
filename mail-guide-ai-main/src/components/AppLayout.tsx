@@ -105,12 +105,12 @@ export default function AppLayout() {
             "flex items-center gap-2 px-2.5 py-2 rounded text-sm transition-colors",
             collapsed ? "justify-center px-2" : "",
             isActive
-              ? "bg-sidebar-primary text-sidebar-primary-foreground"
-              : "hover:bg-sidebar-accent text-sidebar-foreground/80",
+              ? "bg-sidebar-primary !text-sidebar-primary-foreground"
+              : "!text-sidebar-foreground hover:bg-sidebar-accent hover:!text-sidebar-foreground",
           )
         }
       >
-        <item.icon className="w-4 h-4 shrink-0" />
+        <item.icon className="w-4 h-4 shrink-0 text-current" />
         {!collapsed && item.label}
       </NavLink>
     );
@@ -132,7 +132,7 @@ export default function AppLayout() {
     <div className="flex h-screen bg-background">
       <aside
         className={cn(
-          "relative z-20 bg-sidebar text-sidebar-foreground flex flex-col shrink-0 transition-[width] duration-200 border-r border-sidebar-border",
+          "relative z-20 isolate bg-sidebar text-sidebar-foreground flex flex-col shrink-0 transition-[width] duration-200 border-r border-sidebar-border",
           collapsed ? "w-16" : "w-48",
         )}
       >

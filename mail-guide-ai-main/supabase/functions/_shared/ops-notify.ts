@@ -12,8 +12,6 @@ import { sendMail } from "./smtp.ts";
 
 const ENV_ALERT_SENDER_ADDRESS =
   (Deno.env.get("ALERT_SENDER_ADDRESS") ?? "").trim() || "caobaowei123@163.com";
-const ENV_ALERT_EMAIL_TO =
-  (Deno.env.get("ALERT_EMAIL_TO") ?? "").trim() || "caobaowei@bestwo.com";
 
 const OPS_NOTIFY_CONFIG_CACHE_MS = 10_000;
 let opsNotifyConfigCache: { at: number; sender: string; recipients: string[] } | null = null;
@@ -32,13 +30,11 @@ async function loadOpsNotifyMailConfig(admin: any): Promise<{ sender: string; re
 
   const sender = (row?.ops_alert_sender_email?.trim() || ENV_ALERT_SENDER_ADDRESS).trim();
 
-  const rawRecipients = (row?.ops_alert_recipient_emails?.trim() || ENV_ALERT_EMAIL_TO).trim();
-  const recipients = rawRecipients
+  const rawRecipients = (row?.ops_alert_recipient_emails ?? "").trim();
+  const resolvedRecipients = rawRecipients
     .split(/[,;]/)
     .map((s: string) => s.trim())
     .filter(Boolean);
-
-  const resolvedRecipients = recipients.length > 0 ? recipients : [ENV_ALERT_EMAIL_TO.trim()].filter(Boolean);
 
   opsNotifyConfigCache = { at: now, sender, recipients: resolvedRecipients };
   return { sender, recipients: [...resolvedRecipients] };
@@ -178,7 +174,7 @@ export async function createAlertAndNotify(
 
   const { sender: alertSender, recipients: alertRecipients } = await loadOpsNotifyMailConfig(admin);
   if (alertRecipients.length === 0) {
-    const errMsg = "运营告警收件人未配置（数据库与环境变量均为空），跳过发邮（告警仍写入 ops_alerts）";
+    const errMsg = "运营告警收件人未配置，跳过发邮（告警仍写入 ops_alerts）";
     console.error("[ops-notify]", errMsg);
     if (alertId) {
       await admin

@@ -7,6 +7,8 @@ export interface MimeAttachmentPart {
   filename: string;
   contentType: string;
   bytes: Uint8Array;
+  /** MIME Content-ID，用于正文 cid: 引用映射 */
+  contentId?: string | null;
 }
 
 export interface ParseMimeResult {
@@ -17,6 +19,63 @@ export interface ParseMimeResult {
 
 const MAX_ATTACHMENTS = 20;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+const CHARSET_ALIASES: Record<string, string> = {
+  gb2312: "gb18030",
+  gb_2312: "gb18030",
+  "gb_2312-80": "gb18030",
+  gbk: "gbk",
+  "x-gbk": "gbk",
+  cp936: "gbk",
+  ms936: "gbk",
+  "windows-936": "gbk",
+  "big5-hkscs": "big5",
+  "x-mac-chinesetrad": "big5",
+  "iso-8859-1": "windows-1252",
+  latin1: "windows-1252",
+  us_ascii: "utf-8",
+  ascii: "utf-8",
+};
+
+/** Normalize declared MIME charset to a label TextDecoder accepts. */
+export function normalizeMimeCharset(charset: string | null | undefined): string {
+  const raw = String(charset ?? "utf-8").trim().toLowerCase().replace(/['"]/g, "");
+  if (!raw) return "utf-8";
+  return CHARSET_ALIASES[raw] ?? raw;
+}
+
+function replacementCharCount(text: string): number {
+  let n = 0;
+  for (const ch of text) {
+    if (ch === "\uFFFD") n++;
+  }
+  return n;
+}
+
+/** Decode bytes using declared charset with GBK/UTF-8 fallbacks for Chinese mail. */
+export function decodeBytesWithCharset(bytes: Uint8Array, declaredCharset?: string | null): string {
+  const primary = normalizeMimeCharset(declaredCharset);
+  const candidates = [primary, "utf-8", "gb18030", "gbk", "big5", "windows-1252"];
+  const seen = new Set<string>();
+  let best = "";
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (const label of candidates) {
+    if (seen.has(label)) continue;
+    seen.add(label);
+    try {
+      const text = new TextDecoder(label, { fatal: false }).decode(bytes);
+      const score = replacementCharCount(text);
+      if (score < bestScore) {
+        bestScore = score;
+        best = text;
+        if (score === 0) break;
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return best || new TextDecoder().decode(bytes);
+}
 
 /** Strip outer RFC822 headers when present; keep raw if already a MIME fragment. */
 export function mimePayloadOnly(raw: string): string {
@@ -77,7 +136,7 @@ function decodeMimeWordsInFilename(s: string): string {
         const bin = atob(data);
         const bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        return new TextDecoder(charset).decode(bytes);
+        return decodeBytesWithCharset(bytes, charset);
       } else {
         // Q 编码：=XX 是十六进制字节，_ 是空格
         const bytes: number[] = [];
@@ -88,7 +147,7 @@ function decodeMimeWordsInFilename(s: string): string {
             i += 2;
           } else { bytes.push(data.charCodeAt(i)); }
         }
-        return new TextDecoder(charset).decode(new Uint8Array(bytes));
+        return decodeBytesWithCharset(new Uint8Array(bytes), charset);
       }
     } catch {
       return _m;
@@ -104,7 +163,7 @@ function parseFilenameStar(unfolded: string): string | null {
   // 解析 charset'language'encoded-value 格式
   const rvParts = v.match(/^([^']*)'([^']*)'(.*)$/);
   if (rvParts) {
-    const charset = rvParts[1] || "utf-8";
+    const charset = normalizeMimeCharset(rvParts[1] || "utf-8");
     v = rvParts[3];
     try {
       const decoded = decodeURIComponent(v);
@@ -113,7 +172,7 @@ function parseFilenameStar(unfolded: string): string | null {
       try {
         // 回退：逐字节 percent-decode 后用指定 charset 解码
         const bytes = v.replace(/%([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
-        return new TextDecoder(charset).decode(new TextEncoder().encode(bytes)) || null;
+        return decodeBytesWithCharset(new TextEncoder().encode(bytes), charset) || null;
       } catch {
         return v || null;
       }
@@ -148,7 +207,7 @@ function parseFilenameRfc2231Continuation(unfolded: string): string | null {
     if (i === 0 && parts[i].encoded) {
       const head = v.match(/^([^']*)'([^']*)'(.*)$/);
       if (head) {
-        charset = head[1] || "utf-8";
+        charset = normalizeMimeCharset(head[1] || "utf-8");
         v = head[3];
       }
     }
@@ -160,7 +219,7 @@ function parseFilenameRfc2231Continuation(unfolded: string): string | null {
         try {
           const rawBytes = v.replace(/%([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
           const u8 = new Uint8Array(Array.from(rawBytes).map((c) => c.charCodeAt(0)));
-          combined += new TextDecoder(charset).decode(u8);
+          combined += decodeBytesWithCharset(u8, charset);
         } catch { combined += v; }
       }
     } else {
@@ -260,6 +319,12 @@ function getDisposition(headers: string): { type: string | null; filename: strin
   return { type, filename };
 }
 
+/** RFC 2045 Content-ID（去掉尖括号） */
+export function extractContentId(headers: string): string | null {
+  const m = unfoldHeaders(headers).match(/content-id:\s*<?([^>\s;]+)>?/i);
+  return m?.[1]?.trim() || null;
+}
+
 /** 仅把 Content-Disposition: attachment 视为附件；避免 text/html; name=… 被误判为非正文 */
 function hasAttachmentDisposition(headers: string): boolean {
   return /content-disposition:\s*attachment/i.test(unfoldHeaders(headers));
@@ -272,6 +337,77 @@ function shouldTreatTextPartAsAttachment(headers: string): boolean {
 
 function looksLikeQuotedPrintable(s: string): boolean {
   return /=([0-9A-Fa-f]{2})(?![0-9A-Fa-f])/.test(s) || /=\r?\n/.test(s);
+}
+
+/** BODY[TEXT] 等无 MIME 头片段：判断是否像 base64 正文 payload */
+export function looksLikeBase64Payload(s: string): boolean {
+  const flat = s.replace(/\s/g, "");
+  if (flat.length < 16) return false;
+  if (!/^[A-Za-z0-9+/]+=*$/.test(flat)) return false;
+  if (/[<>&]/.test(s.trim())) return false;
+  return true;
+}
+
+function isLikelyDecodedTextContent(s: string): boolean {
+  if (!s.trim()) return false;
+  let good = 0;
+  for (const ch of s) {
+    const c = ch.charCodeAt(0);
+    if (c === 9 || c === 10 || c === 13) {
+      good++;
+      continue;
+    }
+    if (c >= 32 && c <= 126) {
+      good++;
+      continue;
+    }
+    if (c >= 0x4e00 && c <= 0x9fff) {
+      good++;
+      continue;
+    }
+    if (c >= 0x3000 && c <= 0x303f) {
+      good++;
+      continue;
+    }
+    if (c > 127 && c < 0xfffd) {
+      good++;
+      continue;
+    }
+  }
+  return good / Math.max(s.length, 1) >= 0.85;
+}
+
+/** 无 Content-Transfer-Encoding 头时尝试 base64 解码（send-reply / BODY[TEXT] 常见） */
+export function decodeBase64BodyLoose(input: string): string | null {
+  if (!looksLikeBase64Payload(input)) return null;
+  try {
+    const flat = input.replace(/\s/g, "");
+    const bin = atob(flat);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    if (!isLikelyDecodedTextContent(decoded)) return null;
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+export function isUndecodedBase64Body(text: string | null | undefined): boolean {
+  const raw = String(text ?? "").trim();
+  if (!raw) return false;
+  return decodeBase64BodyLoose(raw) !== null;
+}
+
+export function hasReadableEmailBody(
+  bodyText: string | null | undefined,
+  bodyHtml: string | null | undefined,
+): boolean {
+  const text = String(bodyText ?? "").trim();
+  const html = String(bodyHtml ?? "").trim();
+  if (html && !isUndecodedBase64Body(html)) return true;
+  if (text && !isUndecodedBase64Body(text)) return true;
+  return false;
 }
 
 /** 无 MIME 头时的 quoted-printable 解码（Shopify / BODY[TEXT] 片段） */
@@ -326,7 +462,7 @@ function joinBase64Payload(body: string): string {
 }
 
 function decodeBodyToBytes(headers: string, body: string): Uint8Array {
-  const charset = headers.match(/charset=(["']?)([\w-]+)\1/i)?.[2] ?? "utf-8";
+  const charset = normalizeMimeCharset(headers.match(/charset=(["']?)([^"';\s]+)\1/i)?.[2]);
   const cte = getContentTransferEncoding(headers);
   try {
     if (cte === "base64") {
@@ -366,12 +502,8 @@ function decodeBodyToBytes(headers: string, body: string): Uint8Array {
 
 function decodeBodyToText(headers: string, body: string): string {
   const bytes = decodeBodyToBytes(headers, body);
-  const charset = headers.match(/charset=(["']?)([\w-]+)\1/i)?.[2] ?? "utf-8";
-  try {
-    return new TextDecoder(charset).decode(bytes);
-  } catch {
-    return new TextDecoder().decode(bytes);
-  }
+  const charset = headers.match(/charset=(["']?)([^"';\s]+)\1/i)?.[2] ?? "utf-8";
+  return decodeBytesWithCharset(bytes, charset);
 }
 
 function decodeHtmlEntities(s: string): string {
@@ -532,7 +664,9 @@ export function parseMimePart(part: string, options?: ParseMimePartOptions): Par
   if (!headers.trim()) {
     // 无 MIME 头部：将全部内容作为纯文本回退，避免正文丢失
     const text = body.trim();
-    return text ? { bodyText: text, bodyHtml: null, attachments: [] } : empty;
+    if (!text) return empty;
+    const decoded = decodeBase64BodyLoose(text);
+    return { bodyText: decoded ?? text, bodyHtml: null, attachments: [] };
   }
 
   const ctLine = unfoldHeaders(headers).match(/content-type:\s*([^\r\n]+)/i)?.[1] ?? "";
@@ -585,6 +719,7 @@ export function parseMimePart(part: string, options?: ParseMimePartOptions): Par
               filename: safeFilename(fn, subMeta.full, allAtt.length),
               contentType: subMeta.full,
               bytes,
+              contentId: extractContentId(subH),
             });
           }
         }
@@ -654,11 +789,12 @@ export function parseMimePart(part: string, options?: ParseMimePartOptions): Par
         return {
           bodyText: "",
           bodyHtml: null,
-          attachments: [{
+          attachments: bytes.length > 0 ? [{
             filename: safeFilename(fn, full, 0),
             contentType: full,
             bytes,
-          }],
+            contentId: extractContentId(headers),
+          }] : [],
         };
       }
       if (subtype === "html") {
@@ -683,6 +819,7 @@ export function parseMimePart(part: string, options?: ParseMimePartOptions): Par
   }
 
   const bytes = decodeBodyToBytes(headers, body);
+  if (bytes.length === 0) return empty;
   return {
     bodyText: "",
     bodyHtml: null,
@@ -690,6 +827,7 @@ export function parseMimePart(part: string, options?: ParseMimePartOptions): Par
       filename: safeFilename(fn, full, 0),
       contentType: full || "application/octet-stream",
       bytes,
+      contentId: extractContentId(headers),
     }],
   };
 }
@@ -719,6 +857,8 @@ function fallbackBodyFromRaw(raw: string): { bodyText: string; bodyHtml: string 
 
   let payload = mimePayloadOnly(raw).trim();
   if (!payload) return { bodyText: "", bodyHtml: null };
+  const b64Decoded = decodeBase64BodyLoose(payload);
+  if (b64Decoded) return { bodyText: b64Decoded.trim(), bodyHtml: null };
   if (looksLikeQuotedPrintable(payload)) {
     payload = decodeQuotedPrintableLoose(payload);
   }
@@ -824,6 +964,24 @@ function promoteMisclassifiedTextAttachments(
   return { bodyText: text, bodyHtml: html, attachments: kept };
 }
 
+function repairBase64EncodedBody(bodyText: string, bodyHtml: string | null): {
+  bodyText: string;
+  bodyHtml: string | null;
+} {
+  let text = bodyText.trim();
+  let html = bodyHtml?.trim() ? bodyHtml.trim() : null;
+
+  if (text && isUndecodedBase64Body(text)) {
+    text = decodeBase64BodyLoose(text) ?? text;
+  }
+  if (html && isUndecodedBase64Body(html)) {
+    html = decodeBase64BodyLoose(html);
+    if (!text.trim() && html) text = htmlToText(html);
+  }
+
+  return { bodyText: text, bodyHtml: html };
+}
+
 function repairQuotedPrintableBody(bodyText: string, bodyHtml: string | null): {
   bodyText: string;
   bodyHtml: string | null;
@@ -863,6 +1021,10 @@ function finalizeParseResult(r: ParseMimeResult, raw: string): ParseMimeResult {
   bodyHtml = promoted.bodyHtml;
   attachments = promoted.attachments;
 
+  const b64Repaired = repairBase64EncodedBody(bodyText, bodyHtml);
+  bodyText = b64Repaired.bodyText;
+  bodyHtml = b64Repaired.bodyHtml;
+
   const repaired = repairQuotedPrintableBody(bodyText, bodyHtml);
   bodyText = repaired.bodyText;
   bodyHtml = repaired.bodyHtml;
@@ -896,14 +1058,12 @@ function capAttachmentParts(parts: MimeAttachmentPart[]): MimeAttachmentPart[] {
 /** Top-level entry: RFC822 raw or MIME fragment → bodies + attachments (capped). */
 export function parseFullMime(
   raw: string,
-  options?: { attachmentsOnly?: boolean },
+  options?: { attachmentsOnly?: boolean; forceAttachment?: boolean },
 ): ParseMimeResult {
-  // 直接将原始内容传给 parseMimePart（包含 RFC822 头部），由其负责解析：
-  // - 单 part 邮件：RFC822 头部中的 Content-Type / Content-Transfer-Encoding 仍可被正确读取
-  // - 多 part 邮件：Content-Type: multipart/... 和 boundary 均可正确提取
-  // - 匿名 multipart（以 --boundary 开头）：parseMimePart 内已有专门处理分支
-  // 不再调用 mimePayloadOnly，避免其将 Content-Type 头剥离后导致正文变成无头纯文本、parseMimePart 返回空
-  const r = parseMimePart(raw.trimStart(), { attachmentsOnly: options?.attachmentsOnly });
+  const r = parseMimePart(raw.trimStart(), {
+    attachmentsOnly: options?.attachmentsOnly,
+    forceAttachment: options?.forceAttachment,
+  });
   const attachments = capAttachmentParts(r.attachments);
   if (options?.attachmentsOnly) {
     return { bodyText: "", bodyHtml: null, attachments };

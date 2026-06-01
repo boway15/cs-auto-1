@@ -8,6 +8,88 @@ export function isEmailBodyEmpty(email: {
   return !String(email.body_text ?? "").trim() && !String(email.body_html ?? "").trim();
 }
 
+/** 正文需补拉：库内为空，或未解码的 base64 脏数据 */
+export function needsEmailBodyRepair(email: {
+  body_text?: string | null;
+  body_html?: string | null;
+}): boolean {
+  if (isEmailBodyEmpty(email)) return true;
+  if (isUndecodedBase64Body(email.body_text) || isUndecodedBase64Body(email.body_html)) {
+    return true;
+  }
+  return false;
+}
+
+function looksLikeBase64Payload(s: string): boolean {
+  const flat = s.replace(/\s/g, "");
+  if (flat.length < 16) return false;
+  if (!/^[A-Za-z0-9+/]+=*$/.test(flat)) return false;
+  if (/[<>&]/.test(s.trim())) return false;
+  return true;
+}
+
+function isLikelyDecodedTextContent(s: string): boolean {
+  if (!s.trim()) return false;
+  let good = 0;
+  for (const ch of s) {
+    const c = ch.charCodeAt(0);
+    if (c === 9 || c === 10 || c === 13) {
+      good++;
+      continue;
+    }
+    if (c >= 32 && c <= 126) {
+      good++;
+      continue;
+    }
+    if (c >= 0x4e00 && c <= 0x9fff) {
+      good++;
+      continue;
+    }
+    if (c >= 0x3000 && c <= 0x303f) {
+      good++;
+      continue;
+    }
+    if (c > 127 && c < 0xfffd) {
+      good++;
+      continue;
+    }
+  }
+  return good / Math.max(s.length, 1) >= 0.85;
+}
+
+/** 展示/空正文判断：兼容历史入库的未解码 base64（BODY[TEXT] 同步） */
+export function decodeBase64BodyLoose(input: string): string | null {
+  if (!looksLikeBase64Payload(input)) return null;
+  try {
+    const flat = input.replace(/\s/g, "");
+    const bin = atob(flat);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    if (!isLikelyDecodedTextContent(decoded)) return null;
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+export function isUndecodedBase64Body(text: string | null | undefined): boolean {
+  const raw = String(text ?? "").trim();
+  if (!raw) return false;
+  return decodeBase64BodyLoose(raw) !== null;
+}
+
+export function hasReadableEmailBodyForDisplay(
+  bodyText: string | null | undefined,
+  bodyHtml: string | null | undefined,
+): boolean {
+  const text = String(bodyText ?? "").trim();
+  const html = String(bodyHtml ?? "").trim();
+  if (html && !isUndecodedBase64Body(html)) return true;
+  if (text && !isUndecodedBase64Body(text)) return true;
+  return false;
+}
+
 function looksLikeQuotedPrintable(s: string): boolean {
   return /=([0-9A-Fa-f]{2})(?![0-9A-Fa-f])/.test(s) || /=\r?\n/.test(s);
 }
@@ -43,6 +125,14 @@ export function decodeQuotedPrintableLoose(input: string): string {
   } catch {
     return input;
   }
+}
+
+/** 展示前移除会污染全局页面的 HTML 标签（邮件正文常含全局 a/color 规则） */
+export function sanitizeEmailHtmlForDisplay(html: string): string {
+  return html
+    .replace(/<\s*script\b[\s\S]*?<\s*\/\s*script\s*>/gi, "")
+    .replace(/<\s*style\b[\s\S]*?<\s*\/\s*style\s*>/gi, "")
+    .replace(/<\s*link\b[^>]*\brel=["']?stylesheet["']?[^>]*>/gi, "");
 }
 
 /** 从 HTML 提取可见纯文本（用于判断 Word 空壳、回退展示） */
@@ -366,6 +456,13 @@ export function normalizeEmailBodyForDisplay(
   let html = bodyHtml?.trim() ? bodyHtml.trim() : null;
   let text = bodyText?.trim() ?? "";
 
+  if (html && isUndecodedBase64Body(html)) {
+    html = decodeBase64BodyLoose(html);
+  }
+  if (text && isUndecodedBase64Body(text)) {
+    text = decodeBase64BodyLoose(text) ?? text;
+  }
+
   if (html && looksLikeQuotedPrintable(html)) {
     html = decodeQuotedPrintableLoose(html);
   }
@@ -555,6 +652,38 @@ export function formatBodyRepairTaskHint(task: BodyRepairTaskRow | null): string
     }
     if (isUidNotFoundMessage(task.last_error ?? "")) {
       parts.push("正在重新定位原邮件");
+    }
+    return parts.join(" · ");
+  }
+  return null;
+}
+
+export type AttachmentRepairTaskRow = BodyRepairTaskRow;
+
+export async function fetchAttachmentRepairTaskStatus(
+  emailId: string,
+): Promise<AttachmentRepairTaskRow | null> {
+  const { data, error } = await supabase
+    .from("email_attachment_repair_tasks")
+    .select("status, last_error, repaired_at, next_run_at, attempt_count")
+    .eq("email_id", emailId)
+    .maybeSingle();
+  if (error) {
+    console.warn("[fetchAttachmentRepairTaskStatus]", error.message);
+    return null;
+  }
+  return data as AttachmentRepairTaskRow | null;
+}
+
+export function formatAttachmentRepairTaskHint(task: AttachmentRepairTaskRow | null): string | null {
+  if (!task) return null;
+  if (task.status === "failed") {
+    return task.last_error ?? "附件补拉失败，可在官方邮箱确认后重试";
+  }
+  if (task.status === "pending" || task.status === "running") {
+    const parts: string[] = ["附件后台补拉约每 5 分钟处理"];
+    if (task.attempt_count != null && task.attempt_count > 0) {
+      parts.push(`第 ${task.attempt_count} 次尝试`);
     }
     return parts.join(" · ");
   }

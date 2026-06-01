@@ -5,7 +5,14 @@ import {
   normalizeEmailBodyContent,
   pickRenderableEmailBody,
   plainTextEmailToDisplayHtml,
+  sanitizeEmailHtmlForDisplay,
 } from "@/lib/email-body";
+import { resolveCidImagesInEmailHtml } from "@/lib/email-cid-images";
+import {
+  bodyHasCidImageReferences,
+  enrichedEmailTextToDisplayHtml,
+  pickBestEnrichedBodySource,
+} from "@/lib/email-enriched-text";
 
 // Styles injected once for email content rendering
 let styleInjected = false;
@@ -70,6 +77,16 @@ function injectEmailStyles() {
     .email-body-html .gmail_signature {
       margin-top: 0.5em;
     }
+    .email-body-html .email-inline-cid-img {
+      display: inline-block;
+      max-width: 100%;
+      height: auto;
+      vertical-align: middle;
+      margin: 0.25rem 0.15rem;
+    }
+    .email-body-html .email-cid-pending {
+      vertical-align: middle;
+    }
   `;
   document.head.appendChild(el);
 }
@@ -79,10 +96,20 @@ interface EmailBodyProps {
   content?: string | null | undefined;
   bodyText?: string | null;
   bodyHtml?: string | null;
+  /** 用于将正文 HTML 内 cid: 内嵌图替换为签名 URL */
+  attachments?: Record<string, unknown>[] | null;
+  attachmentPreviewUrls?: Record<number, string>;
   className?: string;
 }
 
-export function EmailBody({ content, bodyText, bodyHtml, className }: EmailBodyProps) {
+export function EmailBody({
+  content,
+  bodyText,
+  bodyHtml,
+  attachments,
+  attachmentPreviewUrls,
+  className,
+}: EmailBodyProps) {
   const normalized =
     bodyText !== undefined || bodyHtml !== undefined
       ? pickRenderableEmailBody(bodyText, bodyHtml)
@@ -100,8 +127,17 @@ export function EmailBody({ content, bodyText, bodyHtml, className }: EmailBodyP
   }
 
   const text = normalized.text;
-  const htmlToRender =
+  const rawHtml =
     normalized.html && looksLikeHtmlEmailContent(normalized.html) ? normalized.html : null;
+  const htmlToRender = rawHtml
+    ? sanitizeEmailHtmlForDisplay(
+        resolveCidImagesInEmailHtml(
+          rawHtml,
+          attachments,
+          attachmentPreviewUrls ?? {},
+        ),
+      )
+    : null;
 
   if (htmlToRender) {
     injectEmailStyles();
@@ -116,8 +152,51 @@ export function EmailBody({ content, bodyText, bodyHtml, className }: EmailBodyP
     );
   }
 
+  const enrichedSource =
+    pickBestEnrichedBodySource(bodyText, bodyHtml) ??
+    (bodyHasCidImageReferences(text) ? text : null);
+  if (enrichedSource) {
+    const enrichedHtml = sanitizeEmailHtmlForDisplay(
+      enrichedEmailTextToDisplayHtml(
+        enrichedSource,
+        attachments,
+        attachmentPreviewUrls ?? {},
+      ),
+    );
+    injectEmailStyles();
+    return (
+      <div
+        className={cn(
+          "email-body-html text-sm break-words overflow-hidden",
+          className,
+        )}
+        dangerouslySetInnerHTML={{ __html: enrichedHtml }}
+      />
+    );
+  }
+
+  if (bodyHasCidImageReferences(text)) {
+    const cidHtml = sanitizeEmailHtmlForDisplay(
+      enrichedEmailTextToDisplayHtml(
+        text,
+        attachments,
+        attachmentPreviewUrls ?? {},
+      ),
+    );
+    injectEmailStyles();
+    return (
+      <div
+        className={cn(
+          "email-body-html text-sm break-words overflow-hidden",
+          className,
+        )}
+        dangerouslySetInnerHTML={{ __html: cidHtml }}
+      />
+    );
+  }
+
   const formatted = formatPlainTextEmailForDisplay(text);
-  const plainHtml = plainTextEmailToDisplayHtml(formatted);
+  const plainHtml = sanitizeEmailHtmlForDisplay(plainTextEmailToDisplayHtml(formatted));
   injectEmailStyles();
   return (
     <div

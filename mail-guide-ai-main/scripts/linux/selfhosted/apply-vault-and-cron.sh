@@ -46,6 +46,11 @@ u_sync="$(escape_sql_lit "${base}/functions/v1/sync-mailbox")"
 u_draft="$(escape_sql_lit "${base}/functions/v1/schedule-draft-generation")"
 u_comp="$(escape_sql_lit "${base}/functions/v1/run-compensation-tasks")"
 u_risk="$(escape_sql_lit "${base}/functions/v1/retry-risk-intercept-compensation")"
+u_body="$(escape_sql_lit "${base}/functions/v1/run-email-body-repair-tasks")"
+u_att="$(escape_sql_lit "${base}/functions/v1/run-email-attachment-repair-tasks")"
+u_fetch="$(escape_sql_lit "${base}/functions/v1/run-email-fetch-tasks")"
+u_sla="$(escape_sql_lit "${base}/functions/v1/run-sla-mailbox-sync")"
+u_history="$(escape_sql_lit "${base}/functions/v1/run-mailbox-history-backfill")"
 
 TAG="mga_$(openssl rand -hex 16)"
 if [[ "$SERVICE_ROLE_KEY" == *"$TAG"* ]]; then
@@ -111,6 +116,11 @@ SELECT cron.unschedule('retry-risk-intercept-hourly-at-29') WHERE EXISTS (SELECT
 
 PART4
   add_cron_block "retry-risk-intercept-hourly-at-45" "*/20 * * * *" "$u_risk"
+  add_cron_block "email-body-repair-tasks-every-3min" "1-59/3 * * * *" "$u_body"
+  add_cron_block "email-attachment-repair-tasks-every-5min" "2-59/5 * * * *" "$u_att"
+  add_cron_block "email-fetch-tasks-every-3min" "3-59/3 * * * *" "$u_fetch"
+  add_cron_block "run-sla-mailbox-sync-every-10min" "5,15,25,35,45,55 * * * *" "$u_sla"
+  add_cron_block "run-mailbox-history-backfill-every-5min" "8,18,28,38,48,58 * * * *" "$u_history"
 } >"$TMP"
 
 wait_db_ready() {

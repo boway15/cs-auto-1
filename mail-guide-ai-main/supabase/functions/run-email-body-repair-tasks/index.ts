@@ -19,7 +19,14 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const CRON_KEY = Deno.env.get("CRON_SERVICE_ROLE_KEY");
-const BATCH_LIMIT = 1;
+function parseEnvPositiveInt(name: string, fallback: number): number {
+  const raw = Deno.env.get(name)?.trim();
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+const BATCH_LIMIT = parseEnvPositiveInt("MAIL_BODY_REPAIR_BATCH_LIMIT", 3);
 const WORKER_ID = `body-repair-${crypto.randomUUID().slice(0, 8)}`;
 
 function isAuthorizedServiceToken(token: string): boolean {

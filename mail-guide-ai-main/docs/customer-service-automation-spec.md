@@ -135,9 +135,17 @@
 
 **双槽自动回邮（实现摘要）**：`reply_templates` 固定两条——`ar_missing_order`（缺单号）、`ar_missing_order_or_attachment`（缺单号或附件）。每条含 `enabled_business_intents`（后台勾选）。R1 场景（`order_cancel` / `address_change` / `logistics` + 无单号 + 无关联）走槽一；R2 场景（`damaged` / `defect` / `description_mismatch` + 缺单号或缺任意附件）走槽二。两槽与 R1/R2 一致，**仅**受总开关、`auto_send`、首封窗口等约束，**无**单独的 Functions 环境变量门闸。历史多 `trigger_type` 模板已由迁移关闭 `auto_send`。
 
-### 6.3 其它意图
+### 6.3 其它意图（含渠道/咨询/会话）
 
-按现有分类、优先级、SLA 桶等继续处理；自动回复仅在产品定义的分支内启用。
+| business_intent | 客户自动回邮（双槽） | 说明 |
+|-----------------|----------------------|------|
+| `amazon_marketplace` | 否 | 亚马逊渠道；勿发独立站「官网查单」类模板 |
+| `product_inquiry` | 否 | 售前/安装咨询 |
+| `conversation_idle` | 否 | 感谢/结案/无新诉求 |
+| `solution_accepted` | 否 | 接受方案，待履约 |
+| `other` 及未列明 | 按模板勾选 | 默认不勾新增类 |
+
+按现有分类、优先级、SLA 桶等继续处理；`process-email` 对非 R1/R2 意图写 `auto_reply_skipped`（`non_r1_r2_intent`）。
 
 ### 6.4 自动风控拦截（开关、准入、补偿与人工例外）
 
