@@ -14,8 +14,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { AlertTriangle, Eye, RefreshCw, Search } from "lucide-react";
-import { formatDistanceToNow } from "date-fns";
-import { zhCN } from "date-fns/locale";
+import { formatDateTimeCST } from "@/lib/format-datetime";
 import { toast } from "sonner";
 
 type RiskLog = any;
@@ -27,6 +26,31 @@ const statusMap: Record<string, string> = {
   retrying: "重试中",
 };
 
+type RiskLogFilters = {
+  status: string;
+  searchDebounced: string;
+  dateFrom: string;
+  dateTo: string;
+};
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyRiskLogFilters<T extends { eq: (...args: unknown[]) => T; gte: (...args: unknown[]) => T; lte: (...args: unknown[]) => T; or: (...args: unknown[]) => T }>(
+  query: T,
+  filters: RiskLogFilters,
+): T {
+  let q = query;
+  if (filters.status !== "all") q = q.eq("status", filters.status);
+  if (filters.dateFrom) q = q.gte("created_at", new Date(filters.dateFrom).toISOString());
+  if (filters.dateTo) q = q.lte("created_at", new Date(`${filters.dateTo}T23:59:59`).toISOString());
+  if (filters.searchDebounced) {
+    const s = `%${filters.searchDebounced}%`;
+    q = q.or(
+      `intercept_no.ilike.${s},referenced_order_no.ilike.${s},intercept_reason.ilike.${s},orders.order_no.ilike.${s},orders.customer_email.ilike.${s},emails.subject.ilike.${s},emails.from_email.ilike.${s}`,
+    );
+  }
+  return q;
+}
+
 export default function RiskLogs() {
   const { isAdmin } = useAuth();
   const [logs, setLogs] = useState<RiskLog[]>([]);
@@ -34,6 +58,8 @@ export default function RiskLogs() {
   const [listPage, setListPage] = useState(0);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("all");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [search, setSearch] = useState("");
   const [searchDebounced, setSearchDebounced] = useState("");
   const [detail, setDetail] = useState<RiskLog | null>(null);
@@ -49,34 +75,32 @@ export default function RiskLogs() {
 
   useEffect(() => {
     setListPage(0);
-  }, [status, searchDebounced]);
+  }, [status, searchDebounced, dateFrom, dateTo]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      const filters: RiskLogFilters = { status, searchDebounced, dateFrom, dateTo };
+
       const statKeys = ["success", "failed", "retrying", "pending"] as const;
       const statEntries = await Promise.all(
         statKeys.map(async (key) => {
-          const { count, error } = await supabase
-            .from("risk_intercept_logs")
-            .select("*", { count: "exact", head: true })
-            .eq("status", key);
+          const { count, error } = await applyRiskLogFilters(
+            supabase.from("risk_intercept_logs").select("*", { count: "exact", head: true }),
+            filters,
+          ).eq("status", key);
           if (error) throw error;
           return [key, count ?? 0] as const;
         }),
       );
       setStatusStats(Object.fromEntries(statEntries));
 
-      let query = supabase
-        .from("risk_intercept_logs")
-        .select("*, orders(order_no, customer_email), emails(subject, from_email, message_id)", { count: "exact" });
-      if (status !== "all") query = query.eq("status", status);
-      if (searchDebounced) {
-        const s = `%${searchDebounced}%`;
-        query = query.or(
-          `intercept_no.ilike.${s},referenced_order_no.ilike.${s},intercept_reason.ilike.${s},orders.order_no.ilike.${s},orders.customer_email.ilike.${s},emails.subject.ilike.${s},emails.from_email.ilike.${s}`,
-        );
-      }
+      let query = applyRiskLogFilters(
+        supabase
+          .from("risk_intercept_logs")
+          .select("*, orders(order_no, customer_email), emails(subject, from_email, message_id)", { count: "exact" }),
+        filters,
+      );
       const { from, to } = listPageRange(listPage);
       const { data, error, count } = await query
         .order("created_at", { ascending: false })
@@ -94,7 +118,7 @@ export default function RiskLogs() {
     } finally {
       setLoading(false);
     }
-  }, [status, searchDebounced, listPage]);
+  }, [status, searchDebounced, dateFrom, dateTo, listPage]);
 
   useEffect(() => {
     void load();
@@ -207,6 +231,8 @@ export default function RiskLogs() {
             <SelectItem value="pending">待执行</SelectItem>
           </SelectContent>
         </Select>
+        <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="h-8 w-36 text-xs" />
+        <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="h-8 w-36 text-xs" />
       </div>
 
       <Card className="flex-1 overflow-hidden flex flex-col min-h-0">
@@ -260,7 +286,7 @@ export default function RiskLogs() {
                   </TableCell>
                   <TableCell className="max-w-[260px] truncate">{log.intercept_reason || log.reason_category || "—"}</TableCell>
                   <TableCell className="text-xs text-muted-foreground">
-                    {formatDistanceToNow(new Date(log.created_at), { addSuffix: true, locale: zhCN })}
+                    {formatDateTimeCST(log.created_at)}
                   </TableCell>
                   <TableCell>
                     <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setDetail(log)}>
@@ -292,11 +318,11 @@ export default function RiskLogs() {
                 <div className="min-w-0 break-words"><span className="text-muted-foreground">重试：</span>{detail.retry_count}</div>
                 <div className="min-w-0 break-words">
                   <span className="text-muted-foreground">创建时间：</span>
-                  {new Date(detail.created_at).toLocaleString("zh-CN")}
+                  {formatDateTimeCST(detail.created_at)}
                 </div>
                 <div className="min-w-0 break-words">
                   <span className="text-muted-foreground">更新时间：</span>
-                  {new Date(detail.updated_at).toLocaleString("zh-CN")}
+                  {formatDateTimeCST(detail.updated_at)}
                 </div>
                 <div className="col-span-2 min-w-0 break-words"><span className="text-muted-foreground">邮件：</span>{detail.emails?.subject ?? "—"}</div>
                 {detail.emails?.message_id?.trim() ? (

@@ -1,0 +1,4825 @@
+app:
+  description: ''
+  icon: 🤖
+  icon_background: '#FFEAD5'
+  mode: advanced-chat
+  name: Ai人工干预-智能邮件客服
+  use_icon_as_answer_icon: false
+dependencies:
+- current_identifier: null
+  type: marketplace
+  value:
+    marketplace_plugin_unique_identifier: langgenius/json_process:0.0.2@7afb534cc85b28a8e9c7f9410d1cfc31fb7bd3950023355a37059dbe809ac776
+    version: null
+- current_identifier: null
+  type: marketplace
+  value:
+    marketplace_plugin_unique_identifier: langgenius/azure_openai:0.0.52@d0ca54b009b228ad844251e6be63ac34454843fa40bdc39eb0dd8158275e632e
+    version: null
+- current_identifier: null
+  type: marketplace
+  value:
+    marketplace_plugin_unique_identifier: langgenius/deepseek:0.0.14@e7f88d74bf425ffc89d8794a33d581cceeaeec8d3b0091ccd5a5c2ff7c18c2a7
+    version: null
+- current_identifier: null
+  type: marketplace
+  value:
+    marketplace_plugin_unique_identifier: yizixuan/text_tools:0.0.3@815eef948f8847f040c278d53abb086e64ac2da7bafbfe744e80cbc770ea0cf7
+    version: null
+- current_identifier: null
+  type: marketplace
+  value:
+    marketplace_plugin_unique_identifier: langgenius/siliconflow:0.0.17@88c62094bb40b57a179a051bd6bb2b3a80bac535a2e8bb97047193ac363eb2e6
+    version: null
+kind: app
+version: 0.5.0
+workflow:
+  conversation_variables:
+  - description: ''
+    id: 0e38b925-5ec5-44c1-a10a-e0a4aa60e034
+    name: logisticsPairingFirstList
+    selector:
+    - conversation
+    - logisticsPairingFirstList
+    value:
+    - Id: 1
+      Key: Shipment information sent to FedEx
+      Value: 未上网
+    - Id: 2
+      Key: The shipment was prepared for onward transport
+      Value: 未上网
+    - Id: 3
+      Key: Picked up
+      Value: FedEx已揽件
+    - Id: 3
+      Key: Customer not available or business closed
+      Value: 投递失败
+    value_type: array[object]
+  - description: ''
+    id: 40e59c59-ba5e-4041-9980-a8a03b30f1d3
+    name: logisticsPairingList
+    selector:
+    - conversation
+    - logisticsPairingList
+    value:
+    - Id: 1
+      Key: Returning to shipper
+      Value: 妥投失败
+    - Id: 2
+      Key: damaged
+      Value: 中途破损
+    - Id: 3
+      Key: delivered
+      Value: 签收未收到
+    - Id: 3
+      Key: deliver  successfully
+      Value: 签收未收到
+    value_type: array[object]
+  - description: ''
+    id: 72726253-6ade-4ed2-8cd0-80f225074178
+    name: SiteId
+    selector:
+    - conversation
+    - SiteId
+    value: 24
+    value_type: integer
+  environment_variables:
+  - description: ''
+    id: 732b4b6b-8b91-42a8-93bf-ee68aaeae65a
+    name: track718
+    selector:
+    - env
+    - track718
+    value: d7c6d130-45ab-11ef-8f20-27d4b343b039
+    value_type: string
+  - description: ''
+    id: 114d844a-00c4-46d0-8a3e-08381927a1e8
+    name: token
+    selector:
+    - env
+    - token
+    value: eyJhbGciOiJSUzI1NiIsImtpZCI6InFFdVNsN0JRUHJ3RmU2R0EwMVdMTFEiLCJ0eXAiOiJhdCtqd3QifQ.eyJuYmYiOjE3NDg1ODUyNjksImV4cCI6MjAwNzc4NTI2OSwiaXNzIjoiaHR0cHM6Ly9sb2dpbnNlcnZlci5iZXN0d28ubmV0Ojk0NDMiLCJhdWQiOlsiQmFzZUFwaSIsIkJlc3RJbnNwZWN0aW9uQXBpIiwiQ1JNQXBpIiwiQ3VzdG9tZXJTdXBwb3J0QXBpIiwiRk1TQXBpIiwiSU1HQXBpIiwiTVNHQXBpIiwiT2F1dGhBcGkiLCJPQ1NBcGkiLCJPTVNBcGkiLCJPcGVuQUlBcGkiLCJPcGVyTG9nQXBpIiwiUmVwb3J0QXBpIiwiU3RvY2tUcmFuc2ZlckFwaSIsIlN1cHBseUNoYWluTVNBcGkiXSwiY2xpZW50X2lkIjoiRGlmeSIsInN1YiI6Ijk5MjUiLCJhdXRoX3RpbWUiOjE3NDg1ODUyNjksImlkcCI6ImxvY2FsIiwicm9sZSI6IkFQSei0puWPtyIsIm5hbWUiOiJEZml5IiwianRpIjoiZ29oZlViczh2OVQwOXJ4V1RHX2FGUSIsInNjb3BlIjpbIm9wZW5pZCIsInByb2ZpbGUiLCJyb2xlcyIsIkJhc2VBcGkiLCJCZXN0SW5zcGVjdGlvbkFwaSIsIkNSTUFwaSIsIkN1c3RvbWVyU3VwcG9ydEFwaSIsIkZNU0FwaSIsIklNR0FwaSIsIk1TR0FwaSIsIk9hdXRoQXBpIiwiT0NTQXBpIiwiT01TQXBpIiwiT3BlbkFJQXBpIiwiT3BlckxvZ0FwaSIsIlJlcG9ydEFwaSIsIlN0b2NrVHJhbnNmZXJBcGkiLCJTdXBwbHlDaGFpbk1TQXBpIiwib2ZmbGluZV9hY2Nlc3MiXSwiYW1yIjpbInB3ZCJdfQ.pWXghJ8G_r59zEj6h2HHCfI7IfUiFzKvErAXRanQNXiApeBx0yl7ZovFR-sSDN2c_aYiZ1LMUtMJHRW0J5e4mHCmghAZhzjyArtAimBgjCsm_bJfbu6opiZapMgZUE_RTGaja7yiN7q4ykSBYafCKCZR9_PQFkMy6b2TFff3YXA_EKVUlrr21PeU7Gi9uywmQI9vDYFoij5oA0B_Jl426KX9QcDGWh3cAWIDnZY_0fWlpKvJhZArZvMnpzXLJuBFP1fGt0D3Jc0C2v01NRd5TpKTcQUfn735q4Fxo90W_eRRVmyC19ZjwdDKHCw6EW2UIjEsamtOWRI51RqaMstM9A
+    value_type: string
+  features:
+    file_upload:
+      allowed_file_extensions:
+      - .JPG
+      - .JPEG
+      - .PNG
+      - .GIF
+      - .WEBP
+      - .SVG
+      allowed_file_types:
+      - image
+      allowed_file_upload_methods:
+      - local_file
+      - remote_url
+      enabled: false
+      fileUploadConfig:
+        attachment_image_file_size_limit: 2
+        audio_file_size_limit: 50
+        batch_count_limit: 5
+        file_size_limit: 15
+        file_upload_limit: 20
+        image_file_batch_limit: 10
+        image_file_size_limit: 10
+        single_chunk_attachment_limit: 10
+        video_file_size_limit: 100
+        workflow_file_upload_limit: 10
+      image:
+        enabled: false
+        number_limits: 3
+        transfer_methods:
+        - local_file
+        - remote_url
+      number_limits: 3
+    opening_statement: ''
+    retriever_resource:
+      enabled: true
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  graph:
+    edges:
+    - data:
+        isInIteration: false
+        sourceType: question-classifier
+        targetType: question-classifier
+      id: 1741571496543-1-17416025772090-target
+      selected: false
+      source: '1741571496543'
+      sourceHandle: '1'
+      target: '17416025772090'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-1-1741677360732-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1'
+      target: '1741677360732'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-2-1741677360732-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '2'
+      target: '1741677360732'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-1741572213488-1741677360732-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1741572213488'
+      target: '1741677360732'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-1741572219840-1741677360732-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1741572219840'
+      target: '1741677360732'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-1741602764252-1741677360732-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1741602764252'
+      target: '1741677360732'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        sourceType: http-request
+        targetType: code
+      id: 1741677360732-source-1741683921862-target
+      selected: false
+      source: '1741677360732'
+      sourceHandle: source
+      target: '1741683921862'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: http-request
+        targetType: if-else
+      id: 1741677360732-fail-branch-17423696596910-target
+      selected: false
+      source: '1741677360732'
+      sourceHandle: fail-branch
+      target: '17423696596910'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: start
+        targetType: code
+      id: 1741571480087-source-1742383367610-target
+      selected: false
+      source: '1741571480087'
+      sourceHandle: source
+      target: '1742383367610'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: code
+        targetType: question-classifier
+      id: 1742383367610-source-1741571496543-target
+      selected: false
+      source: '1742383367610'
+      sourceHandle: source
+      target: '1741571496543'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: if-else
+      id: 1741571496543-2-1760000000001-target
+      selected: false
+      source: '1741571496543'
+      sourceHandle: '2'
+      target: '1760000000001'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: if-else
+      id: 1741571496543-1741572213488-1760000000001-target
+      selected: false
+      source: '1741571496543'
+      sourceHandle: '1741572213488'
+      target: '1760000000001'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: if-else
+      id: 1741571496543-1741572219840-1760000000001-target
+      selected: false
+      source: '1741571496543'
+      sourceHandle: '1741572219840'
+      target: '1760000000001'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: http-request
+      id: 1760000000001-2-1761000000001-target
+      selected: false
+      source: '1760000000001'
+      sourceHandle: '2'
+      target: '1761000000001'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: http-request
+      id: 1760000000001-1741572213488-1761000000001-target
+      selected: false
+      source: '1760000000001'
+      sourceHandle: '1741572213488'
+      target: '1761000000001'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: http-request
+      id: 1760000000001-1741572219840-1761000000001-target
+      selected: false
+      source: '1760000000001'
+      sourceHandle: '1741572219840'
+      target: '1761000000001'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: http-request
+      id: 1760000000001-2-1761000000002-target
+      selected: false
+      source: '1760000000001'
+      sourceHandle: '2'
+      target: '1761000000002'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: http-request
+      id: 1760000000001-1741572213488-1761000000002-target
+      selected: false
+      source: '1760000000001'
+      sourceHandle: '1741572213488'
+      target: '1761000000002'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: http-request
+      id: 1760000000001-1741572219840-1761000000002-target
+      selected: false
+      source: '1760000000001'
+      sourceHandle: '1741572219840'
+      target: '1761000000002'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: knowledge-retrieval
+      id: 1760000000001-2-1761000000003-target
+      selected: false
+      source: '1760000000001'
+      sourceHandle: '2'
+      target: '1761000000003'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: knowledge-retrieval
+      id: 1760000000001-1741572213488-1761000000003-target
+      selected: false
+      source: '1760000000001'
+      sourceHandle: '1741572213488'
+      target: '1761000000003'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: knowledge-retrieval
+      id: 1760000000001-1741572219840-1761000000003-target
+      selected: false
+      source: '1760000000001'
+      sourceHandle: '1741572219840'
+      target: '1761000000003'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: knowledge-retrieval
+      id: 1760000000001-2-1761000000004-target
+      selected: false
+      source: '1760000000001'
+      sourceHandle: '2'
+      target: '1761000000004'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: knowledge-retrieval
+      id: 1760000000001-1741572213488-1761000000004-target
+      selected: false
+      source: '1760000000001'
+      sourceHandle: '1741572213488'
+      target: '1761000000004'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: knowledge-retrieval
+      id: 1760000000001-1741572219840-1761000000004-target
+      selected: false
+      source: '1760000000001'
+      sourceHandle: '1741572219840'
+      target: '1761000000004'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-1-1743565530674-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1'
+      target: '1743565530674'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-2-1743565530674-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '2'
+      target: '1743565530674'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-1741572213488-1743565530674-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1741572213488'
+      target: '1743565530674'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-1741572219840-1743565530674-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1741572219840'
+      target: '1743565530674'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-1741602764252-1743565530674-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1741602764252'
+      target: '1743565530674'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: http-request
+        targetType: answer
+      id: 1743565530674-fail-branch-1743575987663-target
+      selected: false
+      source: '1743565530674'
+      sourceHandle: fail-branch
+      target: '1743575987663'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: http-request
+        targetType: code
+      id: 1743565530674-source-1743583712356-target
+      selected: false
+      source: '1743565530674'
+      sourceHandle: source
+      target: '1743583712356'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-1-1744011643679-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1'
+      target: '1744011643679'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-2-1744011643679-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '2'
+      target: '1744011643679'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-1741572213488-1744011643679-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1741572213488'
+      target: '1744011643679'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-1741572219840-1744011643679-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1741572219840'
+      target: '1744011643679'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: http-request
+      id: 17416025772090-1741602764252-1744011643679-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1741602764252'
+      target: '1744011643679'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: http-request
+        targetType: code
+      id: 1744011643679-source-1744273034408-target
+      selected: false
+      source: '1744011643679'
+      sourceHandle: source
+      target: '1744273034408'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: http-request
+        targetType: answer
+      id: 1744011643679-fail-branch-1742386596560-target
+      selected: false
+      source: '1744011643679'
+      sourceHandle: fail-branch
+      target: '1742386596560'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: knowledge-retrieval
+      id: 17416025772090-1-1741766110088-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1'
+      target: '1741766110088'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: knowledge-retrieval
+      id: 17416025772090-2-1741766110088-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '2'
+      target: '1741766110088'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: knowledge-retrieval
+      id: 17416025772090-1741572213488-1741766110088-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1741572213488'
+      target: '1741766110088'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: knowledge-retrieval
+      id: 17416025772090-1741572219840-1741766110088-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1741572219840'
+      target: '1741766110088'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: knowledge-retrieval
+      id: 17416025772090-1741602764252-1741766110088-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1741602764252'
+      target: '1741766110088'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: knowledge-retrieval
+      id: 17416025772090-1-1742395791790-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1'
+      target: '1742395791790'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: knowledge-retrieval
+      id: 17416025772090-2-1742395791790-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '2'
+      target: '1742395791790'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: knowledge-retrieval
+      id: 17416025772090-1741572213488-1742395791790-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1741572213488'
+      target: '1742395791790'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: question-classifier
+        targetType: knowledge-retrieval
+      id: 17416025772090-1741602764252-1742395791790-target
+      selected: false
+      source: '17416025772090'
+      sourceHandle: '1741602764252'
+      target: '1742395791790'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: http-request
+        targetType: code
+      id: 1741677360732-source-1745401631175-target
+      selected: false
+      source: '1741677360732'
+      sourceHandle: source
+      target: '1745401631175'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: code
+        targetType: template-transform
+      id: 1745401631175-source-1745391970382-target
+      selected: false
+      source: '1745401631175'
+      sourceHandle: source
+      target: '1745391970382'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: http-request
+        targetType: code
+      id: 1744011643679-source-17454630938070-target
+      selected: false
+      source: '1744011643679'
+      sourceHandle: source
+      target: '17454630938070'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: code
+        targetType: template-transform
+      id: 17454630938070-source-1745463145529-target
+      selected: false
+      source: '17454630938070'
+      sourceHandle: source
+      target: '1745463145529'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: http-request
+        targetType: code
+      id: 1743565530674-source-17454776055700-target
+      selected: false
+      source: '1743565530674'
+      sourceHandle: source
+      target: '17454776055700'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: code
+        targetType: template-transform
+      id: 17454776055700-source-1745477659596-target
+      selected: false
+      source: '17454776055700'
+      sourceHandle: source
+      target: '1745477659596'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: template-transform
+        targetType: if-else
+      id: 1745391970382-source-1745743758940-target
+      selected: false
+      source: '1745391970382'
+      sourceHandle: source
+      target: '1745743758940'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: code
+        targetType: if-else
+      id: 1741683921862-source-1745743758940-target
+      selected: false
+      source: '1741683921862'
+      sourceHandle: source
+      target: '1745743758940'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: template-transform
+        targetType: if-else
+      id: 1745463145529-source-1745743758940-target
+      selected: false
+      source: '1745463145529'
+      sourceHandle: source
+      target: '1745743758940'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: code
+        targetType: if-else
+      id: 1745149604778-source-1745743758940-target
+      selected: false
+      source: '1745149604778'
+      sourceHandle: source
+      target: '1745743758940'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: code
+        targetType: if-else
+      id: 17451498471410-source-1745743758940-target
+      selected: false
+      source: '17451498471410'
+      sourceHandle: source
+      target: '1745743758940'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: knowledge-retrieval
+        targetType: if-else
+      id: 1741766110088-source-1745743758940-target
+      selected: false
+      source: '1741766110088'
+      sourceHandle: source
+      target: '1745743758940'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: knowledge-retrieval
+        targetType: if-else
+      id: 1742395791790-source-1745743758940-target
+      selected: false
+      source: '1742395791790'
+      sourceHandle: source
+      target: '1745743758940'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: code
+        targetType: if-else
+      id: 1743583712356-source-1745743758940-target
+      selected: false
+      source: '1743583712356'
+      sourceHandle: source
+      target: '1745743758940'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: http-request
+        targetType: code
+      id: 1761000000001-source-1761000000007-target
+      selected: false
+      source: '1761000000001'
+      sourceHandle: source
+      target: '1761000000007'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: http-request
+        targetType: code
+      id: 1761000000001-source-1761000000008-target
+      selected: false
+      source: '1761000000001'
+      sourceHandle: source
+      target: '1761000000008'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: code
+        targetType: template-transform
+      id: 1761000000008-source-1761000000009-target
+      selected: false
+      source: '1761000000008'
+      sourceHandle: source
+      target: '1761000000009'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: http-request
+        targetType: code
+      id: 1761000000002-source-1761000000010-target
+      selected: false
+      source: '1761000000002'
+      sourceHandle: source
+      target: '1761000000010'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: http-request
+        targetType: code
+      id: 1761000000002-source-1761000000011-target
+      selected: false
+      source: '1761000000002'
+      sourceHandle: source
+      target: '1761000000011'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: code
+        targetType: template-transform
+      id: 1761000000011-source-1761000000012-target
+      selected: false
+      source: '1761000000011'
+      sourceHandle: source
+      target: '1761000000012'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: code
+        targetType: answer
+      id: 1761000000011-fail-1761000000013-target
+      selected: false
+      source: '1761000000011'
+      sourceHandle: fail-branch
+      target: '1761000000013'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: answer
+        targetType: template-transform
+      id: 1761000000013-source-1761000000014-target
+      selected: false
+      source: '1761000000013'
+      sourceHandle: source
+      target: '1761000000014'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: template-transform
+        targetType: variable-aggregator
+      id: 1761000000014-source-1761000000015-target
+      selected: false
+      source: '1761000000014'
+      sourceHandle: source
+      target: '1761000000015'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: template-transform
+        targetType: variable-aggregator
+      id: 1761000000012-source-1761000000015-target
+      selected: false
+      source: '1761000000012'
+      sourceHandle: source
+      target: '1761000000015'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: template-transform
+        targetType: if-else
+      id: 1761000000009-source-1760000000002-target
+      selected: false
+      source: '1761000000009'
+      sourceHandle: source
+      target: '1760000000002'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: variable-aggregator
+        targetType: if-else
+      id: 1761000000015-source-1760000000002-target
+      selected: false
+      source: '1761000000015'
+      sourceHandle: source
+      target: '1760000000002'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: knowledge-retrieval
+        targetType: if-else
+      id: 1761000000003-source-1760000000002-target
+      selected: false
+      source: '1761000000003'
+      sourceHandle: source
+      target: '1760000000002'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: knowledge-retrieval
+        targetType: if-else
+      id: 1761000000004-source-1760000000002-target
+      selected: false
+      source: '1761000000004'
+      sourceHandle: source
+      target: '1760000000002'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: llm
+      id: 1760000000002-2-1761000000006-target
+      selected: false
+      source: '1760000000002'
+      sourceHandle: '2'
+      target: '1761000000006'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: llm
+      id: 1760000000002-1741572213488-1761000000006-target
+      selected: false
+      source: '1760000000002'
+      sourceHandle: '1741572213488'
+      target: '1761000000006'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: llm
+      id: 1760000000002-1741572219840-1761000000006-target
+      selected: false
+      source: '1760000000002'
+      sourceHandle: '1741572219840'
+      target: '1761000000006'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: llm
+        targetType: variable-aggregator
+      id: 1761000000006-source-1745834856515-target
+      selected: false
+      source: '1761000000006'
+      sourceHandle: source
+      target: '1745834856515'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: llm
+      id: 1745743758940-false-1741766139856-target
+      selected: false
+      source: '1745743758940'
+      sourceHandle: 'false'
+      target: '1741766139856'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: http-request
+        targetType: code
+      id: 1744011643679-source-1745812700061-target
+      selected: false
+      source: '1744011643679'
+      sourceHandle: source
+      target: '1745812700061'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: code
+        targetType: code
+      id: 1744273034408-source-17451498471410-target
+      selected: false
+      source: '1744273034408'
+      sourceHandle: source
+      target: '17451498471410'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: code
+        targetType: code
+      id: 1744273034408-source-1745149604778-target
+      selected: false
+      source: '1744273034408'
+      sourceHandle: source
+      target: '1745149604778'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: llm
+      id: 1745743758940-true-1745834802522-target
+      selected: false
+      source: '1745743758940'
+      sourceHandle: 'true'
+      target: '1745834802522'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: llm
+        targetType: variable-aggregator
+      id: 1745834802522-source-1745834856515-target
+      selected: false
+      source: '1745834802522'
+      sourceHandle: source
+      target: '1745834856515'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: llm
+        targetType: variable-aggregator
+      id: 1741766139856-source-1745834856515-target
+      selected: false
+      source: '1741766139856'
+      sourceHandle: source
+      target: '1745834856515'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: llm
+        targetType: tool
+      id: 1744107385916-source-1745810084128-target
+      selected: false
+      source: '1744107385916'
+      sourceHandle: source
+      target: '1745810084128'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: llm
+      id: 1745743758940-762cdf87-3064-4178-9212-31efc39be217-1747390227494-target
+      selected: false
+      source: '1745743758940'
+      sourceHandle: 762cdf87-3064-4178-9212-31efc39be217
+      target: '1747390227494'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: llm
+        targetType: variable-aggregator
+      id: 1747390227494-source-1745834856515-target
+      selected: false
+      source: '1747390227494'
+      sourceHandle: source
+      target: '1745834856515'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: llm
+      id: 1745743758940-7ed29a07-3ae1-40b7-b147-b37a399dc553-1747390679313-target
+      selected: false
+      source: '1745743758940'
+      sourceHandle: 7ed29a07-3ae1-40b7-b147-b37a399dc553
+      target: '1747390679313'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: llm
+        targetType: variable-aggregator
+      id: 1747390679313-source-1745834856515-target
+      selected: false
+      source: '1747390679313'
+      sourceHandle: source
+      target: '1745834856515'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: llm
+      id: 1745743758940-d4def5de-8a22-4034-a5cc-6d2163fb61a1-1747390646527-target
+      selected: false
+      source: '1745743758940'
+      sourceHandle: d4def5de-8a22-4034-a5cc-6d2163fb61a1
+      target: '1747390646527'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: llm
+        targetType: variable-aggregator
+      id: 1747390646527-source-1745834856515-target
+      selected: false
+      source: '1747390646527'
+      sourceHandle: source
+      target: '1745834856515'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: llm
+      id: 1745743758940-5318288b-d2a8-433e-bc7b-3d9ddb5c1ceb-1748247505732-target
+      selected: false
+      source: '1745743758940'
+      sourceHandle: 5318288b-d2a8-433e-bc7b-3d9ddb5c1ceb
+      target: '1748247505732'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: llm
+        targetType: variable-aggregator
+      id: 1748247505732-source-1745834856515-target
+      selected: false
+      source: '1748247505732'
+      sourceHandle: source
+      target: '1745834856515'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: tool
+        targetType: tool
+      id: 1745810084128-source-1748576058951-target
+      selected: false
+      source: '1745810084128'
+      sourceHandle: source
+      target: '1748576058951'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: http-request
+        targetType: tool
+      id: 1748579189677-source-1748585677300-target
+      selected: false
+      source: '1748579189677'
+      sourceHandle: source
+      target: '1748585677300'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: tool
+        targetType: llm
+      id: 1748585677300-source-1744107385916-target
+      selected: false
+      source: '1748585677300'
+      sourceHandle: source
+      target: '1744107385916'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: variable-aggregator
+        targetType: tool
+      id: 1745834856515-source-1748588765674-target
+      selected: false
+      source: '1745834856515'
+      sourceHandle: source
+      target: '1748588765674'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: tool
+        targetType: tool
+      id: 1748588765674-source-1748592157889-target
+      selected: false
+      source: '1748588765674'
+      sourceHandle: source
+      target: '1748592157889'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: tool
+        targetType: http-request
+      id: 1748592157889-source-1748579189677-target
+      selected: false
+      source: '1748592157889'
+      sourceHandle: source
+      target: '1748579189677'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: tool
+        targetType: code
+      id: 1748576058951-source-1749439667058-target
+      source: '1748576058951'
+      sourceHandle: source
+      target: '1749439667058'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: code
+        targetType: llm
+      id: 1749439667058-source-1749450143113-target
+      source: '1749439667058'
+      sourceHandle: source
+      target: '1749450143113'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: llm
+        targetType: answer
+      id: 1749450143113-source-1742396002831-target
+      source: '1749450143113'
+      sourceHandle: source
+      target: '1742396002831'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: code
+        targetType: answer
+      id: 17454776055700-fail-branch-1755142404435-target
+      source: '17454776055700'
+      sourceHandle: fail-branch
+      target: '1755142404435'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: answer
+        targetType: template-transform
+      id: 1755142404435-source-1755143051099-target
+      source: '1755142404435'
+      sourceHandle: source
+      target: '1755143051099'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: template-transform
+        targetType: variable-aggregator
+      id: 1745477659596-source-1755143146906-target
+      source: '1745477659596'
+      sourceHandle: source
+      target: '1755143146906'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: variable-aggregator
+        targetType: if-else
+      id: 1755143146906-source-1745743758940-target
+      source: '1755143146906'
+      sourceHandle: source
+      target: '1745743758940'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: template-transform
+        targetType: variable-aggregator
+      id: 1755143051099-source-1755143146906-target
+      source: '1755143051099'
+      sourceHandle: source
+      target: '1755143146906'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    nodes:
+    - data:
+        desc: ''
+        selected: false
+        title: 开始
+        type: start
+        variables:
+        - label: 账号ID
+          max_length: 48
+          options: []
+          required: true
+          type: text-input
+          variable: AccountId
+        - label: OrderId
+          max_length: 48
+          options: []
+          required: true
+          type: text-input
+          variable: OrderId
+        - allowed_file_extensions: []
+          allowed_file_types:
+          - image
+          allowed_file_upload_methods:
+          - local_file
+          - remote_url
+          label: 上下文
+          max_length: 30000
+          options: []
+          required: false
+          type: paragraph
+          variable: Context
+        - label: SiteId
+          max_length: 48
+          options: []
+          required: false
+          type: text-input
+          variable: SiteId
+        - label: token
+          max_length: 20000
+          options: []
+          required: false
+          type: paragraph
+          variable: Token
+        - label: 第一个文本
+          max_length: 20000
+          options: []
+          required: false
+          type: paragraph
+          variable: FirstText
+        - label: 指导思想
+          max_length: 20000
+          options: []
+          required: true
+          type: paragraph
+          variable: GuidingPrinciple
+      height: 238
+      id: '1741571480087'
+      position:
+        x: -938.8929629358306
+        y: -3381.6557520617707
+      positionAbsolute:
+        x: -938.8929629358306
+        y: -3381.6557520617707
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        classes:
+        - id: '1'
+          name: 物流问题
+        - id: '2'
+          name: 质量问题
+        - id: '1741572213488'
+          name: 其他问题
+        - id: '1741572219840'
+          name: 无关问题
+        desc: 一级分类
+        instruction: '你是一个处理亚马逊售后咨询一级分类专家，识别用户意图分类，以下是完成步骤
+
+          1.请结合买家和卖家历史交流信息,内容在买家和卖家历史交流信息xml中.
+
+          2.不管什么语言请最后转换成中文分类.
+
+          <买家和卖家历史交流信息>
+
+          {{#1741571480087.Context#}}
+
+          </买家和卖家历史交流信息>'
+        instructions: ''
+        memory:
+          query_prompt_template: '{{#sys.query#}}'
+          window:
+            enabled: false
+            size: 50
+        model:
+          completion_params:
+            temperature: 0.7
+          mode: chat
+          name: gpt-4o
+          provider: langgenius/azure_openai/azure_openai
+        query_variable_selector:
+        - '1741571480087'
+        - FirstText
+        selected: false
+        title: 一级分类
+        topics: []
+        type: question-classifier
+        vision:
+          enabled: false
+      height: 273
+      id: '1741571496543'
+      position:
+        x: -309.4422034342522
+        y: -3381.6557520617707
+      positionAbsolute:
+        x: -309.4422034342522
+        y: -3381.6557520617707
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        classes:
+        - id: '1'
+          name: 签收未收到
+        - id: '2'
+          name: 一件多包
+        - id: '1741572213488'
+          name: 中途破损
+        - id: '1741572219840'
+          name: 催促发货
+        - id: '1741602764252'
+          name: 其他
+        desc: 二级分类
+        instruction: '你是一个处理亚马逊售后咨询二级分类专家，识别用户意图分类，以下是完成步骤
+
+          1.请结合买家和卖家历史交流信息,内容在买家和卖家历史交流信息xml中.
+
+          2.不管什么语言请最后转换成中文分类.
+
+          <买家和卖家历史交流信息>
+
+          {{#1741571480087.Context#}}
+
+          </买家和卖家历史交流信息>'
+        instructions: ''
+        memory:
+          query_prompt_template: '{{#sys.query#}}'
+          window:
+            enabled: false
+            size: 50
+        model:
+          completion_params:
+            temperature: 0.7
+          mode: chat
+          name: gpt-4o
+          provider: langgenius/azure_openai/azure_openai
+        query_variable_selector:
+        - '1741571480087'
+        - FirstText
+        selected: false
+        title: 二次分类
+        topics: []
+        type: question-classifier
+        vision:
+          enabled: false
+      height: 311
+      id: '17416025772090'
+      position:
+        x: 64.05238015585144
+        y: -3390.684478813677
+      positionAbsolute:
+        x: 64.05238015585144
+        y: -3390.684478813677
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        authorization:
+          config:
+            api_key: '{{#env.token#}}'
+            type: bearer
+          type: api-key
+        body:
+          data:
+          - id: key-value-348
+            key: ''
+            type: text
+            value: '{"ebayOrderId":"{{#1741571480087.OrderId#}}","AccountId":{{#1741571480087.AccountId#}}}'
+          type: json
+        desc: ''
+        error_strategy: fail-branch
+        headers: ''
+        method: post
+        params: ''
+        retry_config:
+          max_retries: '3'
+          retry_enabled: true
+          retry_interval: 100
+        selected: false
+        ssl_verify: true
+        timeout:
+          connect: 10
+          max_connect_timeout: 0
+          max_read_timeout: 0
+          max_write_timeout: 0
+          read: 60
+          write: 60
+        title: 查询订单信息
+        type: http-request
+        url: http://10.1.1.194:9002/AukeysOrder/OrderInfo/GetEmailOrderDetail
+        variables: []
+      height: 189
+      id: '1741677360732'
+      position:
+        x: 536.6229086227885
+        y: -3624.7819870452226
+      positionAbsolute:
+        x: 536.6229086227885
+        y: -3624.7819870452226
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "def main(http_response: str) -> dict:\n    try:\n        data = json.loads(http_response)\n\
+          \    except json.JSONDecodeError as e:\n        return {\"error\": f\"无效的JSON格式:\
+          \ {str(e)}\"}\n    except Exception as e:\n        return {\"error\": f\"\
+          解析响应时发生未知错误: {str(e)}\"}\n\n    # 安全访问嵌套字典结构\n    data_dict = data.get(\"\
+          Data\", {})\n    total_info = data_dict.get(\"TotalInfo\", {})\n\n    #\
+          \ 处理日期拼接逻辑\n    def format_date_range(earliest_key, latest_key):\n     \
+          \   earliest = total_info.get(earliest_key, \"\")\n        latest = total_info.get(latest_key,\
+          \ \"\")\n        if earliest and latest:\n            return f\"{earliest}\
+          \ - {latest}\"\n        elif earliest or latest:\n            return earliest\
+          \ or latest\n        else:\n            return \"\"\n\n    try:\n      \
+          \  transformed = [{\n            \"预计到达时间\": total_info.get(\"LatestDeliveryDate\"\
+          , \"\"),\n            \"送达日期\": format_date_range(\"EarliestDeliveryDate\"\
+          , \"LatestDeliveryDate\"),\n            \"发货时限\": format_date_range(\"EarliestShipDate\"\
+          , \"LatestShipDate\"),\n            \"订单总金额\": total_info.get(\"TotalPrice\"\
+          , \"\"),\n            \"币别\": total_info.get(\"Currency\", \"\"),\n    \
+          \    }]\n    except Exception as e:\n        return {\"error\": f\"重组数据结构失败:\
+          \ {str(e)}\"}\n\n    try:\n        order_info = json.dumps(transformed,\
+          \ ensure_ascii=False)\n    except Exception as e:\n        return {\"error\"\
+          : f\"JSON序列化失败: {str(e)}\"}\n\n    return {\"orderInfo\": order_info}"
+        code_language: python3
+        desc: ''
+        error_strategy: fail-branch
+        outputs:
+          orderInfo:
+            children: null
+            type: string
+        selected: false
+        title: 解析订单
+        type: code
+        variables:
+        - value_selector:
+          - '1741677360732'
+          - body
+          variable: http_response
+      height: 87
+      id: '1741683921862'
+      position:
+        x: 955.96403817284
+        y: -3726.4055191733664
+      positionAbsolute:
+        x: 955.96403817284
+        y: -3726.4055191733664
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        dataset_ids:
+        - TGp3xrqfkscGdNVPds0ILnQja0OpcIwtjlMWdUT5vGtjNdlggfxCO6dAAmssYEI5
+        desc: ''
+        multiple_retrieval_config:
+          reranking_enable: true
+          reranking_mode: reranking_model
+          reranking_model:
+            model: netease-youdao/bce-reranker-base_v1
+            provider: langgenius/siliconflow/siliconflow
+          top_k: 4
+        query_variable_selector:
+        - '1741571480087'
+        - sys.query
+        retrieval_mode: multiple
+        selected: false
+        title: 客服邮件历史知识库
+        type: knowledge-retrieval
+      height: 89
+      id: '1741766110088'
+      position:
+        x: 544.5168039794642
+        y: -2936.5422333788547
+      positionAbsolute:
+        x: 544.5168039794642
+        y: -2936.5422333788547
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        context:
+          enabled: true
+          variable_selector:
+          - '1741766110088'
+          - result
+        desc: ''
+        model:
+          completion_params: {}
+          mode: chat
+          name: deepseek-reasoner
+          provider: langgenius/deepseek/deepseek
+        prompt_template:
+        - id: b22800c9-ebb0-40e9-b2ca-5eacbaef2b7a
+          role: system
+          text: '```xml
+
+            <instructions>
+
+            你是一个亚马逊卖家对话客服，负责帮助买家解决问题,请根据买家的具体情况和问题，提供适当的解决方案。以下是完成任务的步骤：
+
+            1. 理解买家的问题：仔细阅读买家的描述，确保你完全理解他们的问题或疑虑。
+
+            2.常规处理思路，优先级最高，内容在<常规处理思路>xml.
+
+            3. 传达解决方案：以礼貌和专业的方式向买家传达解决方案。确保信息清晰易懂，并提供任何必要的后续步骤或联系方式。
+
+            4.只能参考其客户处理格式和解决思路，不能直接使用里面的客户数据，内容在<example>xml里面.
+
+            5.当前买家信息内容在<买家订单信息>xml里面.
+
+            6.当前买家物流内容在<买家物流信息>xml里面.
+
+            7.买家店铺信息内容在<店铺信息>xml里面.
+
+            8.不允许答复结果是中文，按照用户语种
+
+            9.不允许第一次答复就提出退款.
+
+            10.今天的日期是:{{#1742383367610.curDate#}}
+
+            11.凡是删评/改评/邀评/打折/免费等与评论和邮箱相关的表达都不可以出现
+
+            12.结果会通过邮件发送给买家，不能包含思考步骤,请检查好答复.
+
+            13需要基于买家卖家上下文信息,来做决策，买家卖家上下文内容在<买家和卖家上下文>xml里面
+
+            14.任何处理方案需要先和买家确认，然后再做出决策
+
+            15.内容不能出现特殊符号
+
+            16.尽量不出现I  像类似的需要用We来代替
+
+            17.指导思想是最高优先级依据，若与其他规则冲突时，以<指导思想>内容为准
+
+            注意：综合如上规则根据不同优先级别思考结果,输出不应包含任何XML标签,末尾不需要Customer Support，Team ,Your Brand
+            Name等署名信息
+
+            </instructions>
+
+            <example>
+
+            {{#context#}}
+
+            </example>
+
+            <客服邮件规则库>
+
+            {{#1742395791790.result#}}
+
+            </客服邮件规则库>
+
+            <买家订单信息>
+
+            {{#1745391970382.output#}}
+
+            </买家订单信息>
+
+            <买家物流信息>
+
+            {{#1745463145529.output#}}
+
+            </买家物流信息>
+
+            <店铺信息>
+
+            {{#1755143146906.output#}}
+
+            </店铺信息>
+
+            <买家和卖家上下文>
+
+            {{#1741571480087.Context#}}
+
+            </买家和卖家上下文>
+
+            <指导思想>
+
+            {{#1741571480087.GuidingPrinciple#}}
+
+            </指导思想>
+
+            <常规处理思路>
+
+            #### **一、物流进度查询**
+
+            1. **必要回复内容**
+
+            - 提供订单中**每个产品对应的跟踪号及承运商**（亚马逊同步发货可能仅显示一个跟踪号，需主动核实其他包裹信息）。
+
+            - 同步所有包裹的**最新物流状态**，避免遗漏部分包裹的进度。
+
+            - *示例话术*：
+
+            > “经核实，您的订单共分X个包裹发货，跟踪号分别为[XXX/XXX]，承运商为[XXX]。当前物流状态如下：包裹1已抵达[地点]，包裹2显示[状态]...”
+
+            ---
+
+            #### **二、包裹未上网/物流中途停滞**
+
+            **处理优先级：买家态度 > 账号表现 > 延迟时长**
+
+            | **延迟天数** | **处理方案** | **账号规模策略** |
+
+            |---------------|---------------|-------------------|
+
+            | **<5天** | 安抚等待，不主动提退款 | - 小账号（<1000单）：次日跟进确认，避免投诉<br>- 大账号：常规安抚 |
+
+            | **5-10天** | 买家态度差时，按货值提供**部分退款**（参考历史比例） | 欧洲站优先退款，美国站协商补寄 |
+
+            | **>10天** | 按**丢包处理**：全额退款或补寄 | 大账号可协商方案，小账号直接退款 |
+
+            ---
+
+            #### **三、物流途中破损（美国站高发）**
+
+            1. **检查物流轨迹关键词**
+
+            - 显示 **“Return to sender”** → 按买家需求补寄/退款。
+
+            - 仅显示 **“Damaged”** → 观察1-3天，FedEx可能重新打包派送。
+
+            2. **话术要点**：
+
+            > “已核实包裹状态为轻微破损，物流方可能已重新包装派送。若3日内仍未收到，我们将为您优先处理补发。”
+
+            ---
+
+            #### **四、签收未收到**
+
+            **场景分类处理**：
+
+            1. **地址不一致**
+
+            - 添加至索赔表，协商补寄/退款。
+
+            - *欧洲特殊处理*：若妥投至包裹商店，引导买家自提（80%不再派送）。
+
+
+            2. **地址一致但未收到**
+
+            - **首次联系**：提供FedEx交付图片/位置，指导买家自查（查监控、问邻居/管理员、联系当地FedEx）。
+
+            - **未回复时**：
+
+            | **账号类型** | **处理方案** |
+
+            |--------------|---------------|
+
+            | 小账号（<1000单） | 次日跟进，未解决则退款 |
+
+            | 大账号（ODR<0.4%） | 不主动处理，降低干预成本 |
+
+            ---
+
+            #### **五、发错货**
+
+            1. **证据要求**：
+
+            必须索取以下4张图片：
+
+            - 含SKU的包装盒、标签特写、内物照片、运输标签。
+
+            2. **责任归属处理**：
+
+            - 仓库责任 → 无条件补寄/退款。
+
+            - 工厂责任 → 协商补寄（低值货<150美元可弃货）。
+
+
+            ---
+
+
+            #### **六、妥投失败退件**
+
+            **核心原则：不退件到仓即处理，避免拖延**
+
+            1. **退件原因分类**：
+
+            - 地址错误 → 补寄前二次确认地址。
+
+            - 包裹店未提货（欧洲高发）→ 明确告知需自提，否则退款。
+
+            2. **买家未明确诉求**：
+
+            - 首次回复询问补寄/退款意向 → 24小时未回复直接退款。
+
+            ---
+
+            ### **关键执行原则**
+
+            1. **风险规避**：
+
+            - 小账号（<1000单）以**退款优先**，欧洲站尤其敏感。
+
+            - 大账号（>1000单）以**成本控制**为导向，优先协商补寄。
+
+            2. **态度导向**：
+
+            - 买家语气强硬时，跳过等待期直接补偿（参考延迟时长梯度）。
+
+            3. **效率优化**：
+
+            - 所有“签收未收到”案例首次回复需包含**自查步骤清单**，减少二次沟通。
+
+            </常规处理思路>
+
+            ```'
+        - id: 61cca6f2-9c6d-4720-81f6-dc5ea73057c9
+          role: user
+          text: '{{#sys.query#}}'
+        selected: false
+        title: 通用处理
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 87
+      id: '1741766139856'
+      position:
+        x: 3532.108003130002
+        y: -3026.860643770923
+      positionAbsolute:
+        x: 3532.108003130002
+        y: -3026.860643770923
+      selected: true
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "def main(http_response:str) -> object:\n    import json\n    try:\n        parsed_data = json.loads(http_response)\n    except Exception:\n        return {\n            \"result\": []\n        }\n    data_list = parsed_data.get(\"Data\", []) or []\n    return {\n        \"result\": data_list\n    }"
+        code_language: python3
+        desc: 非物流独立提取Json
+        outputs:
+          result:
+            children: null
+            type: array[object]
+        selected: false
+        title: 提取Json_非物流
+        type: code
+        variables:
+        - value_selector:
+          - '1761000000001'
+          - body
+          variable: http_response
+      height: 51
+      id: '1761000000007'
+      position:
+        x: 1550.0
+        y: -3600.0
+      positionAbsolute:
+        x: 1550.0
+        y: -3600.0
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "\ndef main(http_response: str) -> object:\n    import json\n    return {\n        \"result\": json.loads(http_response)\n    }\n"
+        code_language: python3
+        desc: 非物流独立转换订单json
+        outputs:
+          result:
+            children: null
+            type: object
+        selected: false
+        title: 转换订单json_非物流
+        type: code
+        variables:
+        - value_selector:
+          - '1761000000001'
+          - body
+          variable: http_response
+      height: 51
+      id: '1761000000008'
+      position:
+        x: 1550.0
+        y: -3490.0
+      positionAbsolute:
+        x: 1550.0
+        y: -3490.0
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        selected: false
+        template: "{% if http_response.Data %}\r\n# 订单概览\r\n=================================\r\n  总金额: {{ http_response.Data.TotalInfo.Currency }} {{ \"%.2f\"|format(http_response.Data.TotalInfo.TotalPrice) }}\r\n  下单时间: {{ http_response.Data.TotalInfo.PostOrderDate }}\r\n  预计送达时间: {{ http_response.Data.TotalInfo.EarliestDeliveryDate}} 至 {{ http_response.Data.TotalInfo.LatestDeliveryDate }}\r\n  发货时间窗口: {{ http_response.Data.TotalInfo.EarliestShipDate }} 至 {{ http_response.Data.TotalInfo.LatestShipDate }}\r\n\r\n## 商品明细 (共{{ http_response.Data.get(\"items\", [])|length }}件)\r\n{% for item in http_response.Data.get(\"items\", []) %}\r\n---------------------------------\r\n### 商品 {{ loop.index }}:\r\n      ASIN: {{ item.Asin }}\r\n      品名: {{ item.SkuName }}\r\n      数量: {{ item.Quantity }}\r\n      订单号: {{ item.eBayOrderId }}\r\n      价格: {{ item.Currency }} {{ \"%.2f\"|format(item.TotalPrice) }}\r\n{% endfor %}\r\n{% else %}\r\n=================================\r\n系统提示：当前无有效订单数据\r\n{% endif %}"
+        title: 转换订单模板_非物流
+        type: template-transform
+        variables:
+        - value_selector:
+          - '1761000000008'
+          - result
+          variable: http_response
+      height: 51
+      id: '1761000000009'
+      position:
+        x: 1810.0
+        y: -3490.0
+      positionAbsolute:
+        x: 1810.0
+        y: -3490.0
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "def main(http_response: str) -> str:\n    import json\n    try:\n        data = json.loads(http_response)\n    except json.JSONDecodeError:\n        return {\"error\": \"Invalid JSON input\"}\n    fbm_data = (data.get('data') or {}).get('fbmOrderDefectRate') or {}\n    if fbm_data == {}:\n        return {\n            'shopInfo': 'None'\n        }\n    transformed = {\n        \"店铺订单量\": fbm_data.get(\"orderCount\", \"\"),\n        \"店铺ODR\": fbm_data.get(\"orderWithDefectstPercentage\", \"\"),\n        \"orderWithDefectstCount\": fbm_data.get(\"orderWithDefectstCount\", \"\"),\n        \"days\": fbm_data.get(\"days\", \"\")\n    }\n    orderInfo = json.dumps(transformed, ensure_ascii=False)\n    return {\n        'shopInfo': orderInfo\n    }"
+        code_language: python3
+        desc: 非物流独立解析店铺ODR
+        outputs:
+          shopInfo:
+            children: null
+            type: string
+        selected: false
+        title: 解析店铺ODR_非物流
+        type: code
+        variables:
+        - value_selector:
+          - '1761000000002'
+          - body
+          variable: http_response
+      height: 51
+      id: '1761000000010'
+      position:
+        x: 1550.0
+        y: -3360.0
+      positionAbsolute:
+        x: 1550.0
+        y: -3360.0
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "def main(http_response: str) -> object:\n    import json\n    try:\n        if http_response is None:\n            return {\n                \"result\": '',\n                \"error\": \"Input is None\"\n            }\n        return {\n            \"result\": json.loads(http_response)\n        }\n    except Exception:\n        return {\n            \"result\": ''\n        }"
+        code_language: python3
+        desc: 非物流独立转换店铺json
+        error_strategy: fail-branch
+        outputs:
+          result:
+            children: null
+            type: object
+        selected: false
+        title: 转换店铺json_非物流
+        type: code
+        variables:
+        - value_selector:
+          - '1761000000002'
+          - body
+          value_type: string
+          variable: http_response
+      height: 87
+      id: '1761000000011'
+      position:
+        x: 1550.0
+        y: -3230.0
+      positionAbsolute:
+        x: 1550.0
+        y: -3230.0
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        selected: false
+        template: "{% if http_response.data %}\r\n# 店铺-FBM订单缺陷率\r\n| 指标 | 数值 \r\n|------|------|------|\r\n| 总订单量 | {{ http_response.data.fbmOrderDefectRate.orderCount }} |\r\n| 缺陷订单率(ODR) | {{ http_response.data.fbmOrderDefectRate.orderWithDefectstPercentage }} | \r\n| 负面反馈率 | {{ http_response.data.fbmOrderDefectRate.negativeFeedbackPercentage }} |\r\n| 索赔率 | {{ http_response.data.fbmOrderDefectRate.claimsCountPercentage }} |\r\n| 拒付率 | {{ http_response.data.fbmOrderDefectRate.chargebacksPercentage }} |\r\n*统计周期：{{ http_response.data.fbmOrderDefectRate.dateStart }} 至 {{ http_response.data.fbmOrderDefectRate.dateEnd }}*\r\n{% else %}\r\n=================================\r\n系统提示：当前无店铺信息\r\n{% endif %}\r\n"
+        title: 转换店铺模板_非物流
+        type: template-transform
+        variables:
+        - value_selector:
+          - '1761000000011'
+          - result
+          variable: http_response
+      height: 51
+      id: '1761000000012'
+      position:
+        x: 1810.0
+        y: -3230.0
+      positionAbsolute:
+        x: 1810.0
+        y: -3230.0
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        answer: '{{#1761000000002.body#}}'
+        desc: ''
+        selected: false
+        title: 直接回复6_非物流
+        type: answer
+        variables: []
+      height: 102
+      id: '1761000000013'
+      position:
+        x: 1810.0
+        y: -3110.0
+      positionAbsolute:
+        x: 1810.0
+        y: -3110.0
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        selected: false
+        template: '{系统提示：当前无店铺信息}'
+        title: 模板转换4_非物流
+        type: template-transform
+        variables:
+        - value_selector:
+          - '1761000000011'
+          - error_message
+          value_type: string
+          variable: arg1
+      height: 51
+      id: '1761000000014'
+      position:
+        x: 2060.0
+        y: -3110.0
+      positionAbsolute:
+        x: 2060.0
+        y: -3110.0
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        output_type: string
+        selected: false
+        title: 店铺模板_非物流
+        type: variable-aggregator
+        variables:
+        - - '1761000000014'
+          - output
+        - - '1761000000012'
+          - output
+      height: 134
+      id: '1761000000015'
+      position:
+        x: 2320.0
+        y: -3230.0
+      positionAbsolute:
+        x: 2320.0
+        y: -3230.0
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        author: admin
+        desc: ''
+        height: 187
+        selected: false
+        showAuthor: true
+        text: '{"root":{"children":[{"children":[{"detail":0,"format":0,"mode":"normal","style":"","text":"1.取账号ODR相关信息","type":"text","version":1}],"direction":"ltr","format":"","indent":0,"type":"paragraph","version":1,"textFormat":0,"textStyle":""},{"children":[{"detail":0,"format":0,"mode":"normal","style":"","text":"2.相关物流信息整合","type":"text","version":1}],"direction":"ltr","format":"","indent":0,"type":"paragraph","version":1,"textFormat":0,"textStyle":""},{"children":[{"detail":0,"format":0,"mode":"normal","style":"","text":"3.发货天数逻辑判断","type":"text","version":1}],"direction":"ltr","format":"","indent":0,"type":"paragraph","version":1,"textFormat":0,"textStyle":""},{"children":[{"detail":0,"format":0,"mode":"normal","style":"","text":"4.发货状态判断","type":"text","version":1}],"direction":"ltr","format":"","indent":0,"type":"paragraph","version":1,"textFormat":0,"textStyle":""}],"direction":"ltr","format":"","indent":0,"type":"root","version":1}}'
+        theme: blue
+        title: ''
+        type: ''
+        width: 417
+      height: 187
+      id: '1742130478186'
+      position:
+        x: -929.8237272872803
+        y: -3599.672504176402
+      positionAbsolute:
+        x: -929.8237272872803
+        y: -3599.672504176402
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom-note
+      width: 417
+    - data:
+        answer: '{{#1741677360732.error_message#}}'
+        desc: ''
+        selected: false
+        title: 异常分支1
+        type: answer
+        variables: []
+      height: 102
+      id: '17423696596910'
+      position:
+        x: 955.96403817284
+        y: -3491.474311891344
+      positionAbsolute:
+        x: 955.96403817284
+        y: -3491.474311891344
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "def main() -> str:\n    from datetime import date\n    current_date\
+          \ = date.today()\n    return {\n        \"curDate\":str(current_date)\n\
+          \    }"
+        code_language: python3
+        desc: ''
+        outputs:
+          curDate:
+            children: null
+            type: string
+        selected: false
+        title: 获取日期
+        type: code
+        variables: []
+      height: 51
+      id: '1742383367610'
+      position:
+        x: -617.1058503872601
+        y: -3381.6557520617707
+      positionAbsolute:
+        x: -617.1058503872601
+        y: -3381.6557520617707
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        answer: '{{#1744011643679.error_message#}}'
+        desc: ''
+        selected: false
+        title: 异常分支3
+        type: answer
+        variables: []
+      height: 102
+      id: '1742386596560'
+      position:
+        x: 973.3750494387625
+        y: -3054.9263353451443
+      positionAbsolute:
+        x: 973.3750494387625
+        y: -3054.9263353451443
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        answer: 很抱歉，目前暂时不处理此类问题-{{#1741571496543.class_name#}}
+        desc: ''
+        selected: false
+        title: 无法处理
+        type: answer
+        variables: []
+      height: 118
+      id: '1742395115074'
+      position:
+        x: 50.12357114311362
+        y: -2837.1598334418927
+      positionAbsolute:
+        x: 50.12357114311362
+        y: -2837.1598334418927
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        dataset_ids:
+        - W6gxEWxwGV1aMT3QaRAG6u8Wsq812aAuMk06PJAbH5djy9NiPL4VupM0fldjB9f4
+        desc: ''
+        multiple_retrieval_config:
+          reranking_enable: false
+          reranking_mode: reranking_model
+          reranking_model:
+            model: netease-youdao/bce-reranker-base_v1
+            provider: langgenius/siliconflow/siliconflow
+          top_k: 4
+        query_variable_selector:
+        - '1741571480087'
+        - sys.query
+        retrieval_mode: multiple
+        selected: false
+        title: 客服邮件规则库
+        type: knowledge-retrieval
+      height: 89
+      id: '1742395791790'
+      position:
+        x: 536.6229086227885
+        y: -2787.4996256688796
+      positionAbsolute:
+        x: 536.6229086227885
+        y: -2787.4996256688796
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        answer: '{{#1749450143113.text#}}'
+        desc: ''
+        selected: false
+        title: 最终结果
+        type: answer
+        variables: []
+      height: 102
+      id: '1742396002831'
+      position:
+        x: 7390.697681205547
+        y: -3371.679527486753
+      positionAbsolute:
+        x: 7390.697681205547
+        y: -3371.679527486753
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        authorization:
+          config:
+            api_key: '{{#env.token#}}'
+            type: bearer
+          type: api-key
+        body:
+          data: []
+          type: none
+        desc: ''
+        error_strategy: fail-branch
+        headers: ''
+        method: get
+        params: 'accountId:{{#1741571480087.AccountId#}}
+
+          siteId:{{#1741571480087.SiteId#}}
+
+          endDate:{{#1742383367610.curDate#}}
+
+          isLatest:true'
+        retry_config:
+          max_retries: 3
+          retry_enabled: true
+          retry_interval: 100
+        selected: false
+        ssl_verify: true
+        timeout:
+          connect: 10
+          max_connect_timeout: 0
+          max_read_timeout: 0
+          max_write_timeout: 0
+          read: 60
+          write: 60
+        title: 查询店铺ODR
+        type: http-request
+        url: http://10.1.1.181:8017/api/AmazonSellerPerformanceV2Service/detail
+        variables: []
+      height: 189
+      id: '1743565530674'
+      position:
+        x: 536.6229086227885
+        y: -3157.373783307819
+      positionAbsolute:
+        x: 536.6229086227885
+        y: -3157.373783307819
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        answer: '{{#1743565530674.body#}}'
+        desc: ''
+        selected: false
+        title: 直接回复 6
+        type: answer
+        variables: []
+      height: 102
+      id: '1743575987663'
+      position:
+        x: 955.96403817284
+        y: -2697.8441933839217
+      positionAbsolute:
+        x: 955.96403817284
+        y: -2697.8441933839217
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "def main(http_response: str) -> str:\n    import json\n    try:\n \
+          \       data = json.loads(http_response)\n    except json.JSONDecodeError:\n\
+          \        return {\"error\": \"Invalid JSON input\"}\n    # 提取packageInfos列表并重组结构\n\
+          \    fbm_data = (data.get('data') or {}).get('fbmOrderDefectRate') or {}\n\
+          \    if fbm_data=={}: \n     return {\n        # 注意在输出变量中声明result\n    \
+          \    'shopInfo': 'None'\n    }\n    transformed = {\n        \"店铺订单量\":\
+          \ fbm_data.get(\"orderCount\", \"\"),      # 建议数值型默认用0\n        \"店铺ODR\"\
+          : fbm_data.get(\"orderWithDefectstPercentage\", \"\"),\n        \"orderWithDefectstCount\"\
+          : fbm_data.get(\"orderWithDefectstCount\", \"\"),\n        \"days\": fbm_data.get(\"\
+          days\", \"\")\n    }\n\n    orderInfo=json.dumps(transformed, ensure_ascii=False)\n\
+          \    return {\n        # 注意在输出变量中声明result\n        'shopInfo': orderInfo\n\
+          \    }"
+        code_language: python3
+        desc: ''
+        outputs:
+          shopInfo:
+            children: null
+            type: string
+        selected: false
+        title: 解析店铺ODR
+        type: code
+        variables:
+        - value_selector:
+          - '1743565530674'
+          - body
+          variable: http_response
+      height: 51
+      id: '1743583712356'
+      position:
+        x: 978.2862424954226
+        y: -2800.286131532246
+      positionAbsolute:
+        x: 978.2862424954226
+        y: -2800.286131532246
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        authorization:
+          config:
+            api_key: '{{#env.token#}}'
+            type: bearer
+          type: api-key
+        body:
+          data: []
+          type: none
+        desc: ''
+        error_strategy: fail-branch
+        headers: ''
+        method: get
+        params: ebayOrderId:{{#1741571480087.OrderId#}}
+        retry_config:
+          max_retries: 3
+          retry_enabled: true
+          retry_interval: 100
+        selected: false
+        ssl_verify: true
+        timeout:
+          connect: 60
+          max_connect_timeout: 0
+          max_read_timeout: 0
+          max_write_timeout: 0
+          read: 60
+          write: 60
+        title: 查询包裹信息
+        type: http-request
+        url: http://10.1.1.54:9002/AukeysOrder/PackageInfo/GetOrderPackage
+        variables: []
+      height: 189
+      id: '1744011643679'
+      position:
+        x: 536.6229086227885
+        y: -3381.6557520617707
+      positionAbsolute:
+        x: 536.6229086227885
+        y: -3381.6557520617707
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: ''
+        model:
+          completion_params: {}
+          mode: chat
+          name: gpt-4o
+          provider: langgenius/azure_openai/azure_openai
+        prompt_template:
+        - id: 31454eb9-ca93-4505-9ca9-8680c85a6ce6
+          role: system
+          text: '<Role>
+
+            你是一个语言工具，具有检测和更换违禁词及其衍生词的能力。
+
+            </Role>
+
+            <Task>
+
+            <Steps>
+
+            "Step 1": 检查用户输入的句子是否存在违禁词（违禁词清单在违禁词列表xml中，每个违禁词用逗号隔开）及其衍生词.
+
+            "Step 2": 更换违禁词 ->如果用户句子包含违禁词或其衍生词，则将这些词用其他合适的词或句子进行替换，并输出优化后的句子，确保内容通顺且不改变原有意思.
+
+            "Step 3": 如果用户句子不包含任何违禁词或衍生词，直接原样输出用户句子.
+
+            "Step 4": 返回结果不能包含额外的说明.
+
+            </Steps>
+
+            </Task>
+
+            <违禁词列表>
+
+            {{#1748585677300.text#}}
+
+            </违禁词列表>
+
+            '
+        - id: 8371e2c8-e152-4897-a44e-46f229cfe00b
+          role: user
+          text: '{{#1748588765674.answer#}}'
+        selected: false
+        title: 违禁词检测
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 87
+      id: '1744107385916'
+      position:
+        x: 5527.057498034493
+        y: -3472.2478377625953
+      positionAbsolute:
+        x: 5527.057498034493
+        y: -3472.2478377625953
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "def main(http_response: str) -> str:\n    import json\n    try:\n \
+          \       data = json.loads(http_response)\n    except json.JSONDecodeError\
+          \ as e:\n        return json.dumps(\n            {\"error\": \"Invalid JSON\
+          \ format\", \"detail\": str(e)},\n            ensure_ascii=False\n     \
+          \   )\n\n    transformed = []\n    try:\n        # 处理根层结构异常\n        package_list\
+          \ = data.get(\"Data\", []) if isinstance(data, dict) else []\n        for\
+          \ item in package_list if isinstance(package_list, list) else []:\n    \
+          \        # 处理item层结构异常\n            if not isinstance(item, dict):\n   \
+          \             continue\n            trajectory_details = []\n          \
+          \  # 处理物流轨迹详情嵌套结构异常\n            for item1 in item.get(\"TrajectoryDetails\"\
+          , []) if isinstance(item.get(\"TrajectoryDetails\"), list) else []:\n  \
+          \              trajectory_details.append({\n                    \"轨迹信息\"\
+          : item1.get(\"StatusDescription\", \"\"),\n                    \"轨迹时间\"\
+          : item1.get(\"Date\", \"\")\n                })\n            # 所有字段设置默认值防止KeyError\n\
+          \            transformed.append({\n                \"跟踪单号\": item.get(\"\
+          TrackingNumber\", \"\"),\n                \"物流状态\": item.get(\"ThirdPartyStatus\"\
+          , \"\"),\n                \"包裹状态\": item.get(\"PackageStatus\", \"\"),\n\
+          \                \"商品名称\": item.get(\"SkuName\", \"\"),\n              \
+          \  \"数量\": item.get(\"Quantity\", 0),  # 数值型默认0\n                \"物流轨迹状态\"\
+          : item.get(\"TrajectoryStatus\", \"\"),\n                \"物流轨迹详情\": trajectory_details\n\
+          \            })\n    except AttributeError as e:\n        return json.dumps(\n\
+          \            {\"error\": \"Unexpected data structure\", \"detail\": str(e)},\n\
+          \            ensure_ascii=False\n        )\n\n    return {\n        \"packageInfo\"\
+          : json.dumps(transformed,  ensure_ascii=False)\n    }"
+        code_language: python3
+        desc: ''
+        outputs:
+          packageInfo:
+            children: null
+            type: string
+        selected: false
+        title: 解析包裹物流
+        type: code
+        variables:
+        - value_selector:
+          - '1744011643679'
+          - body
+          variable: http_response
+      height: 51
+      id: '1744273034408'
+      position:
+        x: 955.96403817284
+        y: -3354.1213551552396
+      positionAbsolute:
+        x: 955.96403817284
+        y: -3354.1213551552396
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "def main(tracking_data: str, key_value_rules: list) -> str:\n    import\
+          \ json\n    result = []\n    data = json.loads(tracking_data)\n    for item\
+          \ in data.get(\"Data\", []) or []:\n        tracking_number = item[\"TrackingNumber\"\
+          ]\n        # 遍历所有轨迹详情\n        for trajectory in item.get(\"TrajectoryDetails\"\
+          , []):\n            status_desc = trajectory.get(\"StatusDescription\",\
+          \ \"\")\n            # 检查是否包含规则中的Key\n            for rule in key_value_rules:\n\
+          \                key = rule.get(\"Key\", \"\") if isinstance(rule, dict)\
+          \ else rule.Key\n                if key in status_desc:\n              \
+          \      value = (\n                        rule.get(\"Value\", \"\") if isinstance(rule,\
+          \ dict) else rule.Value\n                    )\n                    result.append({\"\
+          物流单号\": tracking_number, \"轨迹说明\": value})\n                    break  #\
+          \ 匹配到第一个Key后跳出循环\n            for item1 in result:\n              print(item1)\n\
+          \              if tracking_number in item1:\n                 break  # 已匹配到当前单号，停止遍历轨迹\n\
+          \    return {\n        \"packageCenterInfo\": json.dumps(result,  ensure_ascii=False)\n\
+          \    }"
+        code_language: python3
+        default_value:
+        - key: packageCenterInfo
+          type: string
+          value: '1'
+        desc: ''
+        error_strategy: default-value
+        outputs:
+          packageCenterInfo:
+            children: null
+            type: string
+        selected: false
+        title: 识别其他包裹物流
+        type: code
+        variables:
+        - value_selector:
+          - '1744011643679'
+          - body
+          variable: tracking_data
+        - value_selector:
+          - conversation
+          - logisticsPairingList
+          variable: key_value_rules
+      height: 87
+      id: '1745149604778'
+      position:
+        x: 1366.6087542934404
+        y: -3452.6844248465254
+      positionAbsolute:
+        x: 1366.6087542934404
+        y: -3452.6844248465254
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "def main(logistics_list: str, key_value_objects: list) -> str:\n  \
+          \  import json\n    result = []\n    data = json.loads(logistics_list)\n\
+          \    for logistics_item in data.get(\"Data\", []) or []:\n        tracking_number\
+          \ = logistics_item[\"TrackingNumber\"]\n        trajectory_details = logistics_item.get(\"\
+          TrajectoryDetails\", [])\n        if not trajectory_details:  # 若无轨迹详情，跳过处理\n\
+          \            result.append({})\n            continue\n\n        first_trajectory\
+          \ = trajectory_details\n        trajectory_info = first_trajectory[0].get(\"\
+          StatusDescription\", \"\")\n\n        matched_value = {}\n        for obj\
+          \ in key_value_objects:\n            key = obj.get(\"Key\", \"\")\n    \
+          \        if key in trajectory_info:  # 判断轨迹信息是否包含Key\n                matched_value\
+          \ = {\n                    \"物流单号\": tracking_number,\n                \
+          \    \"轨迹说明\": obj.get(\"Value\"),\n                }\n                break\
+          \  # 找到第一个匹配项即返回\n        result.append(matched_value)\n    return {\n \
+          \       \"packageFirstInfo\": json.dumps(result,  ensure_ascii=False)\n\
+          \    }"
+        code_language: python3
+        default_value:
+        - key: packageFirstInfo
+          type: string
+          value: ''
+        desc: ''
+        error_strategy: default-value
+        outputs:
+          packageFirstInfo:
+            children: null
+            type: string
+        selected: false
+        title: 识别第一条包裹数据
+        type: code
+        variables:
+        - value_selector:
+          - '1744011643679'
+          - body
+          variable: logistics_list
+        - value_selector:
+          - conversation
+          - logisticsPairingFirstList
+          variable: key_value_objects
+      height: 87
+      id: '17451498471410'
+      position:
+        x: 1366.6087542934404
+        y: -3316.348828333264
+      positionAbsolute:
+        x: 1366.6087542934404
+        y: -3316.348828333264
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        selected: false
+        template: "{% if http_response.Data %}\r\n# 订单概览\r\n=================================\r\
+          \n  总金额: {{ http_response.Data.TotalInfo.Currency }} {{ \"%.2f\"|format(http_response.Data.TotalInfo.TotalPrice)\
+          \ }}\r\n  下单时间: {{ http_response.Data.TotalInfo.PostOrderDate }}\r\n  预计送达时间:\
+          \ {{ http_response.Data.TotalInfo.EarliestDeliveryDate}} 至 {{ http_response.Data.TotalInfo.LatestDeliveryDate\
+          \ }}\r\n  发货时间窗口: {{ http_response.Data.TotalInfo.EarliestShipDate }} 至\
+          \ {{ http_response.Data.TotalInfo.LatestShipDate }}\r\n\r\n## 商品明细 (共{{\
+          \ http_response.Data.get(\"items\", [])|length }}件)\r\n{% for item in http_response.Data.get(\"\
+          items\", []) %}\r\n---------------------------------\r\n### 商品 {{ loop.index\
+          \ }}:\r\n      ASIN: {{ item.Asin }}\r\n      品名: {{ item.SkuName }}\r\n\
+          \      数量: {{ item.Quantity }}\r\n      订单号: {{ item.eBayOrderId }}\r\n\
+          \      价格: {{ item.Currency }} {{ \"%.2f\"|format(item.TotalPrice) }}\r\n\
+          {% endfor %}\r\n{% else %}\r\n=================================\r\n系统提示：当前无有效订单数据\r\
+          \n{% endif %}"
+        title: 转换订单模板
+        type: template-transform
+        variables:
+        - value_selector:
+          - '1745401631175'
+          - result
+          variable: http_response
+      height: 51
+      id: '1745391970382'
+      position:
+        x: 1366.6087542934404
+        y: -3614.4909720670694
+      positionAbsolute:
+        x: 1366.6087542934404
+        y: -3614.4909720670694
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "\ndef main(http_response: str) -> object:\n    return {\n        \"\
+          result\": json.loads(http_response)\n    }\n"
+        code_language: python3
+        desc: ''
+        outputs:
+          result:
+            children: null
+            type: object
+        selected: false
+        title: 转换订单json
+        type: code
+        variables:
+        - value_selector:
+          - '1741677360732'
+          - body
+          variable: http_response
+      height: 51
+      id: '1745401631175'
+      position:
+        x: 955.96403817284
+        y: -3607.574956695919
+      positionAbsolute:
+        x: 955.96403817284
+        y: -3607.574956695919
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "\ndef main(http_response: str) -> object:\n    return {\n        \"\
+          result\": json.loads(http_response)\n    }\n"
+        code_language: python3
+        desc: ''
+        outputs:
+          result:
+            children: null
+            type: object
+        selected: false
+        title: 转换物流json
+        type: code
+        variables:
+        - value_selector:
+          - '1744011643679'
+          - body
+          variable: http_response
+      height: 51
+      id: '17454630938070'
+      position:
+        x: 949.0646612120074
+        y: -3244.7780179720626
+      positionAbsolute:
+        x: 949.0646612120074
+        y: -3244.7780179720626
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        selected: false
+        template: "{% if http_response.Data %}\r\n# 包裹跟踪信息报告\r\n{% for item in http_response.Data\
+          \ %}\r\n## 包裹详情\r\n- &zwnj;**跟踪单号**&zwnj;: {{ item.TrackingNumber }}\r\n\
+          - &zwnj;**承运商**&zwnj;: {{ item.CarrierName }}\r\n- &zwnj;**系统重量**&zwnj;:\
+          \ {{ item.SystemWeight }} kg\r\n- &zwnj;**商品数量**&zwnj;: {{ item.Quantity\
+          \ }}\r\n- &zwnj;**物流状态**&zwnj;: {{ item.TrajectoryStatus }}\r\n- &zwnj;**物流地址**&zwnj;:\
+          \ {{ item.Address }}\r\n- &zwnj;**最后更新时间**&zwnj;:{% if item.LatestTrajectory\
+          \ %}{{ item.LatestTrajectory.split(' - ')[0] }}{% else %}None{% endif %}\r\
+          \n## 物流轨迹\r\n&zwnj;**最新状态**&zwnj;:  \r\n`{{ item.LatestTrajectory }}`\r\n\
+          ### 详细轨迹最新10条记录\r\n| 时间戳 | 状态描述 \r\n|--------|----------\r\n{% if item.get(\"\
+          TrajectoryDetails\", []) %}\r\n{% for detail in item.get(\"TrajectoryDetails\"\
+          , [])[:10] %}\r\n| {{ detail.Date }} | {{ detail.StatusDescription }} \r\
+          \n{% endfor %}\r\n{% else %}\r\n系统提示：当前无轨迹信息\r\n{% endif %}\r\n## 商品信息\r\
+          \n- &zwnj;**商品名称**&zwnj;: {{ item.ProductTitle }}\r\n- &zwnj;**ASIN**&zwnj;:\
+          \ {{ item.ProductAsin }}\r\n---\r\n{% endfor %}\r\n{% else %}\r\n=================================\r\
+          \n系统提示：当前无包裹信息\r\n{% endif %}"
+        title: 转换物流模板
+        type: template-transform
+        variables:
+        - value_selector:
+          - '17454630938070'
+          - result
+          variable: http_response
+      height: 51
+      id: '1745463145529'
+      position:
+        x: 1366.6087542934404
+        y: -3188.4403605889775
+      positionAbsolute:
+        x: 1366.6087542934404
+        y: -3188.4403605889775
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "def main(http_response: str) -> object:\n    try:\n        if http_response\
+          \ is None:\n            return {\n                \"result\": '',\n    \
+          \            \"error\": \"Input is None\"\n            }\n        return\
+          \ {\n            \"result\": json.loads(http_response)\n        }\n    except\
+          \ Exception as e:\n        return {\n            \"result\": ''\n      \
+          \  }    "
+        code_language: python3
+        desc: ''
+        error_strategy: fail-branch
+        outputs:
+          result:
+            children: null
+            type: object
+        selected: false
+        title: 转换店铺json
+        type: code
+        variables:
+        - value_selector:
+          - '1743565530674'
+          - body
+          value_type: string
+          variable: http_response
+      height: 87
+      id: '17454776055700'
+      position:
+        x: 973.3750494387625
+        y: -2910.536448794243
+      positionAbsolute:
+        x: 973.3750494387625
+        y: -2910.536448794243
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        selected: false
+        template: "{% if http_response.data %}\r\n# 店铺-FBM订单缺陷率\r\n| 指标 | 数值 \r\n\
+          |------|------|------|\r\n| 总订单量 | {{ http_response.data.fbmOrderDefectRate.orderCount\
+          \ }} |\r\n| 缺陷订单率(ODR) | {{ http_response.data.fbmOrderDefectRate.orderWithDefectstPercentage\
+          \ }} | \r\n| 负面反馈率 | {{ http_response.data.fbmOrderDefectRate.negativeFeedbackPercentage\
+          \ }} |\r\n| 索赔率 | {{ http_response.data.fbmOrderDefectRate.claimsCountPercentage\
+          \ }} |\r\n| 拒付率 | {{ http_response.data.fbmOrderDefectRate.chargebacksPercentage\
+          \ }} |\r\n*统计周期：{{ http_response.data.fbmOrderDefectRate.dateStart }} 至\
+          \ {{ http_response.data.fbmOrderDefectRate.dateEnd }}*\r\n{% else %}\r\n\
+          =================================\r\n系统提示：当前无店铺信息\r\n{% endif %}\r\n"
+        title: 转换店铺模板
+        type: template-transform
+        variables:
+        - value_selector:
+          - '17454776055700'
+          - result
+          variable: http_response
+      height: 51
+      id: '1745477659596'
+      position:
+        x: 1366.6087542934404
+        y: -2949.638748196615
+      positionAbsolute:
+        x: 1366.6087542934404
+        y: -2949.638748196615
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        cases:
+        - case_id: 'true'
+          conditions:
+          - comparison_operator: contains
+            id: bda38c17-cda0-4864-90c1-bbac4ebc1193
+            value: 未上网
+            varType: string
+            variable_selector:
+            - '17451498471410'
+            - packageFirstInfo
+          id: 'true'
+          logical_operator: and
+        - case_id: 762cdf87-3064-4178-9212-31efc39be217
+          conditions:
+          - comparison_operator: is
+            id: 5372a18f-b971-4ea5-bc00-8531152736ca
+            value: 妥投失败
+            varType: string
+            variable_selector:
+            - '1745149604778'
+            - packageCenterInfo
+          id: 762cdf87-3064-4178-9212-31efc39be217
+          logical_operator: and
+        - case_id: 7ed29a07-3ae1-40b7-b147-b37a399dc553
+          conditions:
+          - comparison_operator: is
+            id: 958e428f-c158-416b-a078-1db6a28d2da7
+            value: 中途破损
+            varType: string
+            variable_selector:
+            - '1745149604778'
+            - packageCenterInfo
+          id: 7ed29a07-3ae1-40b7-b147-b37a399dc553
+          logical_operator: and
+        - case_id: d4def5de-8a22-4034-a5cc-6d2163fb61a1
+          conditions:
+          - comparison_operator: contains
+            id: 2fce5f9a-a184-4f9d-8296-6404bad55ac8
+            value: 催促发货
+            varType: string
+            variable_selector:
+            - '1745149604778'
+            - packageCenterInfo
+          id: d4def5de-8a22-4034-a5cc-6d2163fb61a1
+          logical_operator: and
+        - case_id: 5318288b-d2a8-433e-bc7b-3d9ddb5c1ceb
+          conditions:
+          - comparison_operator: contains
+            id: 3af654c2-4e57-4f16-814b-e7043c6e3ea6
+            value: 签收未收到
+            varType: string
+            variable_selector:
+            - '17451498471410'
+            - packageFirstInfo
+          id: 5318288b-d2a8-433e-bc7b-3d9ddb5c1ceb
+          logical_operator: and
+        desc: ''
+        selected: false
+        title: 条件分支
+        type: if-else
+      height: 315
+      id: '1745743758940'
+      position:
+        x: 2664.8383741097978
+        y: -3484.639257177113
+      positionAbsolute:
+        x: 2664.8383741097978
+        y: -3484.639257177113
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        is_team_authorization: true
+        output_schema:
+          properties:
+            answer:
+              description: Clean Answer
+              type: string
+            reason:
+              description: Thought Reason
+              type: string
+          type: object
+        paramSchemas:
+        - auto_generate: null
+          default: deepseek
+          form: form
+          human_description:
+            en_US: The model provider output by the upstream LLM. The plugin will
+              automatically use different cleaning methods according to the provider.
+            ja_JP: The model provider output by the upstream LLM. The plugin will
+              automatically use different cleaning methods according to the provider.
+            pt_BR: The model provider output by the upstream LLM. The plugin will
+              automatically use different cleaning methods according to the provider.
+            zh_Hans: 上游 LLM 输出的模型提供商，插件会自动根据提供商使用不同的清理方法。
+          label:
+            en_US: LLM Provider
+            ja_JP: LLM Provider
+            pt_BR: LLM Provider
+            zh_Hans: 模型提供商
+          llm_description: ''
+          max: null
+          min: null
+          name: provider
+          options:
+          - label:
+              en_US: Deepseek
+              ja_JP: Deepseek
+              pt_BR: Deepseek
+              zh_Hans: 深度求索
+            value: deepseek
+          - label:
+              en_US: volcengine v0.0.12
+              ja_JP: volcengine v0.0.12
+              pt_BR: volcengine v0.0.12
+              zh_Hans: 火山方舟 v0.0.12
+            value: volcengine_0_0_12
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: select
+        - auto_generate: null
+          default: null
+          form: llm
+          human_description:
+            en_US: LLM Output Content
+            ja_JP: LLM Output Content
+            pt_BR: LLM Output Content
+            zh_Hans: 上游 LLM 输出内容
+          label:
+            en_US: LLM Output Content
+            ja_JP: LLM Output Content
+            pt_BR: LLM Output Content
+            zh_Hans: 上游 LLM 输出内容
+          llm_description: ''
+          max: null
+          min: null
+          name: content
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: string
+        params:
+          content: ''
+          provider: ''
+        provider_id: yizixuan/text_tools/text_tools
+        provider_name: yizixuan/text_tools/text_tools
+        provider_type: builtin
+        selected: false
+        title: Deepseek 思维链清理
+        tool_configurations:
+          provider:
+            type: constant
+            value: deepseek
+        tool_label: Deepseek 思维链清理
+        tool_name: ds_thought_clean
+        tool_parameters:
+          content:
+            type: mixed
+            value: '{{#1744107385916.text#}}'
+        type: tool
+        version: '2'
+      height: 87
+      id: '1745810084128'
+      position:
+        x: 5860.323594509545
+        y: -3472.2478377625953
+      positionAbsolute:
+        x: 5860.323594509545
+        y: -3472.2478377625953
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "def main(http_response:str) -> object:\n    import json\n    parsed_data\
+          \ = json.loads(http_response)\n    # 提取 Data 列表\n    data_list = parsed_data.get(\"\
+          Data\", []) or []\n    return {\n        \"result\":data_list\n    }"
+        code_language: python3
+        desc: ''
+        outputs:
+          result:
+            children: null
+            type: array[object]
+        selected: false
+        title: 提取Json
+        type: code
+        variables:
+        - value_selector:
+          - '1744011643679'
+          - body
+          variable: http_response
+      height: 51
+      id: '1745812700061'
+      position:
+        x: 955.96403817284
+        y: -3140.1164192278156
+      positionAbsolute:
+        x: 955.96403817284
+        y: -3140.1164192278156
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        context:
+          enabled: true
+          variable_selector:
+          - '1741766110088'
+          - result
+        desc: ''
+        model:
+          completion_params: {}
+          mode: chat
+          name: deepseek-reasoner
+          provider: langgenius/deepseek/deepseek
+        prompt_template:
+        - edition_type: basic
+          id: 5af8cbd7-eef2-4273-9658-c92b1c965b48
+          role: system
+          text: "<guidelines>\n<role>亚马逊客服专员</role>\n<processing_flow>\n负责处理物流未上网问题\n\
+            1. 问题分析阶段\n   - 同步解析：买家订单信息 + 物流信息+ 店铺状态\n   - 时间轴定位：根据{{#1742383367610.curDate#}}计算物流异常时长\n\
+            \   - 物流最后更新减去当前时间就是未上网时间\n   -已确认物流信息有属于未上网记录\n\n2. 解决方案匹配\n   <!-- 优先级1：常规处理流程\
+            \ -->\n   <condition_check>\n   [if 未上网≤5天]\n  告知已联系FedEx/DHL/GLS 去催促进度，让用户等等，\n\
+            \   [elseif 未上网6-10天]\n   若用户没有明确要退款，催包同时让买家等待48小时，如果还没有上网，协商退款或者补寄。用户明确退款，可直接退款，用户明确补寄，需识别当前SKU实际库存，库存≤10时，优先退款。\n\
+            \   [elseif 未上网≥14天]\n   此时符合海外仓索赔条件，根据用户需求和当前该SKU实际库存情况，协商退款或者补寄。用户明确退款，可直接退款，用户明确补寄，需识别当前SKU实际库存，库存≤10时，优先退款。\n\
+            \   </condition_check>\n\n   <!-- 优先级2：历史案例参考 -->\n   允许调用{{#context#}}中的决策模式，禁止使用具体客户数据\n\
+            \n3. 响应生成规范\n   - 语言同步：检测用户输入语种自动适配\n   - 风险管控：\n     ◎ 严格屏蔽：review、discount、free等敏感词\n\
+            \   - 信息验证：必须确认客户选择（补发/退款）后执行\n   - 输出格式：纯文本邮件体，不包含任何标记\n</processing_flow>\n\
+            \n4.输出内容前请检查语种和用户输入的是否一致，不能出现中文\n5.尽量不出现I  像类似的需要用We来代替\n6.指导思想是最高优先级依据，若与其他规则冲突时，以<指导思想>内容为准\n7.优先遵循指导思想再决策，指导思想内容在<指导思想>xml里面\n\n<data_sources>\n\
+            \  ◎ 订单详情：{{#1745391970382.output#}}\n  ◎ 物流轨迹：{{#1745463145529.output#}}\n\
+            \  ◎ 店铺信息： {{#1755143146906.output#}}\n  ◎ 库存状态：无\n  ◎ 上下文存档：{{#1741571480087.Context#}}\n\
+            \  ◎ 指导思想：{{#1741571480087.GuidingPrinciple#}}\n\n</data_sources>\n<指导思想>\n\
+            {{#1741571480087.GuidingPrinciple#}}\n</指导思想>\n</guidelines>"
+        - id: 87744396-774b-4c02-a32e-4b819f14789e
+          role: user
+          text: '{{#sys.query#}}'
+        selected: false
+        title: 未上网
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 87
+      id: '1745834802522'
+      position:
+        x: 3532.108003130002
+        y: -3710.0150285364753
+      positionAbsolute:
+        x: 3532.108003130002
+        y: -3710.0150285364753
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        advanced_settings:
+          group_enabled: false
+          groups:
+          - groupId: ec953a79-c153-4690-8b4b-300cbc8f387c
+            group_name: Group1
+            output_type: string
+            variables:
+            - - '1744107385916'
+              - text
+            - - '1745834802522'
+              - text
+        desc: ''
+        output_type: string
+        selected: false
+        title: 合并数据
+        type: variable-aggregator
+        variables:
+        - - '1741766139856'
+          - text
+        - - '1745834802522'
+          - text
+        - - '1747390227494'
+          - text
+        - - '1747390646527'
+          - text
+        - - '1747390679313'
+          - text
+        - - '1748247505732'
+          - text
+        - - '1761000000006'
+          - text
+      height: 239
+      id: '1745834856515'
+      position:
+        x: 4006.9921719036774
+        y: -3599.672504176402
+      positionAbsolute:
+        x: 4006.9921719036774
+        y: -3599.672504176402
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        context:
+          enabled: true
+          variable_selector:
+          - '1741766110088'
+          - result
+        desc: ''
+        model:
+          completion_params:
+            temperature: 0.7
+          mode: chat
+          name: deepseek-reasoner
+          provider: langgenius/deepseek/deepseek
+        prompt_template:
+        - id: 43e206fc-4dd4-420e-8169-251236b69c4e
+          role: system
+          text: "```xml\n<instructions>\n你是一个亚马逊客服专员，负责处理妥投失败退件，按照以下标准化流程处理客户咨询：\n\
+            以下是完成任务的步骤：\n1.物流轨迹显示地址不完整或者无效 Incorrect address - Apartment/Suite number/street\
+            \ number或Customer not available or business closed或additional delivery\
+            \ information is needed from the recipient\n      回邮思路：告知用户查询路径和退件原因，如用户还想要产品，补寄前确认正确的完整地址（需识别当前SKU实际库存，库存≤10时，优先退款）；如用户明确退款，确认轨迹返回可直接退款\n\
+            \    2.物流轨迹显示买家拒收退件：Refused by recipient\n      回邮思路：告知因拒收退件，请确认是否用户本人操作，首选退款，用户明确还想要产品的情况下，可以提醒用户尽量不让其他人代为拒收（需识别当前SKU实际库存，库存≤10时，优先退款）\n\
+            \    3.物流轨迹未显示具体退件原因\n      回邮思路：告知用户物流轨迹里没显示退件原因，为避免再次出现这个情况，优先退款；用户坚持想要补寄的情况下，核对地址是否正确完整，或者是否有其他的方便的可以收货的地址（需识别当前SKU实际库存，库存≤10时，优先退款）\n\
+            4.当前买家信息内容在<买家订单信息>xml里面.\n5.当前买家物流内容在<买家物流信息>xml里面.\n6.买家店铺信息内容在<店铺信息>xml里面.\n\
+            7.不允许答复结果是中文，按照用户语种\n8.今天的日期是:{{#1742383367610.curDate#}}\n9.凡是删评/改评/邀评/打折/免费等与评论和邮箱相关的表达都不可以出现\n\
+            10.结果会通过邮件发送给买家，不能包含思考步骤,请检查好答复.\n11.需要基于买家卖家上下文信息,来做决策，买家卖家上下文内容在<买家和卖家上下文>xml里面\n\
+            12.任何处理方案需要先和买家确认，然后再做出决策\n13.只能参考其客户处理格式和解决思路，不能直接使用里面的客户数据，内容在<example>xml里面.\n\
+            14.尽量不出现I  像类似的需要用We来代替\n15.指导思想是最高优先级依据，若与其他规则冲突时，以<指导思想>内容为准\n\n注意：综合如上规则根据不同优先级别思考结果,输出不应包含任何XML标签,末尾不需要Customer\
+            \ Support 等信息。\n</instructions>\n<example>\n{{#context#}}\n</example>\n\
+            <买家订单信息>\n{{#1745391970382.output#}}\n</买家订单信息>\n<买家物流信息>\n{{#1745463145529.output#}}\n\
+            </买家物流信息>\n<店铺信息>\n{{#1755143146906.output#}}\n</店铺信息>\n<买家和卖家上下文>\n{{#1741571480087.Context#}}\n\
+            </买家和卖家上下文>\n<指导思想>\n{{#1741571480087.GuidingPrinciple#}}\n</指导思想>\n```"
+        - id: c99d59c5-b7b8-469d-9e67-1a77291692bd
+          role: user
+          text: '{{#sys.query#}}'
+        selected: false
+        title: 妥投失败
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 87
+      id: '1747390227494'
+      position:
+        x: 3532.108003130002
+        y: -3565.049924601778
+      positionAbsolute:
+        x: 3532.108003130002
+        y: -3565.049924601778
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        context:
+          enabled: true
+          variable_selector:
+          - '1741766110088'
+          - result
+        desc: ''
+        model:
+          completion_params:
+            temperature: 0.7
+          mode: chat
+          name: deepseek-reasoner
+          provider: langgenius/deepseek/deepseek
+        prompt_template:
+        - id: d6e2f73c-948e-4b0a-a017-32bc14a8a740
+          role: system
+          text: "```xml\n<instructions>\n你是一个亚马逊客服专员，负责处理客户关于“已签收但未收到包裹”的投诉。请根据以下步骤和判断依据，针对不同情况给出相应的回复思路：\n\
+            \n1. 首先确认物流轨迹是否显示“已妥投”且无破损、退回或被拒收记录。\n2. 检查签收地址与买家地址是否一致：\n   - 如果省州一致但市不一致，且两地距离较近，按正常妥投处理。\n\
+            \   - 如果省州和市都不一致，向用户道歉并解释可能送错地址，协商补寄或退款。\n3. 检查是否有签收人：\n   - 如果签收人姓名与用户相似或相同，提醒用户确认家人或邻居是否代收。\n\
+            \   - 如果签收人姓名完全不同，询问用户是否认识该签收人，并建议查监控或联系承运人。\n4. 如果是公寓地址：\n   - 有妥投图片的，告知用户图片信息并建议尝试取件。\n\
+            \   - 无妥投图片的，建议用户检查公寓包裹室或联系工作人员。\n5. 检查妥投图片：\n   - 图片不确认地址的，让用户确认位置并尝试查找。\n\
+            \   - 图片显示邻居家的，建议用户去邻居家取件。\n   - 图片确认地址的，提醒用户检查家人或邻居是否代收。\n6只能参考其客户处理格式和解决思路，不能直接使用里面的客户数据，内容在<example>xml里面.\n\
+            7. 如果包裹放在包裹点待取，提供包裹点信息和营业时间，让用户自行取件。\n8.当前买家信息内容在<买家订单信息>xml里面.\n9.当前买家物流内容在<买家物流信息>xml里面.\n\
+            10.买家店铺信息内容在<店铺信息>xml里面.\n11.不允许答复结果是中文，按照用户语种\n12.今天的日期是:{{#1742383367610.curDate#}}\n\
+            13.凡是删评/改评/邀评/打折/免费等与评论和邮箱相关的表达都不可以出现\n15.结果会通过邮件发送给买家，不能包含思考步骤,请检查好答复.\n\
+            15.需要基于买家卖家上下文信息,来做决策，买家卖家上下文内容在<买家和卖家上下文>xml里面\n16.任何处理方案需要先和买家确认，然后再做出决策\n\
+            17.不采用markdown格式输出.\n18.尽量不出现I  像类似的需要用We来代替\n19.指导思想是最高优先级依据，若与其他规则冲突时，以<指导思想>内容为准\n注意：综合如上规则根据不同优先级别思考结果,输出不应包含任何XML标签,末尾不需要Customer\
+            \ Support 等信息。\n</instructions>\n<example>\n{{#context#}}\n</example>\n\
+            <买家订单信息>\n{{#1745391970382.output#}}\n</买家订单信息>\n<买家物流信息>\n{{#1745463145529.output#}}\n\
+            </买家物流信息>\n<店铺信息>\n{{#1755143146906.output#}}\n</店铺信息>\n<买家和卖家上下文>\n{{#1741571480087.Context#}}\n\
+            </买家和卖家上下文>\n<指导思想>\n{{#1741571480087.GuidingPrinciple#}}\n</指导思想>\n```"
+        - id: aefb76cf-fa9e-4006-8234-11a477410c82
+          role: user
+          text: '{{#sys.query#}}'
+        selected: false
+        title: 签收未收到
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 87
+      id: '1747390646527'
+      position:
+        x: 3532.108003130002
+        y: -3298.510563185302
+      positionAbsolute:
+        x: 3532.108003130002
+        y: -3298.510563185302
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        context:
+          enabled: true
+          variable_selector:
+          - '1741766110088'
+          - result
+        desc: ''
+        model:
+          completion_params:
+            temperature: 0.7
+          mode: chat
+          name: deepseek-reasoner
+          provider: langgenius/deepseek/deepseek
+        prompt_template:
+        - id: 1aa75e4b-5b1c-4151-8b88-17307cde03c6
+          role: system
+          text: "```xml\n<instructions>\n你是一个亚马逊客服专员，负责处理物流中途破损。请根据以下步骤处理用户咨询：\n以下是完成任务的步骤：\n\
+            1. 首先检查物流轨迹：\n   - 如果同时显示\"damaged\"和\"Returning package to shipper\"\
+            ：\n     a. 询问用户希望退款还是补寄\n     b. 检查该SKU库存：\n        - 库存≤10时，建议退款\n  \
+            \      - 库存>10时，按用户选择处理\n   - 如果仅显示\"damaged\"：\n     a. 告知用户可能是FedEx换标重新派送\n\
+            \     b. 建议等待2-3个工作日\n4.当前买家信息内容在<买家订单信息>xml里面.\n5.当前买家物流内容在<买家物流信息>xml里面.\n\
+            6.买家店铺信息内容在<店铺信息>xml里面.\n7.不允许答复结果是中文，按照用户语种\n8.今天的日期是:{{#1742383367610.curDate#}}\n\
+            9.凡是删评/改评/邀评/打折/免费等与评论和邮箱相关的表达都不可以出现\n10.结果会通过邮件发送给买家，不能包含思考步骤,请检查好答复.\n\
+            11.需要基于买家卖家上下文信息,来做决策，买家卖家上下文内容在<买家和卖家上下文>xml里面\n12.任何处理方案需要先和买家确认，然后再做出决策\n\
+            13.只能参考其客户处理格式和解决思路，不能直接使用里面的客户数据，内容在<example>xml里面.\n14.尽量不出现I  像类似的需要用We来代替\n15.指导思想是最高优先级依据，若与其他规则冲突时，以<指导思想>内容为准\n\
+            \n注意：综合如上规则根据不同优先级别思考结果,输出不应包含任何XML标签,末尾不需要Customer Support 等信息。\n</instructions>\n\
+            <example>\n{{#context#}}\n</example>\n<买家订单信息>\n{{#1745391970382.output#}}\n\
+            </买家订单信息>\n<买家物流信息>\n{{#1745463145529.output#}}\n</买家物流信息>\n<店铺信息>\n{{#1755143146906.output#}}\n\
+            </店铺信息>\n<买家和卖家上下文>\n{{#1741571480087.Context#}}\n</买家和卖家上下文>\n<指导思想>\n{{#1741571480087.GuidingPrinciple#}}\n</指导思想>\n```"
+        - id: f47df0ab-b1b7-477e-8637-ab3828acab02
+          role: user
+          text: '{{#sys.query#}}'
+        selected: false
+        title: 中途破损
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 87
+      id: '1747390679313'
+      position:
+        x: 3532.108003130002
+        y: -3424.4588015590048
+      positionAbsolute:
+        x: 3532.108003130002
+        y: -3424.4588015590048
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        context:
+          enabled: true
+          variable_selector:
+          - '1741766110088'
+          - result
+        desc: ''
+        model:
+          completion_params:
+            temperature: 0.7
+          mode: chat
+          name: deepseek-reasoner
+          provider: langgenius/deepseek/deepseek
+        prompt_template:
+        - id: 3261f1b3-e123-4586-a93c-17982dcecc06
+          role: system
+          text: "```xml\n<instructions>\n你是一个亚马逊客服专员，负责处理催促发货。请根据以下步骤处理用户咨询：\n以下是完成任务的步骤：\n\
+            你是一个亚马逊客服专员，负责处理客户关于订单发货状态的咨询。请根据以下步骤判断并回复客户：\n\n1. 首先确认订单是否已发货：\n   -\
+            \ 如果未发货，查看后台预计发货日期，告知客户预计发货时间及不同地区的标准配送时长（美国3-5工作日，德国2-5工作日，意西法4-7工作日）。\n\
+            \   - 如果已发货，进入下一步判断。\n\n2. 检查物流更新状态：\n   - 如果物流无更新但未超预计送达日期，说明跨州运输无追踪信息属正常现象，安抚客户等待。\n\
+            \   - 如果物流正常更新且未超期，比对物流官网与后台预计时间，优先显示官网时间并说明可能不准确。\n   - 如果物流超期3天内，告知已联系承运商催派件。\n\
+            \   - 如果物流超期5天以上且近期有更新，提供5-10USD赔偿选项。\n   - 如果物流停滞超1周，提供5-20USD赔偿或直接退款选项。\n\
+            \   - 如果揽收后超期10天，优先退款或根据库存补寄。\n\n3. 回复时需包含：\n   - 明确的问题归类（如\"您的订单属于已发货但物流停滞超1周的情况\"\
+            ）\n   - 具体解决方案（赔偿金额/退款/补寄等）\n   - 礼貌的请求等待用语（如\"烦请耐心等待\"）\n   - 必要时的操作指引（如退款后拒收提醒）\n\
+            4.当前买家信息内容在<买家订单信息>xml里面.\n5.当前买家物流内容在<买家物流信息>xml里面.\n6.买家店铺信息内容在<店铺信息>xml里面.\n\
+            7.不允许答复结果是中文，按照用户语种\n8.今天的日期是:{{#1742383367610.curDate#}}\n9.凡是删评/改评/邀评/打折/免费等与评论和邮箱相关的表达都不可以出现\n\
+            10.结果会通过邮件发送给买家，不能包含思考步骤,请检查好答复.\n11.需要基于买家卖家上下文信息,来做决策，买家卖家上下文内容在<买家和卖家上下文>xml里面\n\
+            12.任何处理方案需要先和买家确认，然后再做出决策\n13.只能参考其客户处理格式和解决思路，不能直接使用里面的客户数据，内容在<example>xml里面.\n\
+            14.不采用markdown格式输出.\n15.尽量不出现I  像类似的需要用We来代替\n16.指导思想是最高优先级依据，若与其他规则冲突时，以<指导思想>内容为准\n注意：综合如上规则根据不同优先级别思考结果,输出不应包含任何XML标签,末尾不需要Customer\
+            \ Support 等信息。\n</instructions>\n<example>\n{{#context#}}\n</example>\n\
+            <买家订单信息>\n{{#1745391970382.output#}}\n</买家订单信息>\n<买家物流信息>\n{{#1745463145529.output#}}\n\
+            </买家物流信息>\n<店铺信息>\n{{#1755143146906.output#}}\n</店铺信息>\n<买家和卖家上下文>\n{{#1741571480087.Context#}}\n\
+            </买家和卖家上下文>\n<指导思想>\n{{#1741571480087.GuidingPrinciple#}}\n</指导思想>\n```"
+        - id: ff5d3e23-d3ba-4944-88c5-bc0aefe2abf5
+          role: user
+          text: '{{#sys.query#}}'
+        selected: false
+        title: 催促发货
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 87
+      id: '1748247505732'
+      position:
+        x: 3532.108003130002
+        y: -3167.5471470698703
+      positionAbsolute:
+        x: 3532.108003130002
+        y: -3167.5471470698703
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        is_team_authorization: true
+        output_schema: null
+        paramSchemas:
+        - auto_generate: null
+          default: null
+          form: llm
+          human_description:
+            en_US: Input text
+            ja_JP: Input text
+            pt_BR: Input text
+            zh_Hans: 输入文本
+          label:
+            en_US: Input text
+            ja_JP: Input text
+            pt_BR: Input text
+            zh_Hans: 输入文本
+          llm_description: ''
+          max: null
+          min: null
+          name: input_text
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: string
+        - auto_generate: null
+          default: null
+          form: llm
+          human_description:
+            en_US: Keywords to be searched. Regular expressions can also be used (Enable
+              Regular Pattern).
+            ja_JP: Keywords to be searched. Regular expressions can also be used (Enable
+              Regular Pattern).
+            pt_BR: Keywords to be searched. Regular expressions can also be used (Enable
+              Regular Pattern).
+            zh_Hans: 要查找的关键字，也可以使用正则表达式（开启正则模式）。
+          label:
+            en_US: Search content
+            ja_JP: Search content
+            pt_BR: Search content
+            zh_Hans: 查找内容
+          llm_description: ''
+          max: null
+          min: null
+          name: search_text
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: string
+        - auto_generate: null
+          default: null
+          form: llm
+          human_description:
+            en_US: The target text for replacing the matched keywords can also reference
+              regular expression capture groups (Enable Regular Pattern).
+            ja_JP: The target text for replacing the matched keywords can also reference
+              regular expression capture groups (Enable Regular Pattern).
+            pt_BR: The target text for replacing the matched keywords can also reference
+              regular expression capture groups (Enable Regular Pattern).
+            zh_Hans: 匹配的关键词替换的目标文本，也可以引用正则表达式捕获组。
+          label:
+            en_US: Replace text
+            ja_JP: Replace text
+            pt_BR: Replace text
+            zh_Hans: 替换文本
+          llm_description: ''
+          max: null
+          min: null
+          name: replace_text
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: string
+        - auto_generate: null
+          default: 0
+          form: form
+          human_description:
+            en_US: Use regular expressions for searching.
+            ja_JP: Use regular expressions for searching.
+            pt_BR: Use regular expressions for searching.
+            zh_Hans: 使用正则表达式进行搜索。
+          label:
+            en_US: Regular Pattern
+            ja_JP: Regular Pattern
+            pt_BR: Regular Pattern
+            zh_Hans: 正则模式
+          llm_description: ''
+          max: null
+          min: null
+          name: use_regex
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: boolean
+        - auto_generate: null
+          default: 0
+          form: form
+          human_description:
+            en_US: When using regular expressions, ignore case
+            ja_JP: When using regular expressions, ignore case
+            pt_BR: When using regular expressions, ignore case
+            zh_Hans: 使用正则表达式时，忽略大小写
+          label:
+            en_US: RE.IGNORECASE
+            ja_JP: RE.IGNORECASE
+            pt_BR: RE.IGNORECASE
+            zh_Hans: RE.IGNORECASE
+          llm_description: ''
+          max: null
+          min: null
+          name: regex_ignorecase
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: boolean
+        - auto_generate: null
+          default: 0
+          form: form
+          human_description:
+            en_US: When using regular expressions, make ^, $ take effect for each
+              line
+            ja_JP: When using regular expressions, make ^, $ take effect for each
+              line
+            pt_BR: When using regular expressions, make ^, $ take effect for each
+              line
+            zh_Hans: 使用正则表达式时，让 ^, $ 每行生效
+          label:
+            en_US: RE.MULTILINE
+            ja_JP: RE.MULTILINE
+            pt_BR: RE.MULTILINE
+            zh_Hans: RE.MULTILINE
+          llm_description: ''
+          max: null
+          min: null
+          name: regex_multiline
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: boolean
+        - auto_generate: null
+          default: 0
+          form: form
+          human_description:
+            en_US: When using regular expressions, make . match all characters including
+              line breaks.
+            ja_JP: When using regular expressions, make . match all characters including
+              line breaks.
+            pt_BR: When using regular expressions, make . match all characters including
+              line breaks.
+            zh_Hans: 使用正则表达式时，让 . 匹配包括换行在内的所有字符
+          label:
+            en_US: RE.DOTALL
+            ja_JP: RE.DOTALL
+            pt_BR: RE.DOTALL
+            zh_Hans: RE.DOTALL
+          llm_description: ''
+          max: null
+          min: null
+          name: regex_dotall
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: boolean
+        - auto_generate: null
+          default: 0
+          form: form
+          human_description:
+            en_US: When using regular expressions, make \w, \d, \s match only ASCII,
+              not Unicode.
+            ja_JP: When using regular expressions, make \w, \d, \s match only ASCII,
+              not Unicode.
+            pt_BR: When using regular expressions, make \w, \d, \s match only ASCII,
+              not Unicode.
+            zh_Hans: 使用正则表达式时，让 \w, \d, \s 只匹配 ASCII，而非 Unicode
+          label:
+            en_US: RE.ASCII
+            ja_JP: RE.ASCII
+            pt_BR: RE.ASCII
+            zh_Hans: RE.ASCII
+          llm_description: ''
+          max: null
+          min: null
+          name: regex_ascii
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: boolean
+        params:
+          input_text: ''
+          regex_ascii: ''
+          regex_dotall: ''
+          regex_ignorecase: ''
+          regex_multiline: ''
+          replace_text: ''
+          search_text: ''
+          use_regex: ''
+        provider_id: yizixuan/text_tools/text_tools
+        provider_name: yizixuan/text_tools/text_tools
+        provider_type: builtin
+        selected: false
+        title: 文本替换
+        tool_configurations:
+          regex_ascii:
+            type: constant
+            value: 0
+          regex_dotall:
+            type: constant
+            value: 0
+          regex_ignorecase:
+            type: constant
+            value: 0
+          regex_multiline:
+            type: constant
+            value: 0
+          use_regex:
+            type: constant
+            value: 1
+        tool_description: 将字符串的所有匹配项替换为目标字符串
+        tool_label: 文本替换
+        tool_name: text_replace
+        tool_parameters:
+          input_text:
+            type: mixed
+            value: '{{#1745810084128.answer#}}'
+          replace_text:
+            type: mixed
+            value: ' '
+          search_text:
+            type: mixed
+            value: (\*\*|Best regards,|\[Your Brand Name\] Customer Support|\{\{C2\}\}|Best regards|Seller Support Team|\[Your
+              Seller Name\]|\[Your Brand Name\] Team)+
+        type: tool
+        version: '2'
+      height: 191
+      id: '1748576058951'
+      position:
+        x: 6185.431855351745
+        y: -3461.2779991765215
+      positionAbsolute:
+        x: 6185.431855351745
+        y: -3461.2779991765215
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        authorization:
+          config:
+            api_key: '{{#env.token#}}'
+            type: bearer
+          type: api-key
+        body:
+          data:
+          - id: key-value-311
+            key: ''
+            type: text
+            value: "{\n  \"content\": \"{{#1748592157889.text#}}\",\n  \"groupKey\"\
+              : \"Customer\"\n}"
+          type: json
+        default_value:
+        - key: body
+          type: string
+          value: '[]'
+        - key: status_code
+          type: number
+          value: 0
+        - key: headers
+          type: object
+          value: '{}'
+        desc: ''
+        error_strategy: default-value
+        headers: ''
+        method: post
+        params: ''
+        retry_config:
+          max_retries: 3
+          retry_enabled: true
+          retry_interval: 100
+        selected: false
+        ssl_verify: true
+        timeout:
+          max_connect_timeout: 0
+          max_read_timeout: 0
+          max_write_timeout: 0
+        title: 识别违禁词
+        type: http-request
+        url: http://10.1.1.40:8138/customer/sensitiveword
+        variables: []
+      height: 173
+      id: '1748579189677'
+      position:
+        x: 4865.159007605472
+        y: -3504.284039943107
+      positionAbsolute:
+        x: 4865.159007605472
+        y: -3504.284039943107
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        default_value:
+        - key: text
+          type: string
+          value: ''
+        - key: json
+          type: array[object]
+          value: '[]'
+        desc: ''
+        error_strategy: default-value
+        is_team_authorization: true
+        output_schema: null
+        paramSchemas:
+        - auto_generate: null
+          default: null
+          form: llm
+          human_description:
+            en_US: JSON data
+            ja_JP: JSON data
+            pt_BR: JSON数据
+            zh_Hans: JSON数据
+          label:
+            en_US: JSON data
+            ja_JP: JSON data
+            pt_BR: JSON data
+            zh_Hans: JSON数据
+          llm_description: JSON data to be processed
+          max: null
+          min: null
+          name: content
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: string
+        - auto_generate: null
+          default: null
+          form: llm
+          human_description:
+            en_US: JSON fields to be parsed
+            ja_JP: JSON fields to be parsed
+            pt_BR: JSON fields to be parsed
+            zh_Hans: 需要解析的 JSON 字段
+          label:
+            en_US: JSON filter
+            ja_JP: JSON filter
+            pt_BR: JSON filter
+            zh_Hans: JSON解析对象
+          llm_description: JSON fields to be parsed
+          max: null
+          min: null
+          name: json_filter
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: string
+        - auto_generate: null
+          default: 1
+          form: form
+          human_description:
+            en_US: Ensure the JSON output is ASCII encoded
+            ja_JP: Ensure the JSON output is ASCII encoded
+            pt_BR: Ensure the JSON output is ASCII encoded
+            zh_Hans: 确保输出的 JSON 是 ASCII 编码
+          label:
+            en_US: Ensure ASCII
+            ja_JP: Ensure ASCII
+            pt_BR: Ensure ASCII
+            zh_Hans: 确保 ASCII
+          llm_description: ''
+          max: null
+          min: null
+          name: ensure_ascii
+          options: []
+          placeholder: null
+          precision: null
+          required: false
+          scope: null
+          template: null
+          type: boolean
+        params:
+          content: ''
+          ensure_ascii: ''
+          json_filter: ''
+        provider_id: langgenius/json_process/json_process
+        provider_name: langgenius/json_process/json_process
+        provider_type: builtin
+        selected: false
+        title: 提取违禁词
+        tool_configurations:
+          ensure_ascii:
+            type: constant
+            value: 1
+        tool_description: 一个解析JSON对象的工具
+        tool_label: JSON 解析
+        tool_name: parse
+        tool_parameters:
+          content:
+            type: mixed
+            value: '{{#1748579189677.body#}}'
+          json_filter:
+            type: mixed
+            value: data
+        type: tool
+        version: '2'
+      height: 123
+      id: '1748585677300'
+      position:
+        x: 5202.231942137963
+        y: -3491.474311891344
+      positionAbsolute:
+        x: 5202.231942137963
+        y: -3491.474311891344
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        is_team_authorization: true
+        output_schema:
+          properties:
+            answer:
+              description: Clean Answer
+              type: string
+            reason:
+              description: Thought Reason
+              type: string
+          type: object
+        paramSchemas:
+        - auto_generate: null
+          default: deepseek
+          form: form
+          human_description:
+            en_US: The model provider output by the upstream LLM. The plugin will
+              automatically use different cleaning methods according to the provider.
+            ja_JP: The model provider output by the upstream LLM. The plugin will
+              automatically use different cleaning methods according to the provider.
+            pt_BR: The model provider output by the upstream LLM. The plugin will
+              automatically use different cleaning methods according to the provider.
+            zh_Hans: 上游 LLM 输出的模型提供商，插件会自动根据提供商使用不同的清理方法。
+          label:
+            en_US: LLM Provider
+            ja_JP: LLM Provider
+            pt_BR: LLM Provider
+            zh_Hans: 模型提供商
+          llm_description: ''
+          max: null
+          min: null
+          name: provider
+          options:
+          - label:
+              en_US: Deepseek
+              ja_JP: Deepseek
+              pt_BR: Deepseek
+              zh_Hans: 深度求索
+            value: deepseek
+          - label:
+              en_US: volcengine v0.0.12
+              ja_JP: volcengine v0.0.12
+              pt_BR: volcengine v0.0.12
+              zh_Hans: 火山方舟 v0.0.12
+            value: volcengine_0_0_12
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: select
+        - auto_generate: null
+          default: null
+          form: llm
+          human_description:
+            en_US: LLM Output Content
+            ja_JP: LLM Output Content
+            pt_BR: LLM Output Content
+            zh_Hans: 上游 LLM 输出内容
+          label:
+            en_US: LLM Output Content
+            ja_JP: LLM Output Content
+            pt_BR: LLM Output Content
+            zh_Hans: 上游 LLM 输出内容
+          llm_description: ''
+          max: null
+          min: null
+          name: content
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: string
+        params:
+          content: ''
+          provider: ''
+        provider_id: yizixuan/text_tools/text_tools
+        provider_name: yizixuan/text_tools/text_tools
+        provider_type: builtin
+        selected: false
+        title: 思维链清理
+        tool_configurations:
+          provider:
+            type: constant
+            value: deepseek
+        tool_description: Deepseek 思维链清理。
+        tool_label: Deepseek 思维链清理
+        tool_name: ds_thought_clean
+        tool_parameters:
+          content:
+            type: mixed
+            value: '{{#1745834856515.output#}}'
+        type: tool
+        version: '2'
+      height: 87
+      id: '1748588765674'
+      position:
+        x: 4291.619885957546
+        y: -3472.2478377625953
+      positionAbsolute:
+        x: 4291.619885957546
+        y: -3472.2478377625953
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        default_value:
+        - key: text
+          type: string
+          value: ''
+        - key: json
+          type: array[object]
+          value: '[]'
+        desc: ''
+        error_strategy: default-value
+        is_team_authorization: true
+        output_schema: null
+        paramSchemas:
+        - auto_generate: null
+          default: null
+          form: llm
+          human_description:
+            en_US: Input text
+            ja_JP: Input text
+            pt_BR: Input text
+            zh_Hans: 输入文本
+          label:
+            en_US: Input text
+            ja_JP: Input text
+            pt_BR: Input text
+            zh_Hans: 输入文本
+          llm_description: ''
+          max: null
+          min: null
+          name: input_text
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: string
+        - auto_generate: null
+          default: null
+          form: llm
+          human_description:
+            en_US: Keywords to be searched. Regular expressions can also be used (Enable
+              Regular Pattern).
+            ja_JP: Keywords to be searched. Regular expressions can also be used (Enable
+              Regular Pattern).
+            pt_BR: Keywords to be searched. Regular expressions can also be used (Enable
+              Regular Pattern).
+            zh_Hans: 要查找的关键字，也可以使用正则表达式（开启正则模式）。
+          label:
+            en_US: Search content
+            ja_JP: Search content
+            pt_BR: Search content
+            zh_Hans: 查找内容
+          llm_description: ''
+          max: null
+          min: null
+          name: search_text
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: string
+        - auto_generate: null
+          default: null
+          form: llm
+          human_description:
+            en_US: The target text for replacing the matched keywords can also reference
+              regular expression capture groups (Enable Regular Pattern).
+            ja_JP: The target text for replacing the matched keywords can also reference
+              regular expression capture groups (Enable Regular Pattern).
+            pt_BR: The target text for replacing the matched keywords can also reference
+              regular expression capture groups (Enable Regular Pattern).
+            zh_Hans: 匹配的关键词替换的目标文本，也可以引用正则表达式捕获组。
+          label:
+            en_US: Replace text
+            ja_JP: Replace text
+            pt_BR: Replace text
+            zh_Hans: 替换文本
+          llm_description: ''
+          max: null
+          min: null
+          name: replace_text
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: string
+        - auto_generate: null
+          default: 0
+          form: form
+          human_description:
+            en_US: Use regular expressions for searching.
+            ja_JP: Use regular expressions for searching.
+            pt_BR: Use regular expressions for searching.
+            zh_Hans: 使用正则表达式进行搜索。
+          label:
+            en_US: Regular Pattern
+            ja_JP: Regular Pattern
+            pt_BR: Regular Pattern
+            zh_Hans: 正则模式
+          llm_description: ''
+          max: null
+          min: null
+          name: use_regex
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: boolean
+        - auto_generate: null
+          default: 0
+          form: form
+          human_description:
+            en_US: When using regular expressions, ignore case
+            ja_JP: When using regular expressions, ignore case
+            pt_BR: When using regular expressions, ignore case
+            zh_Hans: 使用正则表达式时，忽略大小写
+          label:
+            en_US: RE.IGNORECASE
+            ja_JP: RE.IGNORECASE
+            pt_BR: RE.IGNORECASE
+            zh_Hans: RE.IGNORECASE
+          llm_description: ''
+          max: null
+          min: null
+          name: regex_ignorecase
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: boolean
+        - auto_generate: null
+          default: 0
+          form: form
+          human_description:
+            en_US: When using regular expressions, make ^, $ take effect for each
+              line
+            ja_JP: When using regular expressions, make ^, $ take effect for each
+              line
+            pt_BR: When using regular expressions, make ^, $ take effect for each
+              line
+            zh_Hans: 使用正则表达式时，让 ^, $ 每行生效
+          label:
+            en_US: RE.MULTILINE
+            ja_JP: RE.MULTILINE
+            pt_BR: RE.MULTILINE
+            zh_Hans: RE.MULTILINE
+          llm_description: ''
+          max: null
+          min: null
+          name: regex_multiline
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: boolean
+        - auto_generate: null
+          default: 0
+          form: form
+          human_description:
+            en_US: When using regular expressions, make . match all characters including
+              line breaks.
+            ja_JP: When using regular expressions, make . match all characters including
+              line breaks.
+            pt_BR: When using regular expressions, make . match all characters including
+              line breaks.
+            zh_Hans: 使用正则表达式时，让 . 匹配包括换行在内的所有字符
+          label:
+            en_US: RE.DOTALL
+            ja_JP: RE.DOTALL
+            pt_BR: RE.DOTALL
+            zh_Hans: RE.DOTALL
+          llm_description: ''
+          max: null
+          min: null
+          name: regex_dotall
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: boolean
+        - auto_generate: null
+          default: 0
+          form: form
+          human_description:
+            en_US: When using regular expressions, make \w, \d, \s match only ASCII,
+              not Unicode.
+            ja_JP: When using regular expressions, make \w, \d, \s match only ASCII,
+              not Unicode.
+            pt_BR: When using regular expressions, make \w, \d, \s match only ASCII,
+              not Unicode.
+            zh_Hans: 使用正则表达式时，让 \w, \d, \s 只匹配 ASCII，而非 Unicode
+          label:
+            en_US: RE.ASCII
+            ja_JP: RE.ASCII
+            pt_BR: RE.ASCII
+            zh_Hans: RE.ASCII
+          llm_description: ''
+          max: null
+          min: null
+          name: regex_ascii
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: boolean
+        params:
+          input_text: ''
+          regex_ascii: ''
+          regex_dotall: ''
+          regex_ignorecase: ''
+          regex_multiline: ''
+          replace_text: ''
+          search_text: ''
+          use_regex: ''
+        provider_id: yizixuan/text_tools/text_tools
+        provider_name: yizixuan/text_tools/text_tools
+        provider_type: builtin
+        selected: false
+        title: 去除双引号
+        tool_configurations:
+          regex_ascii:
+            type: constant
+            value: 0
+          regex_dotall:
+            type: constant
+            value: 0
+          regex_ignorecase:
+            type: constant
+            value: 0
+          regex_multiline:
+            type: constant
+            value: 0
+          use_regex:
+            type: constant
+            value: 0
+        tool_description: 将字符串的所有匹配项替换为目标字符串
+        tool_label: 文本替换
+        tool_name: text_replace
+        tool_parameters:
+          input_text:
+            type: mixed
+            value: '{{#1748588765674.answer#}}'
+          replace_text:
+            type: mixed
+            value: ' '
+          search_text:
+            type: mixed
+            value: '"'
+        type: tool
+        version: '2'
+      height: 227
+      id: '1748592157889'
+      position:
+        x: 4566.073978005509
+        y: -3491.474311891344
+      positionAbsolute:
+        x: 4566.073978005509
+        y: -3491.474311891344
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        code: "\ndef main(arg1: str) -> dict:\n    return {\n        \"result\": arg1.replace(\"\
+          ??\",\"\").replace(\"##\",\"\"),\n    }\n"
+        code_language: python3
+        desc: ''
+        outputs:
+          result:
+            children: null
+            type: string
+        selected: false
+        title: 去除特殊符号
+        type: code
+        variables:
+        - value_selector:
+          - '1748576058951'
+          - text
+          variable: arg1
+      height: 51
+      id: '1749439667058'
+      position:
+        x: 6597.716357566046
+        y: -3396.9508912966876
+      positionAbsolute:
+        x: 6597.716357566046
+        y: -3396.9508912966876
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: ''
+        model:
+          completion_params: {}
+          mode: chat
+          name: gpt-4o
+          provider: langgenius/azure_openai/azure_openai
+        prompt_template:
+        - id: 6de3e0c8-865b-40b9-94cf-35ca1074ee07
+          role: system
+          text: '<Role>
+
+            你是一个语言工具，具有检测文本语种和生成新语种的能力
+
+            </Role>
+
+            <Steps>
+
+            "Step 1": 检查用户输入的文本是否包含英文
+
+            "Step 2": 如果包含英文则直接输出
+
+            "Step 3": 如果用户输入不包含英文则将用户输入的文本翻译成英文放在原有文本后面并以==========分隔.
+
+            "Step 4": 返回结果不能包含额外的说明.
+
+            </Steps>
+
+            </Task>'
+        - id: abfd373b-96c9-4840-91e8-409dde4988f7
+          role: user
+          text: '{{#1749439667058.result#}}'
+        selected: false
+        title: 生成多种语种
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 87
+      id: '1749450143113'
+      position:
+        x: 7017.180986485737
+        y: -3376.274320906741
+      positionAbsolute:
+        x: 7017.180986485737
+        y: -3376.274320906741
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        answer: ' '
+        desc: ''
+        selected: false
+        title: 直接回复 6
+        type: answer
+        variables: []
+      height: 83
+      id: '1755142404435'
+      position:
+        x: 1366.6087542934404
+        y: -2756.0853940223064
+      positionAbsolute:
+        x: 1366.6087542934404
+        y: -2756.0853940223064
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        selected: false
+        template: '{系统提示：当前无店铺信息}'
+        title: 模板转换 4
+        type: template-transform
+        variables:
+        - value_selector:
+          - '17454776055700'
+          - error_message
+          value_type: string
+          variable: arg1
+      height: 51
+      id: '1755143051099'
+      position:
+        x: 1719.7206848600401
+        y: -2756.0853940223064
+      positionAbsolute:
+        x: 1719.7206848600401
+        y: -2756.0853940223064
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        desc: ''
+        output_type: string
+        selected: false
+        title: 店铺模板
+        type: variable-aggregator
+        variables:
+        - - '1755143051099'
+          - output
+        - - '1745477659596'
+          - output
+      height: 134
+      id: '1755143146906'
+      position:
+        x: 2034.1513749613591
+        y: -3044.2689464299347
+      positionAbsolute:
+        x: 2034.1513749613591
+        y: -3044.2689464299347
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        cases:
+        - case_id: '2'
+          conditions:
+          - comparison_operator: is
+            id: 2d4f87bb-6e91-4ce7-9de2-e0d122fcd001
+            value: 质量问题
+            varType: string
+            variable_selector:
+            - '1741571496543'
+            - class_name
+          id: '2'
+          logical_operator: and
+        - case_id: '1741572213488'
+          conditions:
+          - comparison_operator: is
+            id: f07f8d30-2431-4c93-915f-8a4e84c8a8a1
+            value: 其他问题
+            varType: string
+            variable_selector:
+            - '1741571496543'
+            - class_name
+          id: '1741572213488'
+          logical_operator: and
+        - case_id: '1741572219840'
+          conditions:
+          - comparison_operator: is
+            id: 3650d7db-5617-4ce6-a4df-8ad16fc6879e
+            value: 无关问题
+            varType: string
+            variable_selector:
+            - '1741571496543'
+            - class_name
+          id: '1741572219840'
+          logical_operator: and
+        desc: 非物流一级分类直通通用
+        selected: false
+        title: 非物流直通通用
+        type: if-else
+      height: 221
+      id: '1760000000001'
+      position:
+        x: 973.3750494387625
+        y: -3236.536448794243
+      positionAbsolute:
+        x: 973.3750494387625
+        y: -3236.536448794243
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        cases:
+        - case_id: '2'
+          conditions:
+          - comparison_operator: is
+            id: b3328d6c-2282-4949-84de-ae8955dd11c2
+            value: 质量问题
+            varType: string
+            variable_selector:
+            - '1741571496543'
+            - class_name
+          id: '2'
+          logical_operator: and
+        - case_id: '1741572213488'
+          conditions:
+          - comparison_operator: is
+            id: 1ea8ca4e-cc7e-4998-8d8d-cc87a8bd4f4c
+            value: 其他问题
+            varType: string
+            variable_selector:
+            - '1741571496543'
+            - class_name
+          id: '1741572213488'
+          logical_operator: and
+        - case_id: '1741572219840'
+          conditions:
+          - comparison_operator: is
+            id: 4a781d83-0f37-43e4-8aa5-bc7f6fdb7384
+            value: 无关问题
+            varType: string
+            variable_selector:
+            - '1741571496543'
+            - class_name
+          id: '1741572219840'
+          logical_operator: and
+        desc: 非物流知识库放行
+        selected: false
+        title: 非物流知识库放行
+        type: if-else
+      height: 221
+      id: '1760000000002'
+      position:
+        x: 1719.7206848600401
+        y: -3236.0853940223064
+      positionAbsolute:
+        x: 1719.7206848600401
+        y: -3236.0853940223064
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        authorization:
+          config:
+            api_key: '{{#env.token#}}'
+            type: bearer
+          type: api-key
+        body:
+          data:
+          - id: key-value-nonlog-order
+            key: ''
+            type: text
+            value: '{"ebayOrderId":"{{#1741571480087.OrderId#}}","AccountId":{{#1741571480087.AccountId#}}}'
+          type: json
+        desc: 非物流独立查询订单
+        error_strategy: fail-branch
+        headers: ''
+        method: post
+        params: ''
+        retry_config:
+          max_retries: '3'
+          retry_enabled: true
+          retry_interval: 100
+        selected: false
+        ssl_verify: true
+        timeout:
+          connect: 10
+          max_connect_timeout: 0
+          max_read_timeout: 0
+          max_write_timeout: 0
+          read: 60
+          write: 60
+        title: 查询订单信息_非物流
+        type: http-request
+        url: http://10.1.1.194:9002/AukeysOrder/OrderInfo/GetEmailOrderDetail
+        variables: []
+      height: 189
+      id: '1761000000001'
+      position:
+        x: 1300.0
+        y: -3490.0
+      positionAbsolute:
+        x: 1300.0
+        y: -3490.0
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        authorization:
+          config:
+            api_key: '{{#env.token#}}'
+            type: bearer
+          type: api-key
+        body:
+          data: []
+          type: none
+        desc: 非物流独立查询店铺ODR
+        error_strategy: fail-branch
+        headers: ''
+        method: get
+        params: 'accountId:{{#1741571480087.AccountId#}}
+
+          siteId:{{#1741571480087.SiteId#}}
+
+          endDate:{{#1742383367610.curDate#}}
+
+          isLatest:true'
+        retry_config:
+          max_retries: 3
+          retry_enabled: true
+          retry_interval: 100
+        selected: false
+        ssl_verify: true
+        timeout:
+          connect: 10
+          max_connect_timeout: 0
+          max_read_timeout: 0
+          max_write_timeout: 0
+          read: 60
+          write: 60
+        title: 查询店铺ODR_非物流
+        type: http-request
+        url: http://10.1.1.181:8017/api/AmazonSellerPerformanceV2Service/detail
+        variables: []
+      height: 189
+      id: '1761000000002'
+      position:
+        x: 1300.0
+        y: -3270.0
+      positionAbsolute:
+        x: 1300.0
+        y: -3270.0
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        dataset_ids:
+        - TGp3xrqfkscGdNVPds0ILnQja0OpcIwtjlMWdUT5vGtjNdlggfxCO6dAAmssYEI5
+        desc: 非物流独立历史知识库
+        multiple_retrieval_config:
+          reranking_enable: true
+          reranking_mode: reranking_model
+          reranking_model:
+            model: netease-youdao/bce-reranker-base_v1
+            provider: langgenius/siliconflow/siliconflow
+          top_k: 4
+        query_variable_selector:
+        - '1741571480087'
+        - sys.query
+        retrieval_mode: multiple
+        selected: false
+        title: 客服邮件历史知识库_非物流
+        type: knowledge-retrieval
+      height: 89
+      id: '1761000000003'
+      position:
+        x: 1300.0
+        y: -3050.0
+      positionAbsolute:
+        x: 1300.0
+        y: -3050.0
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        dataset_ids:
+        - W6gxEWxwGV1aMT3QaRAG6u8Wsq812aAuMk06PJAbH5djy9NiPL4VupM0fldjB9f4
+        desc: 非物流独立规则知识库
+        multiple_retrieval_config:
+          reranking_enable: false
+          reranking_mode: reranking_model
+          reranking_model:
+            model: netease-youdao/bce-reranker-base_v1
+            provider: langgenius/siliconflow/siliconflow
+          top_k: 4
+        query_variable_selector:
+        - '1741571480087'
+        - sys.query
+        retrieval_mode: multiple
+        selected: false
+        title: 客服邮件规则库_非物流
+        type: knowledge-retrieval
+      height: 89
+      id: '1761000000004'
+      position:
+        x: 1300.0
+        y: -2920.0
+      positionAbsolute:
+        x: 1300.0
+        y: -2920.0
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        context:
+          enabled: true
+          variable_selector:
+          - '1761000000003'
+          - result
+        desc: 非物流独立通用处理
+        model:
+          completion_params:
+            temperature: 0.4
+          mode: chat
+          name: gpt-4o
+          provider: langgenius/azure_openai/azure_openai
+        prompt_template:
+        - role: system
+          text: "```xml\n<instructions>\n你是一个亚马逊卖家对话客服，负责帮助买家解决问题。\n指导思想是最高优先级依据，若与其他规则冲突时，以<指导思想>内容为准。\n请基于转换后的订单信息和店铺信息生成可直接发送的回复内容。\n不允许输出思考过程。\n</instructions>\n<example>\n{{#context#}}\n</example>\n<客服邮件规则库>\n{{#1761000000004.result#}}\n</客服邮件规则库>\n<买家订单信息>\n{{#1761000000009.output#}}\n</买家订单信息>\n<店铺信息>\n{{#1761000000015.output#}}\n</店铺信息>\n<店铺ODR解析>\n{{#1761000000010.shopInfo#}}\n</店铺ODR解析>\n<买家和卖家上下文>\n{{#1741571480087.Context#}}\n</买家和卖家上下文>\n<指导思想>\n{{#1741571480087.GuidingPrinciple#}}\n</指导思想>\n```"
+        - role: user
+          text: '{{#sys.query#}}'
+        selected: false
+        title: 通用处理_非物流
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 87
+      id: '1761000000006'
+      position:
+        x: 2120.0
+        y: -3090.0
+      positionAbsolute:
+        x: 2120.0
+        y: -3090.0
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    viewport:
+      x: 1110.5599417630176
+      y: 2581.571600913877
+      zoom: 0.7578582832552003
+  rag_pipeline_variables: []

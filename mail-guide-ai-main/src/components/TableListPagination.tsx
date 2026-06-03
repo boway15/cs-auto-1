@@ -37,8 +37,6 @@ export function TableListPagination({
     setJumpDraft(String(pageSafe + 1));
   }, [pageSafe]);
 
-  if (total <= pageSize) return null;
-
   const commitJump = () => {
     const target = parseListPageJumpInput(jumpDraft, pageCount);
     if (target == null) {

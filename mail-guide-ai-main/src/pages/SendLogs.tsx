@@ -12,8 +12,7 @@ import {
 } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { RefreshCw, Search, Eye, CheckCircle2, XCircle, Download } from "lucide-react";
-import { formatDistanceToNow } from "date-fns";
-import { zhCN } from "date-fns/locale";
+import { formatDateTimeCST } from "@/lib/format-datetime";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 
@@ -67,6 +66,35 @@ function siteNameFromLog(log: Log): string | null {
   return null;
 }
 
+type SendLogFilters = {
+  statusFilter: "all" | "sent" | "failed";
+  typeFilter: string;
+  fromFilter: string;
+  dateFrom: string;
+  dateTo: string;
+  searchDebounced: string;
+};
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applySendLogFilters<T extends { eq: (...args: unknown[]) => T; gte: (...args: unknown[]) => T; lte: (...args: unknown[]) => T; or: (...args: unknown[]) => T }>(
+  query: T,
+  filters: SendLogFilters,
+): T {
+  let q = query;
+  if (filters.statusFilter !== "all") q = q.eq("status", filters.statusFilter);
+  if (filters.typeFilter !== "all") q = q.eq("send_type", filters.typeFilter);
+  if (filters.fromFilter) q = q.eq("from_email", filters.fromFilter);
+  if (filters.dateFrom) q = q.gte("created_at", new Date(filters.dateFrom).toISOString());
+  if (filters.dateTo) q = q.lte("created_at", new Date(`${filters.dateTo}T23:59:59`).toISOString());
+  if (filters.searchDebounced) {
+    const s = `%${filters.searchDebounced}%`;
+    q = q.or(
+      `to_email.ilike.${s},from_email.ilike.${s},subject.ilike.${s},send_no.ilike.${s}`,
+    );
+  }
+  return q;
+}
+
 export default function SendLogs() {
   const { hasMailboxAccess, grantsLoading } = useAuth();
   const [logs, setLogs] = useState<Log[]>([]);
@@ -96,10 +124,28 @@ export default function SendLogs() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      const filters: SendLogFilters = {
+        statusFilter,
+        typeFilter,
+        fromFilter,
+        dateFrom,
+        dateTo,
+        searchDebounced,
+      };
+
       const [sentRes, failedRes, totalRes, fromRes] = await Promise.all([
-        supabase.from("email_send_logs").select("*", { count: "exact", head: true }).eq("status", "sent"),
-        supabase.from("email_send_logs").select("*", { count: "exact", head: true }).eq("status", "failed"),
-        supabase.from("email_send_logs").select("*", { count: "exact", head: true }),
+        applySendLogFilters(
+          supabase.from("email_send_logs").select("*", { count: "exact", head: true }),
+          filters,
+        ).eq("status", "sent"),
+        applySendLogFilters(
+          supabase.from("email_send_logs").select("*", { count: "exact", head: true }),
+          filters,
+        ).eq("status", "failed"),
+        applySendLogFilters(
+          supabase.from("email_send_logs").select("*", { count: "exact", head: true }),
+          filters,
+        ),
         supabase
           .from("email_send_logs")
           .select("from_email")
@@ -118,18 +164,10 @@ export default function SendLogs() {
       }
       setFromOptions([...fromSet]);
 
-      let query = supabase.from("email_send_logs").select("*", { count: "exact" });
-      if (statusFilter !== "all") query = query.eq("status", statusFilter);
-      if (typeFilter !== "all") query = query.eq("send_type", typeFilter);
-      if (fromFilter) query = query.eq("from_email", fromFilter);
-      if (dateFrom) query = query.gte("created_at", new Date(dateFrom).toISOString());
-      if (dateTo) query = query.lte("created_at", new Date(`${dateTo}T23:59:59`).toISOString());
-      if (searchDebounced) {
-        const s = `%${searchDebounced}%`;
-        query = query.or(
-          `to_email.ilike.${s},from_email.ilike.${s},subject.ilike.${s},send_no.ilike.${s}`,
-        );
-      }
+      let query = applySendLogFilters(
+        supabase.from("email_send_logs").select("*", { count: "exact" }),
+        filters,
+      );
 
       const { from, to } = listPageRange(listPage);
       const { data, error, count } = await query
@@ -217,7 +255,7 @@ export default function SendLogs() {
   function exportCsv() {
     const header = ["时间", "发送编号", "类型", "状态", "发件人", "收件人", "订单号", "主题", "SMTP响应", "错误"];
     const rows = logs.map((l) => [
-      new Date(l.created_at).toLocaleString("zh-CN"),
+      formatDateTimeCST(l.created_at),
       l.send_no ?? l.id,
       sendTypeMap[l.send_type]?.label ?? l.send_type,
       l.status,
@@ -335,7 +373,7 @@ export default function SendLogs() {
                 return (
                   <TableRow key={l.id}>
                     <TableCell className="text-xs text-muted-foreground">
-                      {formatDistanceToNow(new Date(l.created_at), { addSuffix: true, locale: zhCN })}
+                      {formatDateTimeCST(l.created_at)}
                     </TableCell>
                     <TableCell className="whitespace-nowrap w-36 min-w-[9rem]">
                       <Badge variant="outline" className={`text-[10px] py-0 h-5 whitespace-nowrap ${t.cls}`}>{t.label}</Badge>
@@ -381,7 +419,7 @@ export default function SendLogs() {
                 <div><span className="text-muted-foreground">收件人：</span>{detail.to_email}</div>
                 <div><span className="text-muted-foreground">类型：</span>{sendTypeMap[detail.send_type]?.label ?? detail.send_type}</div>
                 <div><span className="text-muted-foreground">状态：</span>{detail.status === "sent" ? "成功" : "失败"}</div>
-                <div className="col-span-2"><span className="text-muted-foreground">时间：</span>{new Date(detail.created_at).toLocaleString("zh-CN")}</div>
+                <div className="col-span-2"><span className="text-muted-foreground">时间：</span>{formatDateTimeCST(detail.created_at)}</div>
                 <div className="col-span-2"><span className="text-muted-foreground">Message-ID：</span><span className="font-mono text-xs">{detail.message_id || "—"}</span></div>
                 <div><span className="text-muted-foreground">发送编号：</span>{detail.send_no || "—"}</div>
                 <div><span className="text-muted-foreground">订单号：</span>{orderNoFromLog(detail) || "—"}</div>

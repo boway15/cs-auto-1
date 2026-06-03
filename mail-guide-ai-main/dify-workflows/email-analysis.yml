@@ -192,7 +192,7 @@ workflow:
                     "defect"                (产品缺陷)
                     "description_mismatch"  (商品描述不符)
                     "logistics"             (物流问题)
-                    "other"                 (其他问题)
+                    "other"                 (其他问题 — 最低优先级，仅当 1–10 均不适用)
                     "amazon_marketplace"    (亚马逊渠道购买/沟通)
                     "product_inquiry"       (售前/安装咨询)
                     "conversation_idle"     (感谢/结案/无新诉求)
@@ -208,22 +208,59 @@ workflow:
                 - language: "en" (English), "zh" (Chinese), "other" (other languages)
                 - entities: object with extracted entities. Include order_no (string or null), product_name (string or null), amount (string or null)
 
+                ## business_intent priority (highest → lowest; pick the FIRST match; "other" is LAST RESORT only)
+                1. amazon_marketplace — Amazon channel / Amazon order id / 在亚马逊购买
+                2. solution_accepted — customer accepts refund/replacement/reship already offered
+                3. order_cancel — cancel order request
+                4. address_change — change shipping address
+                5. damaged — physical damage / broken / crushed (Latest body)
+                6. defect — not working / quality defect (Latest body)
+                7. description_mismatch — wrong item / not as described (Latest body)
+                8. logistics — shipping / tracking / delivery
+                9. product_inquiry — pre-sales / installation / how-to
+                10. conversation_idle — thank-you / case closed / no new request
+                11. other — 其他问题: ONLY when steps 1–10 all clearly do NOT apply. Never choose "other" out of uncertainty; prefer the closest specific intent above.
+
                 ## Rules
+                Evaluate in priority order above. **"other" has the lowest priority** — use it only after ruling out every other business_intent.
+
+                ### A. Amazon channel (business_intent: "amazon_marketplace")
+                Use Subject, From, Latest body, and (when Latest body is very short) Full body for Amazon signals only.
+                Set "amazon_marketplace" when ANY of these match:
+                - From address is *@amazon.com (or amazon.co.uk / .de / etc.)
+                - Amazon order id pattern: 123-1234567-1234567
+                - Customer says bought on Amazon / 在亚马逊购买 / Amazon order / marketplace / 亚马逊渠道 / 亚马逊买的
+                - Subject or thread mentions Amazon purchase or Amazon order id even if Latest body is only a follow-up ("any update?", "好的")
+                Do NOT use "other" when Amazon channel is clear. If there is also a new damage/defect claim in Latest body, still prefer "amazon_marketplace" when the main issue is Amazon-channel purchase/support routing.
+
+                ### B. Solution accepted (business_intent: "solution_accepted")
+                Set "solution_accepted" when the customer accepts a refund, replacement, reship, partial refund, or specific fix that support already proposed.
+                - Latest body may be short: 好的 / 可以 / 没问题 / OK / Yes / Agreed / 按你说的 / 同意退款 / 接受方案 / proceed / sounds good
+                - You MAY read Full body ONLY to confirm support already offered a concrete solution (refund/replacement/reship); do not re-open old damage claims from quotes.
+                - Prefer "solution_accepted" over "conversation_idle" when Latest body is agreement to an offer, not a bare thank-you with no pending action.
+
+                ### C. After-sale from Latest body only (rules 1–7)
+                For order_cancel, address_change, damaged, defect, description_mismatch, logistics: classify from Latest body; do NOT label damaged/defect because an old quote mentions it unless the customer raises it again in Latest body.
+
                 1. If customer asks to cancel an order → intent: "cancel_order", business_intent: "order_cancel", risk_level: "high"
                 2. If customer asks to change shipping address → intent: "change_address", business_intent: "address_change", risk_level: "high"
-                3. If customer reports damage/broken/crushed item → business_intent: "damaged"; if no attachment in email add "attachment" to missing_elements (any attachment counts)
-                4. If customer reports product not working / defective / quality issue (non-physical damage) → business_intent: "defect"; if no attachment add "attachment" when evidence is needed
-                5. If customer says product does not match description / wrong color / wrong size / "not as described" → business_intent: "description_mismatch"; if no attachment add "attachment" when evidence is needed
-                6. Shipping/tracking/delivery/late package questions → intent: "shipping_query", business_intent: "logistics"
-                7. For after-sale issues without any order number → add "order_no" to missing_elements; for logistics/cancel/address without order_no in text → add "order_no"
-                8. Classify using ONLY the customer's latest reply in "Latest body" below. Quoted thread history must NOT drive business_intent (e.g. do not label "damaged" because an old quote mentions defect).
-                9. Thank you / case closed / no new issue in latest reply → business_intent: "conversation_idle"
-                10. Customer agrees to a refund/replacement/solution already offered → business_intent: "solution_accepted"
-                11. Purchase or inquiry clearly on Amazon / Amazon order id 123-1234567-1234567 → business_intent: "amazon_marketplace"
-                12. Pre-sales or installation/how-to questions → business_intent: "product_inquiry"
-                13. If none fit → business_intent: "other"
-                14. Chinese customers → language "zh"; English → "en"
-                15. business_intent must be exactly one value from the list (single-select).
+                3. If customer reports damage/broken/crushed item in Latest body → business_intent: "damaged"; if no attachment add "attachment" to missing_elements
+                4. If customer reports product not working / defective / quality issue in Latest body → business_intent: "defect"
+                5. If product does not match description / wrong item in Latest body → business_intent: "description_mismatch"
+                6. Shipping/tracking/delivery questions in Latest body → intent: "shipping_query", business_intent: "logistics"
+                7. For after-sale issues without order number → add "order_no" to missing_elements when needed
+                8. Thank you / case closed / no new issue and NO pending accepted solution → business_intent: "conversation_idle"
+                9. Pre-sales or installation/how-to → business_intent: "product_inquiry"
+                10. ONLY if steps 1–9 and rules A–C all do not apply → business_intent: "other" (最低优先级，最后才用)
+                11. Chinese customers → language "zh"; English → "en"
+                12. business_intent must be exactly one enum value (single-select).
+
+                ## Examples (business_intent only)
+                - Latest: "OK please process the refund" + quote shows agent offered refund → solution_accepted
+                - Latest: "好的，按你们说的换货" → solution_accepted
+                - Latest: "Thanks!" only, no open offer → conversation_idle
+                - Subject: "Amazon order 123-4567890-1234567" / From: buyer@amazon.com → amazon_marketplace
+                - Latest: "我是在亚马逊买的，能帮忙吗" → amazon_marketplace
             - role: user
               text: |
                 Subject: {{#start.subject#}}
@@ -273,9 +310,176 @@ workflow:
         width: 244
       - data:
           code: |
-            def main(llm_output: str) -> dict:
+            def main(
+                llm_output: str,
+                subject: str = "",
+                from_email: str = "",
+                body_latest: str = "",
+                body_text: str = "",
+            ) -> dict:
                 import json
                 import re
+
+                def _s(v) -> str:
+                    if v is None:
+                        return ""
+                    return str(v).strip()
+
+                subject_s = _s(subject)
+                from_s = _s(from_email)
+                latest_s = _s(body_latest)
+                full_s = _s(body_text)
+                analysis_text = "\n".join(
+                    x for x in (subject_s, latest_s or full_s) if x
+                ).strip()
+                thread_text = "\n".join(
+                    x for x in (subject_s, latest_s, full_s) if x
+                ).strip()
+
+                def looks_like_amazon(text: str, sender: str) -> bool:
+                    if re.search(
+                        r"@amazon\.(com|co\.uk|de|fr|it|es|ca|com\.au|co\.jp)\b",
+                        sender,
+                        re.I,
+                    ):
+                        return True
+                    if re.search(r"\b\d{3}-\d{7}-\d{7}\b", text):
+                        return True
+                    return bool(
+                        re.search(
+                            r"在亚马逊|亚马逊(上)?购买|亚马逊(渠道|订单|买的)|"
+                            r"purchased on amazon|amazon order|bought on amazon|from amazon|"
+                            r"amazon\.com|marketplace",
+                            text,
+                            re.I,
+                        )
+                    )
+
+                def looks_like_solution_accepted(text: str) -> bool:
+                    return bool(
+                        re.search(
+                            r"同意.{0,16}(方案|处理|退款|换货|补发|重发)|"
+                            r"接受.{0,10}方案|按.{0,8}(说|办|处理)|"
+                            r"可以.{0,6}(退款|换货|补发)|没问题|"
+                            r"accept (the )?(offer|solution|refund)|"
+                            r"agree to (the )?(refund|replacement|solution)|"
+                            r"proceed with (the )?(refund|replacement|reship)|"
+                            r"sounds good.*(refund|replace)|"
+                            r"ok.{0,20}(refund|replace|换货|退款)|"
+                            r"yes.{0,20}(refund|replace|换货|退款)",
+                            text,
+                            re.I,
+                        )
+                    )
+
+                def agent_offered_solution_in_thread(text: str) -> bool:
+                    return bool(
+                        re.search(
+                            r"(offer|propose|provide|arrange).{0,40}(refund|replacement|reship)|"
+                            r"(退款|换货|补发|重发|赔偿).{0,20}(方案|处理|offer)|"
+                            r"we can (refund|replace|reship)|可以(为您)?(退款|换货|补发)",
+                            text,
+                            re.I,
+                        )
+                    )
+
+                def looks_like_product_inquiry(text: str) -> bool:
+                    return bool(
+                        re.search(
+                            r"怎么安装|如何安装|安装步骤|assembly|how to install|"
+                            r"instruction manual|说明书|规格|多少钱|price\b|in stock|有货|售前|before (i )?order",
+                            text,
+                            re.I,
+                        )
+                    )
+
+                def looks_like_conversation_idle(text: str) -> bool:
+                    if looks_like_solution_accepted(text):
+                        return False
+                    compact = re.sub(r"\s+", " ", text).strip()
+                    if len(compact) > 600:
+                        return False
+                    if re.search(
+                        r"问题已解决|已解决|结案|no further (action|help)|case closed|resolved|all set now",
+                        text,
+                        re.I,
+                    ):
+                        return True
+                    if re.search(
+                        r"^(thanks?|thank you|thx|many thanks|appreciate it|收到|好的收到|感谢)[\s!.，,]*$",
+                        compact,
+                        re.I,
+                    ):
+                        return True
+                    if re.search(r"谢谢|感谢|多谢|thanks|thank you|appreciate", text, re.I) and not re.search(
+                        r"破损|损坏|退款|取消|defect|damage|broken|投诉|refund|cancel",
+                        text,
+                        re.I,
+                    ):
+                        return True
+                    return False
+
+                def infer_from_text_priority(latest: str, thread: str, sender: str) -> str:
+                    """Walk priority ladder; return 'other' only if nothing matches."""
+                    if looks_like_amazon(thread, sender):
+                        return "amazon_marketplace"
+                    if looks_like_solution_accepted(latest) or (
+                        looks_like_solution_accepted(thread)
+                        and agent_offered_solution_in_thread(full_s)
+                    ):
+                        return "solution_accepted"
+                    if re.search(r"取消订单|cancel\s*order|cancel\s*the\s*order", latest, re.I):
+                        return "order_cancel"
+                    if re.search(r"修改地址|change\s*address|update\s*address", latest, re.I):
+                        return "address_change"
+                    if re.search(r"破损|broken|damage|damaged|crushed", latest, re.I):
+                        return "damaged"
+                    if re.search(
+                        r"缺陷|defect|defective|not\s*working|malfunction|质量问题|品质问题|次品|劣质",
+                        latest,
+                        re.I,
+                    ):
+                        return "defect"
+                    if re.search(
+                        r"描述不符|与描述不符|mismatch|not\s*as\s*described|wrong\s*item|错发|发错",
+                        latest,
+                        re.I,
+                    ):
+                        return "description_mismatch"
+                    if re.search(
+                        r"物流|快递|发货|shipping|tracking|delivery|package",
+                        latest,
+                        re.I,
+                    ):
+                        return "logistics"
+                    if looks_like_product_inquiry(latest):
+                        return "product_inquiry"
+                    if looks_like_conversation_idle(latest):
+                        return "conversation_idle"
+                    return "other"
+
+                def refine_business_intent(bi: str) -> str:
+                    """'other' is lowest priority: re-infer from text before keeping it."""
+                    if bi == "other":
+                        return infer_from_text_priority(latest_s or full_s, thread_text, from_s)
+                    if bi == "conversation_idle":
+                        if looks_like_amazon(thread_text, from_s):
+                            return "amazon_marketplace"
+                        if looks_like_solution_accepted(analysis_text) or (
+                            looks_like_solution_accepted(thread_text)
+                            and agent_offered_solution_in_thread(full_s)
+                        ):
+                            return "solution_accepted"
+                        short_ok = len(latest_s) < 120 and bool(
+                            re.search(
+                                r"^(好的?|可以|没问题|ok|yes|agree|confirmed)[\s!.，,]*$",
+                                latest_s,
+                                re.I,
+                            )
+                        )
+                        if short_ok and agent_offered_solution_in_thread(full_s):
+                            return "solution_accepted"
+                    return bi
 
                 if llm_output is None:
                     raw = ""
@@ -360,6 +564,23 @@ workflow:
                     }.get(result["intent"], "other")
                     result["business_intent"] = fallback
 
+                refined = refine_business_intent(str(result.get("business_intent") or "other"))
+                if refined in valid_business_intents:
+                    result["business_intent"] = refined
+                consult = {
+                    "logistics", "other", "amazon_marketplace", "product_inquiry",
+                    "conversation_idle", "solution_accepted",
+                }
+                after_sale = {
+                    "order_cancel", "address_change", "damaged", "defect",
+                    "description_mismatch",
+                }
+                bi_final = result["business_intent"]
+                if bi_final in after_sale:
+                    result["category"] = "售后"
+                elif bi_final in consult:
+                    result["category"] = "咨询"
+
                 # Validate priority
                 valid_priorities = ["low", "normal", "high", "urgent"]
                 if result["priority"] not in valid_priorities:
@@ -413,6 +634,22 @@ workflow:
                 - llm_analyze
                 - text
               variable: llm_output
+            - value_selector:
+                - start
+                - subject
+              variable: subject
+            - value_selector:
+                - start
+                - from_email
+              variable: from_email
+            - value_selector:
+                - start
+                - body_latest
+              variable: body_latest
+            - value_selector:
+                - start
+                - body_text
+              variable: body_text
         height: 90
         id: code_parse
         position:
