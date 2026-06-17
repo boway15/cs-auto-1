@@ -62,14 +62,58 @@ const statusMap: Record<string, string> = {
 type RiskLogFilters = {
   status: string;
   searchDebounced: string;
+  /** 搜索词在 emails 表命中后的 id（用于跨表 OR，由 load 预解析） */
+  searchEmailIds?: string[];
+  /** 搜索词在 orders 表命中后的 id */
+  searchOrderIds?: string[];
   dateFrom: string;
   dateTo: string;
   mailboxId: string;
   mailboxToEmail: string | null;
 };
 
+function escapeIlike(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
+const RISK_LOG_SEARCH_RELATED_ID_LIMIT = 500;
+
+async function resolveRiskLogSearchIds(
+  term: string,
+): Promise<{ emailIds: string[]; orderIds: string[] }> {
+  const p = `%${escapeIlike(term)}%`;
+  const [emailsRes, ordersRes] = await Promise.all([
+    supabase
+      .from("emails")
+      .select("id")
+      .or(`subject.ilike.${p},from_email.ilike.${p},to_email.ilike.${p}`)
+      .limit(RISK_LOG_SEARCH_RELATED_ID_LIMIT),
+    supabase
+      .from("orders")
+      .select("id")
+      .or(`order_no.ilike.${p},customer_email.ilike.${p}`)
+      .limit(RISK_LOG_SEARCH_RELATED_ID_LIMIT),
+  ]);
+  if (emailsRes.error) throw emailsRes.error;
+  if (ordersRes.error) throw ordersRes.error;
+  return {
+    emailIds: (emailsRes.data ?? []).map((r) => String((r as { id: string }).id)),
+    orderIds: (ordersRes.data ?? []).map((r) => String((r as { id: string }).id)),
+  };
+}
+
 function postgrestQuoted(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
+}
+
+const RISK_LOG_EMAILS_EMBED =
+  "emails(subject, from_email, to_email, message_id, mailbox_id)";
+
+function riskLogSelect(mailboxFilterActive: boolean): string {
+  const emailsEmbed = mailboxFilterActive
+    ? RISK_LOG_EMAILS_EMBED.replace("emails(", "emails!inner(")
+    : RISK_LOG_EMAILS_EMBED;
+  return `*, orders(order_no, customer_email), ${emailsEmbed}`;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -83,24 +127,34 @@ function applyRiskLogFilters<T extends { eq: (...args: unknown[]) => T; gte: (..
   if (filters.dateTo) q = q.lte("created_at", cstDayEndIso(filters.dateTo));
   if (filters.mailboxId !== "all") {
     if (filters.mailboxToEmail) {
+      // 嵌套表 OR 须用 referencedTable，不能写 emails.column（PostgREST 会报解析错误）
       q = q.or(
-        `emails.mailbox_id.eq.${filters.mailboxId},emails.to_email.eq.${postgrestQuoted(filters.mailboxToEmail)}`,
+        `mailbox_id.eq.${filters.mailboxId},to_email.eq.${postgrestQuoted(filters.mailboxToEmail)}`,
+        { referencedTable: "emails" },
       );
     } else {
       q = q.eq("emails.mailbox_id", filters.mailboxId);
     }
   }
   if (filters.searchDebounced) {
-    const s = `%${filters.searchDebounced}%`;
-    q = q.or(
-      `intercept_no.ilike.${s},referenced_order_no.ilike.${s},intercept_reason.ilike.${s},orders.order_no.ilike.${s},orders.customer_email.ilike.${s},emails.subject.ilike.${s},emails.from_email.ilike.${s},emails.to_email.ilike.${s}`,
-    );
+    const p = `%${escapeIlike(filters.searchDebounced)}%`;
+    const clauses = [
+      `intercept_no.ilike.${p}`,
+      `referenced_order_no.ilike.${p}`,
+      `intercept_reason.ilike.${p}`,
+    ];
+    const emailIds = filters.searchEmailIds ?? [];
+    const orderIds = filters.searchOrderIds ?? [];
+    if (emailIds.length > 0) {
+      clauses.push(`email_id.in.(${emailIds.join(",")})`);
+    }
+    if (orderIds.length > 0) {
+      clauses.push(`order_id.in.(${orderIds.join(",")})`);
+    }
+    q = q.or(clauses.join(","));
   }
   return q;
 }
-
-const RISK_LOG_SELECT =
-  "*, orders(order_no, customer_email), emails(subject, from_email, to_email, message_id, mailbox_id)";
 
 export default function RiskLogs() {
   const { isAdmin, hasMailboxAccess, grantsLoading } = useAuth();
@@ -144,20 +198,26 @@ export default function RiskLogs() {
         mailboxFilter !== "all"
           ? mailboxes.find((m) => m.id === mailboxFilter)
           : undefined;
+      const searchRelated = searchDebounced
+        ? await resolveRiskLogSearchIds(searchDebounced)
+        : null;
       const filters: RiskLogFilters = {
         status,
         searchDebounced,
+        searchEmailIds: searchRelated?.emailIds,
+        searchOrderIds: searchRelated?.orderIds,
         dateFrom,
         dateTo,
         mailboxId: mailboxFilter,
         mailboxToEmail: mb?.email_address ?? null,
       };
+      const select = riskLogSelect(mailboxFilter !== "all");
 
       const statKeys = ["success", "failed", "retrying", "pending"] as const;
       const statEntries = await Promise.all(
         statKeys.map(async (key) => {
           const { count, error } = await applyRiskLogFilters(
-            supabase.from("risk_intercept_logs").select(RISK_LOG_SELECT, { count: "exact", head: true }),
+            supabase.from("risk_intercept_logs").select(select, { count: "exact", head: true }),
             filters,
           ).eq("status", key);
           if (error) throw error;
@@ -167,7 +227,7 @@ export default function RiskLogs() {
       setStatusStats(Object.fromEntries(statEntries));
 
       let query = applyRiskLogFilters(
-        supabase.from("risk_intercept_logs").select(RISK_LOG_SELECT, { count: "exact" }),
+        supabase.from("risk_intercept_logs").select(select, { count: "exact" }),
         filters,
       );
       const { from, to } = listPageRange(listPage);

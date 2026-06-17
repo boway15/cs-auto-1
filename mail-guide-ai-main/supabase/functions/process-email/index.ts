@@ -313,7 +313,7 @@ function extractOrderNo(text: string) {
 }
 
 function looksLikeAmazonPriceComparison(text: string): boolean {
-  return /amazon.{0,80}(cheaper|much cheaper|less|lower|selling|is having|has the same|for\s*\$|same product|same item)|(cheaper|price match|match.{0,25}(the )?same price|same price).{0,50}amazon|go with amazon|unless you.{0,40}(match|able to match)|(found|saw|see|sharing|share|screenshot|picture).{0,50}amazon|amazon.{0,40}(picture|screenshot|screen\s*shot)|on (the )?amazon (website|site)|(higher|more expensive).{0,40}(price|pay).{0,40}(amazon|cheaper)|justification.{0,30}(pay|higher)|ordered from (them|amazon).{0,60}(return|keep your|cancel this)|available at.{0,30}cheaper/i
+  return /amazon.{0,80}(cheaper|much cheaper|less|lower|selling|is having|has the same|for\s*\$|same product|same item)|(cheaper|price match|match.{0,25}(the )?same price|same price).{0,50}amazon|go with amazon|unless you.{0,40}(match|able to match)|(found|saw|see|sharing|share|screenshot|picture).{0,50}amazon|amazon.{0,40}(picture|screenshot|screen\s*shot)|on (the )?amazon (website|site)|(higher|more expensive).{0,40}(price|pay).{0,40}(amazon|cheaper)|justification.{0,30}(pay|higher)|ordered from (them|amazon).{0,60}(return|keep your|cancel this)|available at.{0,30}cheaper|got (the )?same item.{0,50}amazon|same item.{0,40}for\s*\$?.{0,25}on amazon/i
     .test(text);
 }
 
@@ -338,6 +338,62 @@ function looksLikeAmazonChannelConfirmed(text: string, fromEmail?: string | null
 
 function looksLikeAmazonChannel(text: string, fromEmail?: string | null): boolean {
   return looksLikeAmazonChannelConfirmed(text, fromEmail);
+}
+
+function summaryIndicatesCancelRequest(summary: string | null | undefined): boolean {
+  const s = String(summary ?? "").trim();
+  if (!s) return false;
+  return /要求取消|请求取消|取消订单|申请取消|希望取消|想要取消|ask.{0,20}cancel|want.{0,20}cancel|would like.{0,20}cancel|customer.{0,30}cancel|cancel.{0,20}(order|订单|该订单)|取消.{0,12}(直接|独立站|官网|sedeta|订单)|因.{0,40}取消/i
+    .test(s);
+}
+
+function looksLikeCustomerCancelRequest(text: string): boolean {
+  if (looksLikeDelayShippingRequest(text)) return false;
+  return /取消订单|我要取消|请取消|帮我取消|不想买了|不要了|want to cancel|please cancel|cancel (my |the )?order|cancel it|need to cancel|would like to cancel|stop (my )?order|do not ship|don't ship/i
+    .test(text);
+}
+
+function looksLikePriceComparisonCancel(latest: string, thread: string): boolean {
+  if (!looksLikeAmazonPriceComparison(thread)) return false;
+  return looksLikeIndependentSiteOrderContext(thread) ||
+    looksLikeCustomerCancelRequest(latest) ||
+    /return process|return shipping label|shipping label|price match/i.test(latest);
+}
+
+/** LLM 误标 other/logistics/amazon_marketplace 时，比价取消独立站订单或 summary 已写明取消 → order_cancel */
+function correctOrderCancelMisclassification(
+  bi: BusinessIntent,
+  text: string,
+  summary?: string | null,
+  fromEmail?: string | null,
+  latestText?: string | null,
+): BusinessIntent {
+  if (bi === "order_cancel") return bi;
+  if (
+    bi === "damaged" || bi === "defect" || bi === "description_mismatch" ||
+    bi === "address_change" || bi === "delay_shipping" || bi === "sku_change" ||
+    bi === "conversation_idle" || bi === "solution_accepted"
+  ) {
+    return bi;
+  }
+  if (summaryIndicatesCancelRequest(summary)) {
+    return "order_cancel";
+  }
+  if (/@amazon\.(com|co\.uk|de|fr|it|es|ca|com\.au|co\.jp)\b/i.test(String(fromEmail ?? ""))) {
+    return bi;
+  }
+  if (/\b\d{3}-\d{7}-\d{7}\b/.test(text)) return bi;
+  const latest = String(latestText ?? "").trim();
+  if (looksLikePriceComparisonCancel(latest, text)) {
+    return "order_cancel";
+  }
+  if (
+    looksLikeCustomerCancelRequest(latest) &&
+    (bi === "other" || bi === "logistics" || bi === "product_inquiry" || bi === "amazon_marketplace")
+  ) {
+    return "order_cancel";
+  }
+  return bi;
 }
 
 /** LLM 误标 amazon_marketplace 时，比价取消独立站订单 → order_cancel */
@@ -533,17 +589,23 @@ function analyzeLocally(email: any): Analysis {
     ? "after_sale"
     : "general";
 
-  const business_intent = correctAmazonMisclassification(
-    correctSkuChangeIntent(
-      correctDelayShippingIntent(
-        mapToBusinessIntent(intent, analysisText, email.from_email),
+  const business_intent = correctOrderCancelMisclassification(
+    correctAmazonMisclassification(
+      correctSkuChangeIntent(
+        correctDelayShippingIntent(
+          mapToBusinessIntent(intent, analysisText, email.from_email),
+          analysisText,
+          summarySource,
+        ),
         analysisText,
         summarySource,
       ),
       analysisText,
-      summarySource,
+      email.from_email,
+      latestBody,
     ),
     analysisText,
+    summarySource,
     email.from_email,
     latestBody,
   );
@@ -648,23 +710,29 @@ async function analyzeWithAi(email: any): Promise<{
     const biRaw = typeof parsed.business_intent === "string" ? parsed.business_intent.trim() : "";
     const intentRaw = typeof parsed.intent === "string" ? parsed.intent.trim() : "";
     const latestBody = getLatestBodyText(email.body_text);
-    merged.business_intent = correctAmazonMisclassification(
-      correctSkuChangeIntent(
-        correctDelayShippingIntent(
-          resolveBusinessIntent(
-            biRaw,
-            intentRaw,
+    merged.business_intent = correctOrderCancelMisclassification(
+      correctAmazonMisclassification(
+        correctSkuChangeIntent(
+          correctDelayShippingIntent(
+            resolveBusinessIntent(
+              biRaw,
+              intentRaw,
+              analysisText,
+              String(merged.intent ?? ""),
+              email.from_email,
+            ),
             analysisText,
-            String(merged.intent ?? ""),
-            email.from_email,
+            typeof parsed.summary === "string" ? parsed.summary : merged.summary,
           ),
           analysisText,
           typeof parsed.summary === "string" ? parsed.summary : merged.summary,
         ),
         analysisText,
-        typeof parsed.summary === "string" ? parsed.summary : merged.summary,
+        email.from_email,
+        latestBody,
       ),
       analysisText,
+      typeof parsed.summary === "string" ? parsed.summary : merged.summary,
       email.from_email,
       latestBody,
     );

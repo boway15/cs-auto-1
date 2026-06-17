@@ -199,7 +199,7 @@ workflow:
                 - otherwise → missing_elements: []
 
                 ## Core principle
-                Classify from **Latest body**. Full body is quote/context only — never label cancel/damage/defect from quoted merchant text alone. Check entire email (including forwarded parts) ONLY for **Amazon channel** signals (order actually from Amazon), NOT mere price-comparison mentions. **business_intent must match summary**: if summary says customer did NOT request cancel/refund → business_intent cannot be order_cancel; if summary says 延迟/暂缓/暂停发货 → business_intent must be delay_shipping, not logistics.
+                Classify from **Latest body**. Full body is quote/context only — never label cancel/damage/defect from quoted merchant text alone. Check entire email (including forwarded parts) ONLY for **Amazon channel** signals (order actually from Amazon), NOT mere price-comparison mentions. **business_intent must match summary**: if summary says customer wants to cancel / 要求取消 / 取消订单 → business_intent MUST be order_cancel (even when Amazon is mentioned only as cheaper competitor); if summary says customer did NOT request cancel/refund → business_intent cannot be order_cancel; if summary says 延迟/暂缓/暂停发货 → business_intent must be delay_shipping, not logistics.
 
                 ## business_intent priority (first match wins; other = last resort)
                 1. amazon_marketplace — **only when this case is an Amazon-channel order**: *@amazon.com sender, Amazon order id (###-#######-#######), or customer clearly states they **purchased on Amazon** (在亚马逊购买 / purchased on Amazon / my Amazon order / Amazon order #…). **NOT** amazon_marketplace when customer only cites Amazon as cheaper competitor, asks price match, or wants to cancel/return an **independent-site order** they placed with you (→ order_cancel).
@@ -226,6 +226,7 @@ workflow:
                 ## Quick examples
                 - buyer@amazon.com or Amazon order id in thread → amazon_marketplace (even if Latest mentions cancel)
                 - Latest: "Amazon is cheaper ($159), please cancel my Sedeta order / explain return & shipping label" → order_cancel (price comparison on independent-site order, NOT amazon_marketplace)
+                - Latest: "I got the same item for $150 on Amazon website and would like to cancel this order I placed directly with Sedeta" → order_cancel
                 - Thread: "I placed directly with you; Amazon has same item cheaper; price match?" → order_cancel
                 - Latest: "walnut dresser\n3701 guthrie circle lawrenceville ga 30044" (only product+address, security review in quote) → other
                 - Latest: "order time: 11pm, 0053, walnut dresser, bridgett baranda, 3701 guthrie circle" → other
@@ -349,7 +350,8 @@ workflow:
                             r"(higher|more expensive).{0,40}(price|pay).{0,40}(amazon|cheaper)|"
                             r"justification.{0,30}(pay|higher)|"
                             r"ordered from (them|amazon).{0,60}(return|keep your|cancel this)|"
-                            r"available at.{0,30}cheaper",
+                            r"available at.{0,30}cheaper|"
+                            r"got (the )?same item.{0,50}amazon|same item.{0,40}for\s*\$?.{0,25}on amazon",
                             text,
                             re.I,
                         )
@@ -394,6 +396,66 @@ workflow:
 
                 def looks_like_amazon(text: str, sender: str) -> bool:
                     return looks_like_amazon_channel_confirmed(text, sender)
+
+                def summary_indicates_cancel_request(summary: str) -> bool:
+                    if not summary:
+                        return False
+                    return bool(
+                        re.search(
+                            r"要求取消|请求取消|取消订单|申请取消|希望取消|想要取消|"
+                            r"ask.{0,20}cancel|want.{0,20}cancel|would like.{0,20}cancel|"
+                            r"customer.{0,30}cancel|cancel.{0,20}(order|订单|该订单)|"
+                            r"取消.{0,12}(直接|独立站|官网|sedeta|订单)|"
+                            r"因.{0,40}取消",
+                            summary,
+                            re.I,
+                        )
+                    )
+
+                def looks_like_price_comparison_cancel(latest: str, thread: str) -> bool:
+                    if not looks_like_amazon_price_comparison(thread):
+                        return False
+                    return (
+                        looks_like_independent_site_order_context(thread)
+                        or looks_like_customer_cancel_request(latest)
+                        or bool(
+                            re.search(
+                                r"return process|return shipping label|shipping label|price match",
+                                latest,
+                                re.I,
+                            )
+                        )
+                    )
+
+                def should_correct_to_order_cancel(
+                    thread: str, latest: str, sender: str, summary: str, bi: str,
+                ) -> bool:
+                    if bi == "order_cancel":
+                        return False
+                    if bi in (
+                        "damaged", "defect", "description_mismatch", "address_change",
+                        "delay_shipping", "sku_change", "conversation_idle", "solution_accepted",
+                    ):
+                        return False
+                    if summary_indicates_cancel_request(summary):
+                        if summary_indicates_verification_not_cancel(summary):
+                            return False
+                        return True
+                    if re.search(
+                        r"@amazon\.(com|co\.uk|de|fr|it|es|ca|com\.au|co\.jp)\b",
+                        sender,
+                        re.I,
+                    ):
+                        return False
+                    if re.search(r"\b\d{3}-\d{7}-\d{7}\b", thread):
+                        return False
+                    if looks_like_price_comparison_cancel(latest, thread):
+                        return True
+                    if looks_like_customer_cancel_request(latest) and bi in (
+                        "other", "logistics", "product_inquiry", "amazon_marketplace",
+                    ):
+                        return True
+                    return False
 
                 def should_correct_amazon_to_cancel(
                     thread: str, latest: str, sender: str, bi: str,
@@ -707,6 +769,8 @@ workflow:
 
                 def infer_from_text_priority(latest: str, thread: str, sender: str) -> str:
                     """Walk priority ladder; return 'other' only if nothing matches."""
+                    if looks_like_price_comparison_cancel(latest, thread):
+                        return "order_cancel"
                     if looks_like_amazon(thread, sender):
                         return "amazon_marketplace"
                     if looks_like_solution_accepted(latest) or (
@@ -883,7 +947,9 @@ workflow:
 
                 if result["business_intent"] == "order_cancel":
                     summary_s = str(result.get("summary") or "")
-                    if (
+                    if summary_indicates_cancel_request(summary_s):
+                        pass
+                    elif (
                         looks_like_order_verification_response(effective_latest, thread_text)
                         or summary_indicates_verification_not_cancel(summary_s)
                         or not looks_like_customer_cancel_request(effective_latest)
@@ -897,7 +963,20 @@ workflow:
 
                 if result["business_intent"] in ("logistics", "other"):
                     summary_s = str(result.get("summary") or "")
-                    if (
+                    if should_correct_to_order_cancel(
+                        thread_text,
+                        effective_latest,
+                        from_s,
+                        summary_s,
+                        str(result.get("business_intent") or ""),
+                    ):
+                        result["business_intent"] = "order_cancel"
+                        result["category"] = "售后"
+                        result["intent"] = "cancel_order"
+                        result["risk_level"] = "high"
+                        if result.get("priority") == "normal":
+                            result["priority"] = "urgent"
+                    elif (
                         looks_like_delay_shipping_request(effective_latest)
                         or looks_like_delay_shipping_request(summary_s)
                     ):
@@ -925,7 +1004,20 @@ workflow:
                     if result.get("priority") == "urgent":
                         result["priority"] = "normal"
 
-                if should_correct_amazon_to_cancel(
+                if should_correct_to_order_cancel(
+                    thread_text,
+                    effective_latest,
+                    from_s,
+                    str(result.get("summary") or ""),
+                    str(result.get("business_intent") or ""),
+                ):
+                    result["business_intent"] = "order_cancel"
+                    result["category"] = "售后"
+                    result["intent"] = "cancel_order"
+                    result["risk_level"] = "high"
+                    if result.get("priority") == "normal":
+                        result["priority"] = "urgent"
+                elif should_correct_amazon_to_cancel(
                     thread_text,
                     effective_latest,
                     from_s,
