@@ -40,7 +40,7 @@ DSL 文件位于：
 - 请在 Dify 中已安装 **langgenius/deepseek** 插件并配置 API Key，且模型列表中启用 `deepseek-v4-flash`。
 - DSL 顶层 **`dependencies`** 含该插件的 `marketplace_plugin_unique_identifier`。若你升级了插件或换了 Dify 实例，请在本机新建任意工作流并**导出 DSL**，用其中的 `dependencies` 整段替换本仓库对应 YAML，否则可能出现画布或模型节点渲染错误。
 
-> 2026-06 业务升级：`email-analysis.yml` 的 `business_intent` 为 **10 类**（售后 7 + `amazon_marketplace` / `product_inquiry` / `conversation_idle` / `solution_accepted`）。Edge `process-email` 传入 `body_latest`（客户最新回复，无引用）。**修改 YAML 后须在 Dify 重新导入并发布**，并同步 Edge Functions。
+> 2026-06 业务升级：`email-analysis.yml` 的 `business_intent` 为 **12 类**（售后 9，含 `delay_shipping` / `sku_change` + `amazon_marketplace` / `product_inquiry` / `conversation_idle` / `solution_accepted`）。Edge `process-email` 传入 `body_latest`（客户最新回复，无引用）。**修改 YAML 后须在 Dify 重新导入并发布**，并同步 Edge Functions。
 
 ## 4. 发布并记录 API 信息
 

@@ -14,7 +14,7 @@ import {
   verifyErpNotifyApiKey,
 } from "../_shared/erp-notify-auth.ts";
 
-const VALID_CODES = new Set(["risk_shopify", "risk_payoneer", "risk_qty_ge_4"]);
+const VALID_CODES = new Set(["risk_shopify", "risk_payoneer", "risk_qty_ge_4", "po_box"]);
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const HTTP_BY_ERROR: Record<string, number> = {

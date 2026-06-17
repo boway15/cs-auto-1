@@ -798,6 +798,7 @@ export type Database = {
           ops_alert_recipient_emails: string | null
           ops_alert_sender_email: string | null
           risk_auto_intercept_enabled: boolean
+          risk_auto_intercept_business_intents: string[]
           singleton: string
           updated_at: string
         }
@@ -806,6 +807,7 @@ export type Database = {
           ops_alert_recipient_emails?: string | null
           ops_alert_sender_email?: string | null
           risk_auto_intercept_enabled?: boolean
+          risk_auto_intercept_business_intents?: string[]
           singleton?: string
           updated_at?: string
         }
@@ -814,6 +816,7 @@ export type Database = {
           ops_alert_recipient_emails?: string | null
           ops_alert_sender_email?: string | null
           risk_auto_intercept_enabled?: boolean
+          risk_auto_intercept_business_intents?: string[]
           singleton?: string
           updated_at?: string
         }

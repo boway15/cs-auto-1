@@ -8,7 +8,9 @@ import {
 import { upsertOrderFromOmsData } from "../_shared/erp-order-sync.ts";
 import {
   assertAutoRiskInterceptAllowed,
+  isAutoInterceptIntentEnabled,
   isEmailWithinCustomerAutomationAge,
+  isMustInterceptBusinessIntent,
   MAX_COMPENSATION_ATTEMPTS,
   nextCompensationRunAtIso,
 } from "../_shared/auto-risk-intercept-policy.ts";
@@ -131,16 +133,16 @@ Deno.serve(async (req) => {
           metadata: { task_id: task.id, order_id: order.id },
         });
 
-        // 若邮件意图为取消/改地址，关联成功后立即触发风控拦截
+        // 若邮件意图为取消/改地址/延迟发货，关联成功后立即触发风控拦截
         const { data: intentRow } = await admin
           .from("emails")
           .select("business_intent")
           .eq("id", task.email_id)
           .maybeSingle();
-        const mustIntercept =
-          intentRow?.business_intent === "order_cancel" ||
-          intentRow?.business_intent === "address_change";
-        if (mustIntercept) {
+        const mustIntercept = isMustInterceptBusinessIntent(intentRow?.business_intent);
+        const autoIntercept = mustIntercept &&
+          await isAutoInterceptIntentEnabled(admin, intentRow?.business_intent);
+        if (autoIntercept) {
           const pol = await assertAutoRiskInterceptAllowed(admin, task.email_id);
           if (!pol.ok) {
             await admin.from("email_processing_events").insert({

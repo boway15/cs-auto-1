@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { RefreshCw, Search, Eye, CheckCircle2, XCircle, Download } from "lucide-react";
-import { formatDateTimeCST } from "@/lib/format-datetime";
+import { cstDayEndIso, cstDayStartIso, formatDateTimeCST } from "@/lib/format-datetime";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 
@@ -31,6 +31,8 @@ type Log = {
   message_id: string | null;
   order_id: string | null;
   order_no?: string | null;
+  sent_by?: string | null;
+  operator_label?: string | null;
   metadata?: Record<string, unknown> | null;
 };
 
@@ -66,6 +68,28 @@ function siteNameFromLog(log: Log): string | null {
   return null;
 }
 
+function operatorLabelFromLog(
+  log: Log,
+  profileNames: Map<string, string | null>,
+): string | null {
+  if (log.send_type !== "manual") return null;
+  const meta = log.metadata;
+  if (meta) {
+    const displayName =
+      typeof meta.operator_display_name === "string" ? meta.operator_display_name.trim() : "";
+    const email = typeof meta.operator_email === "string" ? meta.operator_email.trim() : "";
+    if (displayName && email) return `${displayName} (${email})`;
+    if (displayName) return displayName;
+    if (email) return email;
+  }
+  if (log.sent_by) {
+    const name = profileNames.get(log.sent_by);
+    if (name) return name;
+    return log.sent_by;
+  }
+  return null;
+}
+
 type SendLogFilters = {
   statusFilter: "all" | "sent" | "failed";
   typeFilter: string;
@@ -84,8 +108,8 @@ function applySendLogFilters<T extends { eq: (...args: unknown[]) => T; gte: (..
   if (filters.statusFilter !== "all") q = q.eq("status", filters.statusFilter);
   if (filters.typeFilter !== "all") q = q.eq("send_type", filters.typeFilter);
   if (filters.fromFilter) q = q.eq("from_email", filters.fromFilter);
-  if (filters.dateFrom) q = q.gte("created_at", new Date(filters.dateFrom).toISOString());
-  if (filters.dateTo) q = q.lte("created_at", new Date(`${filters.dateTo}T23:59:59`).toISOString());
+  if (filters.dateFrom) q = q.gte("created_at", cstDayStartIso(filters.dateFrom));
+  if (filters.dateTo) q = q.lte("created_at", cstDayEndIso(filters.dateTo));
   if (filters.searchDebounced) {
     const s = `%${filters.searchDebounced}%`;
     q = q.or(
@@ -210,21 +234,51 @@ export default function SendLogs() {
         ...log,
         order_no: log.order_no ?? (log.order_id ? orderNoById.get(log.order_id) ?? null : null),
       }));
+
+      const sentByIds = Array.from(
+        new Set(
+          enriched
+            .filter((log) => log.send_type === "manual" && log.sent_by)
+            .map((log) => log.sent_by as string),
+        ),
+      );
+      let profileNames = new Map<string, string | null>();
+      if (sentByIds.length > 0) {
+        const { data: profiles, error: profilesError } = await supabase
+          .from("profiles")
+          .select("user_id, display_name")
+          .in("user_id", sentByIds);
+        if (profilesError) {
+          console.warn("Failed to load send log operators", profilesError);
+        } else {
+          profileNames = new Map(
+            (profiles ?? []).map((p) => [p.user_id, p.display_name]),
+          );
+        }
+      }
+
+      const withOperators = enriched.map((log) => ({
+        ...log,
+        operator_label: operatorLabelFromLog(log, profileNames),
+      }));
+
       const q = searchDebounced.toLowerCase();
       setLogs(
         q
-          ? enriched.filter((l) => {
+          ? withOperators.filter((l) => {
               const tc = templateCodeFromLog(l)?.toLowerCase() ?? "";
+              const op = l.operator_label?.toLowerCase() ?? "";
               return (
                 l.order_no?.toLowerCase().includes(q) ||
                 tc.includes(q) ||
+                op.includes(q) ||
                 l.to_email?.toLowerCase().includes(q) ||
                 l.from_email?.toLowerCase().includes(q) ||
                 l.subject?.toLowerCase().includes(q) ||
                 l.send_no?.toLowerCase().includes(q)
               );
             })
-          : enriched,
+          : withOperators,
       );
     } catch (error) {
       const message = typeof error === "object" && error && "message" in error
@@ -253,13 +307,14 @@ export default function SendLogs() {
   }, [listPage, listPageCountVal]);
 
   function exportCsv() {
-    const header = ["时间", "发送编号", "类型", "状态", "发件人", "收件人", "订单号", "主题", "SMTP响应", "错误"];
+    const header = ["时间", "发送编号", "类型", "状态", "发件人", "人工账号", "收件人", "订单号", "主题", "SMTP响应", "错误"];
     const rows = logs.map((l) => [
       formatDateTimeCST(l.created_at),
       l.send_no ?? l.id,
       sendTypeMap[l.send_type]?.label ?? l.send_type,
       l.status,
       l.from_email ?? "",
+      l.operator_label ?? "",
       l.to_email ?? "",
       l.order_no ?? "",
       l.subject ?? "",
@@ -360,6 +415,7 @@ export default function SendLogs() {
                 <TableHead className="w-36 min-w-[9rem]">类型</TableHead>
                 <TableHead className="w-20">状态</TableHead>
                 <TableHead>发件人</TableHead>
+                <TableHead>人工账号</TableHead>
                 <TableHead>收件人</TableHead>
                 <TableHead>主题</TableHead>
                 <TableHead className="w-20">操作</TableHead>
@@ -367,7 +423,7 @@ export default function SendLogs() {
             </TableHeader>
             <TableBody>
               {logs.length === 0 ? (
-                <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground py-8">{loading ? "加载中…" : "暂无记录"}</TableCell></TableRow>
+                <TableRow><TableCell colSpan={8} className="text-center text-muted-foreground py-8">{loading ? "加载中…" : "暂无记录"}</TableCell></TableRow>
               ) : logs.map((l) => {
                 const t = sendTypeMap[l.send_type] ?? { label: l.send_type, cls: "" };
                 return (
@@ -386,6 +442,7 @@ export default function SendLogs() {
                       )}
                     </TableCell>
                     <TableCell className="text-sm truncate max-w-[200px]">{l.from_email || "—"}</TableCell>
+                    <TableCell className="text-sm truncate max-w-[180px]">{l.operator_label || "—"}</TableCell>
                     <TableCell className="text-sm truncate max-w-[200px]">{l.to_email}</TableCell>
                     <TableCell className="text-sm truncate max-w-[300px]">{l.subject || "(无主题)"}</TableCell>
                     <TableCell>
@@ -417,6 +474,12 @@ export default function SendLogs() {
               <div className="grid grid-cols-2 gap-3">
                 <div><span className="text-muted-foreground">发件人：</span>{detail.from_email || "—"}</div>
                 <div><span className="text-muted-foreground">收件人：</span>{detail.to_email}</div>
+                {detail.send_type === "manual" && (
+                  <div className="col-span-2">
+                    <span className="text-muted-foreground">人工账号：</span>
+                    {detail.operator_label || "—"}
+                  </div>
+                )}
                 <div><span className="text-muted-foreground">类型：</span>{sendTypeMap[detail.send_type]?.label ?? detail.send_type}</div>
                 <div><span className="text-muted-foreground">状态：</span>{detail.status === "sent" ? "成功" : "失败"}</div>
                 <div className="col-span-2"><span className="text-muted-foreground">时间：</span>{formatDateTimeCST(detail.created_at)}</div>

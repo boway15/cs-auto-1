@@ -24,6 +24,7 @@ const SCENES: { code: string; title: string; hint: string }[] = [
   { code: "risk_shopify", title: "Shopify 风控拦截通知", hint: "Shopify 系统提示的风控订单" },
   { code: "risk_payoneer", title: "Payoneer 风控拦截通知", hint: "Payoneer 邮件通知的风控订单" },
   { code: "risk_qty_ge_4", title: "购买数量≥4拦截通知", hint: "单订单购买数量 ≥ 4" },
+  { code: "po_box", title: "PO BOX 拦截通知", hint: "收件地址为 PO Box 需核实物理地址" },
 ];
 
 type ErpTpl = {

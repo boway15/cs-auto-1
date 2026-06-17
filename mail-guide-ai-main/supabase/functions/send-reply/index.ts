@@ -96,6 +96,19 @@ Deno.serve(async (req) => {
       sendError = err instanceof Error ? err.message : String(err);
     }
 
+    const { data: profileRow } = await admin
+      .from("profiles")
+      .select("display_name")
+      .eq("user_id", userData.user.id)
+      .maybeSingle();
+
+    const operatorMetadata = {
+      source: "workbench",
+      operator_id: userData.user.id,
+      operator_email: userData.user.email ?? null,
+      operator_display_name: profileRow?.display_name ?? null,
+    };
+
     // 写入发送日志（无论成功失败）
     const sendLogPayload = {
       email_id,
@@ -113,6 +126,7 @@ Deno.serve(async (req) => {
       sent_by: userData.user.id,
       retry_count: existingLog ? (existingLog.retry_count ?? 0) + 1 : 0,
       idempotency_key: sendKey,
+      metadata: operatorMetadata,
     };
     const { error: sendLogError } = existingLog
       ? await admin.from("email_send_logs").update(sendLogPayload).eq("id", existingLog.id)

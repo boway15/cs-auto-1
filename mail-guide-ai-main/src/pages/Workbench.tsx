@@ -70,6 +70,7 @@ import {
 } from "@/lib/email-body";
 import { StatusBadge } from "@/components/StatusBadge";
 import { TableListPagination } from "@/components/TableListPagination";
+import { WorkbenchDateRangePicker } from "@/components/WorkbenchDateRangePicker";
 import { EmailBody } from "@/components/EmailBody";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -86,11 +87,13 @@ import {
 } from "@/lib/customerService";
 import {
   fetchWorkbenchEmailList,
-  WORKBENCH_LIST_DAYS_ALL,
-  WORKBENCH_LIST_DAYS_OPTIONS,
+  clampWorkbenchDateRange,
+  defaultWorkbenchListDateFrom,
+  defaultWorkbenchListDateTo,
   WORKBENCH_LIST_PAGE_SIZE,
-  workbenchListDaysLabel,
+  workbenchListDateRangeLabel,
   type WorkbenchListFilters,
+  type WorkbenchListStatusFilter,
 } from "@/lib/workbench-email-list";
 import {
   displayAttachmentFilename,
@@ -119,8 +122,7 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { toast } from "sonner";
-import { formatDistanceToNow } from "date-fns";
-import { zhCN } from "date-fns/locale";
+import { formatListDateTimeCST } from "@/lib/format-datetime";
 import {
   Dialog,
   DialogContent,
@@ -185,17 +187,20 @@ export default function Workbench() {
   const selectedIdRef = useRef<string | null>(initialSelectedId);
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [listDays, setListDays] = useState(30);
+  const [listDateRange, setListDateRange] = useState(() =>
+    clampWorkbenchDateRange(defaultWorkbenchListDateFrom(), defaultWorkbenchListDateTo()),
+  );
+  const listDateFrom = listDateRange.dateFrom;
+  const listDateTo = listDateRange.dateTo;
   const [listPage, setListPage] = useState(0);
   const [listTotal, setListTotal] = useState(0);
   const [listLoading, setListLoading] = useState(false);
   const [selectedEmailDetail, setSelectedEmailDetail] = useState<Email | null>(null);
-  const [filter, setFilter] = useState<"all" | "pending" | "processing" | "replied">("all");
+  const [filter, setFilter] = useState<WorkbenchListStatusFilter>("all");
   const [intentFilter, setIntentFilter] = useState<string>("all");
   const [updatingStatus, setUpdatingStatus] = useState(false);
   const [savingIntent, setSavingIntent] = useState(false);
   const [mailboxFilter, setMailboxFilter] = useState<string>("all");
-  const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [associationFilter, setAssociationFilter] = useState<string>("all");
   const [timeFilter, setTimeFilter] = useState<"all" | SlaBucket>("all");
   const [mailboxes, setMailboxes] = useState<{ id: string; email_address: string; display_name: string | null }[]>([]);
@@ -220,7 +225,7 @@ export default function Workbench() {
   const [attachmentRepairTaskHint, setAttachmentRepairTaskHint] = useState<string | null>(null);
   const [conversationCollapsed, setConversationCollapsed] = useState(true);
   const [timelineCollapsed, setTimelineCollapsed] = useState(true);
-  /** 更多查询（时间/意图/关联/分类/时效），默认收起；上行邮箱、中行状态、下行搜索+更多查询 */
+  /** 更多查询（时间/意图/关联/时效），默认收起；上行邮箱、中行状态、下行搜索+更多查询 */
   const [listFiltersCollapsed, setListFiltersCollapsed] = useState(true);
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
   const [guidance, setGuidance] = useState("");
@@ -330,22 +335,22 @@ export default function Workbench() {
         ? mailboxes.find((m) => m.id === mailboxFilter)
         : undefined;
     return {
-      listDays,
+      dateFrom: listDateFrom,
+      dateTo: listDateTo,
       status: filter,
       mailboxId: mailboxFilter,
       mailboxToEmail: mb?.email_address ?? null,
-      category: categoryFilter,
       association: associationFilter,
       intent: intentFilter,
       slaBucket: timeFilter,
       search,
     };
   }, [
-    listDays,
+    listDateFrom,
+    listDateTo,
     filter,
     mailboxFilter,
     mailboxes,
-    categoryFilter,
     associationFilter,
     intentFilter,
     timeFilter,
@@ -1556,11 +1561,13 @@ export default function Workbench() {
     );
   }, [emails, associationFilter, compensationByEmailId]);
 
-  const categories = Array.from(new Set(emails.map((e) => e.category).filter(Boolean)));
-
   const activeMoreFilterSummary = useMemo(() => {
     const parts: string[] = [];
-    if (listDays !== 14) parts.push(workbenchListDaysLabel(listDays));
+    const defaultFrom = defaultWorkbenchListDateFrom();
+    const defaultTo = defaultWorkbenchListDateTo();
+    if (listDateFrom !== defaultFrom || listDateTo !== defaultTo) {
+      parts.push(workbenchListDateRangeLabel(listDateFrom, listDateTo));
+    }
     if (intentFilter !== "all") {
       const o = BUSINESS_INTENT_OPTIONS.find((x) => x.value === intentFilter);
       parts.push(o?.label ?? intentFilter);
@@ -1569,10 +1576,9 @@ export default function Workbench() {
       const o = ASSOCIATION_FILTER_OPTIONS.find((x) => x.value === associationFilter);
       parts.push(o?.label ?? associationFilter);
     }
-    if (categoryFilter !== "all") parts.push(String(categoryFilter));
     if (timeFilter !== "all") parts.push(SLA_BUCKET_LABEL[timeFilter] ?? timeFilter);
     return parts;
-  }, [listDays, intentFilter, associationFilter, categoryFilter, timeFilter]);
+  }, [listDateFrom, listDateTo, intentFilter, associationFilter, timeFilter]);
 
   const listPageCount = Math.max(1, Math.ceil(listTotal / WORKBENCH_LIST_PAGE_SIZE));
   const listPageSafe = Math.min(listPage, listPageCount - 1);
@@ -1589,23 +1595,22 @@ export default function Workbench() {
       <div className="w-80 border-r flex flex-col bg-card">
         <div className="p-3 border-b space-y-2">
           <div className="flex items-center justify-between gap-1">
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <h2 className="font-semibold text-sm">邮件队列</h2>
-              <p className="text-[10px] text-muted-foreground truncate">
+              <p className="text-[10px] text-muted-foreground leading-snug">
                 {listLoading
                   ? "加载中…"
-                  : `${workbenchListDaysLabel(listDays)} · 共 ${listTotal} 封 · 第 ${listPageSafe + 1}/${listPageCount} 页`}
+                  : `${workbenchListDateRangeLabel(listDateFrom, listDateTo)} · 共 ${listTotal} 封 · 第 ${listPageSafe + 1}/${listPageCount} 页`}
               </p>
             </div>
             <Button
               size="sm"
               variant="outline"
-              className="h-7 px-2 text-xs shrink-0"
+              className="h-7 px-1.5 text-xs shrink-0"
               onClick={syncMailboxes}
               disabled={syncing || !hasMailboxAccess || grantsLoading}
             >
-              <RefreshCw className={`w-3 h-3 mr-1 ${syncing ? "animate-spin" : ""}`} />
-              {syncing ? "同步中" : "同步邮箱"}
+              {syncing ? "同步中" : "同步"}
             </Button>
           </div>
           <Select value={mailboxFilter} onValueChange={setMailboxFilter}>
@@ -1623,7 +1628,7 @@ export default function Workbench() {
             </SelectContent>
           </Select>
           <div className="flex gap-1 flex-wrap">
-            {(["all", "pending", "processing", "replied"] as const).map((f) => (
+            {(["all", "pending", "auto_replied", "replied"] as const).map((f) => (
               <Button
                 key={f}
                 size="sm"
@@ -1633,7 +1638,7 @@ export default function Workbench() {
               >
                 {f === "all" ? "全部"
                   : f === "pending" ? "待处理"
-                  : f === "processing" ? "处理中"
+                  : f === "auto_replied" ? "自动回复"
                   : "已回复"}
               </Button>
             ))}
@@ -1670,26 +1675,14 @@ export default function Workbench() {
           )}
           {!listFiltersCollapsed && (
             <>
-              <Select
-                value={String(listDays)}
-                onValueChange={(v) => setListDays(Number(v))}
-              >
-                <SelectTrigger className="h-8 text-xs">
-                  <SelectValue placeholder="时间范围" />
-                </SelectTrigger>
-                <SelectContent>
-                  {WORKBENCH_LIST_DAYS_OPTIONS.map((o) => (
-                    <SelectItem key={o.value} value={String(o.value)}>
-                      {o.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {listDays === WORKBENCH_LIST_DAYS_ALL && (
-                <p className="text-[10px] text-muted-foreground leading-snug">
-                  全部历史按收信时间倒序分页；超过 90 天的邮件请选此项或「近 1 年」，建议配合搜索缩小范围。
-                </p>
-              )}
+              <WorkbenchDateRangePicker
+                dateFrom={listDateFrom}
+                dateTo={listDateTo}
+                onChange={(from, to) => {
+                  setListDateRange(clampWorkbenchDateRange(from, to));
+                  setListPage(0);
+                }}
+              />
               <div className="grid grid-cols-2 gap-1">
                 <Select value={intentFilter} onValueChange={setIntentFilter}>
                   <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="意图" /></SelectTrigger>
@@ -1709,25 +1702,16 @@ export default function Workbench() {
                   </SelectContent>
                 </Select>
               </div>
-              <div className="grid grid-cols-2 gap-1">
-                <Select value={categoryFilter} onValueChange={setCategoryFilter}>
-                  <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="分类" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">全部分类</SelectItem>
-                    {categories.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-                <Select value={timeFilter} onValueChange={(v) => setTimeFilter(v as "all" | SlaBucket)}>
-                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">全部时间</SelectItem>
-                    <SelectItem value="within_24h">&lt;24h</SelectItem>
-                    <SelectItem value="within_48h">24-48h</SelectItem>
-                    <SelectItem value="within_72h">48-72h</SelectItem>
-                    <SelectItem value="over_72h">72h+</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+              <Select value={timeFilter} onValueChange={(v) => setTimeFilter(v as "all" | SlaBucket)}>
+                <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="时效" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">全部时间</SelectItem>
+                  <SelectItem value="within_24h">&lt;24h</SelectItem>
+                  <SelectItem value="within_48h">24-48h</SelectItem>
+                  <SelectItem value="within_72h">48-72h</SelectItem>
+                  <SelectItem value="over_72h">72h+</SelectItem>
+                </SelectContent>
+              </Select>
             </>
           )}
         </div>
@@ -1752,8 +1736,8 @@ export default function Workbench() {
           ) : (
             listEmails.map((email) => {
               const statusBar =
-                email.status === "pending" ? "bg-warning"
-                : email.status === "processing" ? "bg-primary"
+                email.status === "pending" || email.status === "processing" ? "bg-warning"
+                : email.status === "replied" && email.processing_status === "auto_replied" ? "bg-info"
                 : email.status === "replied" ? "bg-success"
                 : "bg-muted";
               const missing = (email.missing_elements ?? []) as string[];
@@ -1769,7 +1753,7 @@ export default function Workbench() {
                   <div className="flex items-start justify-between gap-2 mb-1 min-w-0">
                     <div className="text-sm truncate flex-1 min-w-0">{decodeRfc2047(email.from_name) ?? email.from_email}</div>
                     <div className="shrink-0">
-                      <StatusBadge status={email.status} />
+                      <StatusBadge status={email.status} processingStatus={email.processing_status} />
                     </div>
                   </div>
                   <div className="text-xs truncate text-foreground/80">{decodeRfc2047(email.subject) || "(无主题)"}</div>
@@ -1778,7 +1762,7 @@ export default function Workbench() {
                   </div>
                   <div className="flex items-start mt-1.5 gap-1 min-w-0">
                     <span className="text-[10px] text-muted-foreground shrink-0 pt-[1px]">
-                      {formatDistanceToNow(new Date(email.received_at), { addSuffix: true, locale: zhCN })}
+                      {formatListDateTimeCST(email.received_at)}
                     </span>
                     <div className="flex gap-1 flex-wrap min-w-0">
                       {email.business_intent && (
@@ -1868,7 +1852,7 @@ export default function Workbench() {
                   <span className="text-muted-foreground">
                     {new Date(selected.received_at).toLocaleString("zh-CN")}
                   </span>
-                  <StatusBadge status={selected.status} />
+                  <StatusBadge status={selected.status} processingStatus={selected.processing_status} />
                 </div>
                 <div className="mt-2 text-xs">
                   <span className="text-muted-foreground">Message-ID：</span>
@@ -2271,7 +2255,7 @@ export default function Workbench() {
                                 </div>
                               </div>
                               <div className="shrink-0 text-right space-y-1">
-                                <StatusBadge status={email.status} />
+                                <StatusBadge status={email.status} processingStatus={email.processing_status} />
                                 <div className="text-[10px] text-muted-foreground">
                                   {new Date(email.received_at).toLocaleString("zh-CN")}
                                 </div>
@@ -2648,7 +2632,8 @@ export default function Workbench() {
                 <SelectContent>
                   <SelectItem value="cancel_order">客户要求取消订单</SelectItem>
                   <SelectItem value="change_address">客户要求修改收货地址</SelectItem>
-                  <SelectItem value="change_product">客户要求更换商品</SelectItem>
+                  <SelectItem value="delay_shipping">客户要求延迟发货</SelectItem>
+                  <SelectItem value="sku_change">发货前更换 SKU</SelectItem>
                   <SelectItem value="payment_issue">付款/风控异常</SelectItem>
                   <SelectItem value="other">其他（待核实）</SelectItem>
                 </SelectContent>

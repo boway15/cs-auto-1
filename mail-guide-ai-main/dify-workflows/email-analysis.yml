@@ -177,100 +177,73 @@ workflow:
           prompt_template:
             - role: system
               text: |
-                You are an email analysis assistant for a cross-border e-commerce customer service system. Analyze the customer email and return a JSON object.
-
-                ## Output Format
-                Return ONLY one valid JSON object: no markdown, no code fences, no chain-of-thought or XML-like tags (e.g. <thinking>, <think>), and no characters before the opening "{". Example:
-                {"intent":"after_sale","business_intent":"damaged","category":"售后","order_no":"SO20240315001","is_info_complete":false,"missing_elements":["order_no","attachment"],"summary":"客户反馈收到的商品有破损，要求退款","priority":"high","risk_level":"normal","sentiment":"frustrated","language":"zh","entities":{"order_no":null,"product_name":"Wireless Mouse"}}
+                You are an email analysis assistant for cross-border e-commerce CS. Return ONE valid JSON object only — no markdown, no code fences, no thinking tags, nothing before "{".
+                Example: {"intent":"after_sale","business_intent":"damaged","category":"售后","order_no":"SO20240315001","is_info_complete":false,"missing_elements":["order_no","attachment"],"summary":"客户反馈收到的商品有破损，要求退款","priority":"high","risk_level":"normal","sentiment":"frustrated","language":"zh","entities":{"order_no":null,"product_name":"Wireless Mouse"}}
 
                 ## Fields
-                - intent: legacy field. one of "after_sale" (售后), "refund" (退款), "cancel_order" (取消), "change_address" (改地址), "shipping_query" (物流), "general" (其他)
-                - business_intent: REQUIRED, exactly one of:
-                    "order_cancel"          (订单取消)
-                    "address_change"        (订单改地址)
-                    "damaged"               (破损)
-                    "defect"                (产品缺陷)
-                    "description_mismatch"  (商品描述不符)
-                    "logistics"             (物流问题)
-                    "other"                 (其他问题 — 最低优先级，仅当 1–10 均不适用)
-                    "amazon_marketplace"    (亚马逊渠道购买/沟通)
-                    "product_inquiry"       (售前/安装咨询)
-                    "conversation_idle"     (感谢/结案/无新诉求)
-                    "solution_accepted"     (接受客服已提出的方案，待履约)
-                - category: "售后" for order_cancel/address_change/damaged/defect/description_mismatch; "咨询" for logistics/other/amazon_marketplace/product_inquiry/conversation_idle/solution_accepted
-                - order_no: extract order number if present. Typical shape: one or more Latin letters followed by one or more digits (lengths variable); an optional single - / _ may appear between letters and digits. Also honor labeled lines (订单号 / Order No). Use null if not found.
-                - is_info_complete: for damaged/defect/description_mismatch: true only if order_no is present AND the email has at least one attachment; for order_cancel/address_change/logistics: true if order_no is present; otherwise follow rules below
-                - missing_elements: array of what's missing. Values: "order_no", "attachment" (no file attached when quality/damage/defect/mismatch context needs evidence; use "attachment" not "image"), "image" (legacy), "product" (unclear product). Empty array if complete.
-                - summary: concise Chinese summary of the customer's issue, max 200 characters
-                - priority: "urgent" (angry / cancel / address change), "high" (after-sale / refund), "normal" (shipping query / general), "low" (just inquiry)
-                - risk_level: "high" if customer wants to cancel order or change address, otherwise "normal"
-                - sentiment: customer emotion - "angry", "frustrated", "neutral", "happy"
-                - language: "en" (English), "zh" (Chinese), "other" (other languages)
-                - entities: object with extracted entities. Include order_no (string or null), product_name (string or null), amount (string or null)
+                - intent: after_sale|refund|cancel_order|change_address|shipping_query|general
+                - business_intent (required, one of): order_cancel, address_change, delay_shipping, sku_change, damaged, defect, description_mismatch, logistics, other, amazon_marketplace, product_inquiry, conversation_idle, solution_accepted
+                - category: 售后 = order_cancel/address_change/delay_shipping/sku_change/damaged/defect/description_mismatch; 咨询 = all others
+                - order_no: extract if present (letters+digits or 订单号/Order No label); else null
+                - is_info_complete: damaged/defect/description_mismatch → true only if order_no + attachment; order_cancel/address_change/delay_shipping/sku_change/logistics → true if order_no present; product_inquiry/conversation_idle/solution_accepted → true; other → true
+                - missing_elements: [] or any of order_no, attachment, image, product
+                - summary: Chinese, ≤200 chars | priority: urgent|high|normal|low | risk_level: high only for order_cancel/address_change/delay_shipping/sku_change; else normal
+                - sentiment: angry|frustrated|neutral|happy
+                - language: Latest predominantly Chinese → zh; predominantly English → en; if Chinese/English mix and counts are close → en; else other
+                - entities: {order_no, product_name, amount}
 
-                ## business_intent priority (highest → lowest; pick the FIRST match; "other" is LAST RESORT only)
-                1. amazon_marketplace — Amazon channel / Amazon order id / 在亚马逊购买
-                2. solution_accepted — customer accepts refund/replacement/reship already offered
-                3. order_cancel — cancel order request
-                4. address_change — change shipping address
-                5. damaged — physical damage / broken / crushed (Latest body)
-                6. defect — not working / quality defect (Latest body)
-                7. description_mismatch — wrong item / not as described (Latest body)
-                8. logistics — shipping / tracking / delivery
-                9. product_inquiry — pre-sales / installation / how-to
-                10. conversation_idle — thank-you / case closed / no new request
-                11. other — 其他问题: ONLY when steps 1–10 all clearly do NOT apply. Never choose "other" out of uncertainty; prefer the closest specific intent above.
+                ## missing_elements (MUST apply before output)
+                - business_intent damaged/defect/description_mismatch AND no attachment in email → missing_elements MUST include "attachment"
+                - business_intent order_cancel/address_change/delay_shipping/sku_change/damaged/defect/description_mismatch/logistics AND order_no is null → missing_elements MUST include "order_no"
+                - product unclear in after-sale context → add "product"
+                - otherwise → missing_elements: []
 
-                ## Rules
-                Evaluate in priority order above. **"other" has the lowest priority** — use it only after ruling out every other business_intent.
+                ## Core principle
+                Classify from **Latest body**. Full body is quote/context only — never label cancel/damage/defect from quoted merchant text alone. Check entire email (including forwarded parts) ONLY for **Amazon channel** signals (order actually from Amazon), NOT mere price-comparison mentions. **business_intent must match summary**: if summary says customer did NOT request cancel/refund → business_intent cannot be order_cancel; if summary says 延迟/暂缓/暂停发货 → business_intent must be delay_shipping, not logistics.
 
-                ### A. Amazon channel (business_intent: "amazon_marketplace")
-                Use Subject, From, Latest body, and (when Latest body is very short) Full body for Amazon signals only.
-                Set "amazon_marketplace" when ANY of these match:
-                - From address is *@amazon.com (or amazon.co.uk / .de / etc.)
-                - Amazon order id pattern: 123-1234567-1234567
-                - Customer says bought on Amazon / 在亚马逊购买 / Amazon order / marketplace / 亚马逊渠道 / 亚马逊买的
-                - Subject or thread mentions Amazon purchase or Amazon order id even if Latest body is only a follow-up ("any update?", "好的")
-                Do NOT use "other" when Amazon channel is clear. If there is also a new damage/defect claim in Latest body, still prefer "amazon_marketplace" when the main issue is Amazon-channel purchase/support routing.
+                ## business_intent priority (first match wins; other = last resort)
+                1. amazon_marketplace — **only when this case is an Amazon-channel order**: *@amazon.com sender, Amazon order id (###-#######-#######), or customer clearly states they **purchased on Amazon** (在亚马逊购买 / purchased on Amazon / my Amazon order / Amazon order #…). **NOT** amazon_marketplace when customer only cites Amazon as cheaper competitor, asks price match, or wants to cancel/return an **independent-site order** they placed with you (→ order_cancel).
+                2. solution_accepted — accepts refund/replacement/reship already offered (OK/好的/同意/accept/agree)
+                3. order verification → other (NOT order_cancel): Latest body is **only supplying order facts** (any subset: time, card digits, product, name, address, phone — format may be incomplete or non-standard). No explicit customer request (cancel/refund/return/complain/ask/check status). Often replies to merchant security/fraud review. Merchant quote "cancel if no reply" ≠ customer cancel. Partial info still counts (e.g. only product + address). **Exception**: if Latest asks to check order/status/tracking (查订单/where is my order/any update) even with facts listed → NOT verification; use logistics or other instead. business_intent=other, risk_level=normal.
+                4. order_cancel — customer explicitly asks to cancel in Latest body (customer's own words, not quoted)
+                5. address_change — customer asks to change address
+                6. delay_shipping — customer asks to postpone/hold shipment (暂缓发货/晚点发/先别发/ship later); not cancel, not tracking inquiry
+                7. sku_change — customer asks to change SKU/variant/color/size/item **before shipment** (换SKU/换颜色/换尺码/change variant); not cancel, not delay-only, not wrong-item-after-delivery complaint
+                8. damaged — physical broken/crushed/damage (Latest body)
+                9. product_inquiry — pre-sales/install/how-to; also install difficulty + defect both present → product_inquiry (CS guides install first). Exception: hard physical damage (断裂/screen shattered) → defect.
+                10. defect — not working/quality issue, only if no install signals or hard physical damage stated
+                11. description_mismatch — wrong item / not as described
+                12. logistics — shipping/tracking/delivery
+                13. conversation_idle — thank-you/case closed, no new request
+                14. other — only when 1–13 all clearly fail
 
-                ### B. Solution accepted (business_intent: "solution_accepted")
-                Set "solution_accepted" when the customer accepts a refund, replacement, reship, partial refund, or specific fix that support already proposed.
-                - Latest body may be short: 好的 / 可以 / 没问题 / OK / Yes / Agreed / 按你说的 / 同意退款 / 接受方案 / proceed / sounds good
-                - You MAY read Full body ONLY to confirm support already offered a concrete solution (refund/replacement/reship); do not re-open old damage claims from quotes.
-                - Prefer "solution_accepted" over "conversation_idle" when Latest body is agreement to an offer, not a bare thank-you with no pending action.
+                ## Key rules
+                - Amazon channel vs price comparison: amazon_marketplace ONLY for confirmed Amazon-channel cases (see #1). Mentioning Amazon cheaper / price match / screenshot from Amazon / "go with Amazon" while canceling or returning **your** order → order_cancel, NOT amazon_marketplace.
+                - Cancel vs verification: order_cancel ONLY if customer explicitly requests cancel in Latest body. If Latest only lists order facts (even partial/informal) with no request verb → other, NOT order_cancel. If Latest lists facts BUT also asks to check order/status/shipping → logistics or other (NOT verification-only other). Do NOT infer cancel from Full body merchant deadline warnings.
+                - Install + defect: both present → product_inquiry, unless hard physical damage → defect.
+                - After-sale intents: Latest body only; quoted history doesn't count unless customer repeats in Latest.
 
-                ### C. After-sale from Latest body only (rules 1–7)
-                For order_cancel, address_change, damaged, defect, description_mismatch, logistics: classify from Latest body; do NOT label damaged/defect because an old quote mentions it unless the customer raises it again in Latest body.
-
-                1. If customer asks to cancel an order → intent: "cancel_order", business_intent: "order_cancel", risk_level: "high"
-                2. If customer asks to change shipping address → intent: "change_address", business_intent: "address_change", risk_level: "high"
-                3. If customer reports damage/broken/crushed item in Latest body → business_intent: "damaged"; if no attachment add "attachment" to missing_elements
-                4. If customer reports product not working / defective / quality issue in Latest body → business_intent: "defect"
-                5. If product does not match description / wrong item in Latest body → business_intent: "description_mismatch"
-                6. Shipping/tracking/delivery questions in Latest body → intent: "shipping_query", business_intent: "logistics"
-                7. For after-sale issues without order number → add "order_no" to missing_elements when needed
-                8. Thank you / case closed / no new issue and NO pending accepted solution → business_intent: "conversation_idle"
-                9. Pre-sales or installation/how-to → business_intent: "product_inquiry"
-                10. ONLY if steps 1–9 and rules A–C all do not apply → business_intent: "other" (最低优先级，最后才用)
-                11. Chinese customers → language "zh"; English → "en"
-                12. business_intent must be exactly one enum value (single-select).
-
-                ## Examples (business_intent only)
-                - Latest: "OK please process the refund" + quote shows agent offered refund → solution_accepted
-                - Latest: "好的，按你们说的换货" → solution_accepted
-                - Latest: "Thanks!" only, no open offer → conversation_idle
-                - Subject: "Amazon order 123-4567890-1234567" / From: buyer@amazon.com → amazon_marketplace
-                - Latest: "我是在亚马逊买的，能帮忙吗" → amazon_marketplace
+                ## Quick examples
+                - buyer@amazon.com or Amazon order id in thread → amazon_marketplace (even if Latest mentions cancel)
+                - Latest: "Amazon is cheaper ($159), please cancel my Sedeta order / explain return & shipping label" → order_cancel (price comparison on independent-site order, NOT amazon_marketplace)
+                - Thread: "I placed directly with you; Amazon has same item cheaper; price match?" → order_cancel
+                - Latest: "walnut dresser\n3701 guthrie circle lawrenceville ga 30044" (only product+address, security review in quote) → other
+                - Latest: "order time: 11pm, 0053, walnut dresser, bridgett baranda, 3701 guthrie circle" → other
+                - Latest: "订单号 SO123，产品是桌子，请帮我查一下状态" → logistics (has check-status request, NOT verification-only)
+                - "Please cancel my order #12345" → order_cancel
+                - "Please don't ship until next Monday, order SO123" → delay_shipping
+                - "Please change my order to the blue variant / size L before you ship, order SO123" → sku_change
+                - "装不上，孔位不对，是不是质量问题" → product_inquiry
+                - "屏幕碎了，完全无法开机" → defect
+                - "product doesn't work" (no install mention) → defect
+                - "OK please process the refund" → solution_accepted
+                - "Thanks!" only → conversation_idle
             - role: user
               text: |
                 Subject: {{#start.subject#}}
                 From: {{#start.from_email#}}
-                Latest body (customer's new reply only):
-                {{#start.body_latest#}}
-
-                Full body (with quotes, reference only):
-                {{#start.body_text#}}
-
+                Latest body: {{#start.body_latest#}}
+                Full body (quotes, reference only): {{#start.body_text#}}
                 Attachments: {{#start.attachments#}}
           vision:
             enabled: false
@@ -329,14 +302,72 @@ workflow:
                 from_s = _s(from_email)
                 latest_s = _s(body_latest)
                 full_s = _s(body_text)
+
+                def strip_quoted_reply(body: str) -> str:
+                    if not body:
+                        return ""
+                    split_patterns = [
+                        r"\n\s*On .{5,120} wrote:\s*\n",
+                        r"\n\s*在 .{5,120} wrote:\s*\n",
+                        r"\n\s*-{3,}\s*Original Message\s*-{3,}\s*\n",
+                        r"\n\s*-{3,}\s*Forwarded message\s*-{3,}\s*\n",
+                        r"\n\s*From:\s*.+\n(?:Sent|Date):\s*.+\n",
+                        r"\n\s*发件人[:：].+\n(?:发送时间|日期)[:：].+\n",
+                    ]
+                    text = body
+                    best = len(text)
+                    for pat in split_patterns:
+                        m = re.search(pat, text, re.I)
+                        if m and m.start() < best:
+                            best = m.start()
+                    if best < len(text):
+                        text = text[:best]
+                    return text.strip()
+
+                def resolve_effective_latest() -> str:
+                    if latest_s:
+                        return latest_s
+                    return strip_quoted_reply(full_s)
+
+                effective_latest = resolve_effective_latest()
                 analysis_text = "\n".join(
-                    x for x in (subject_s, latest_s or full_s) if x
+                    x for x in (subject_s, effective_latest) if x
                 ).strip()
                 thread_text = "\n".join(
-                    x for x in (subject_s, latest_s, full_s) if x
+                    x for x in (subject_s, effective_latest, full_s) if x
                 ).strip()
 
-                def looks_like_amazon(text: str, sender: str) -> bool:
+                def looks_like_amazon_price_comparison(text: str) -> bool:
+                    return bool(
+                        re.search(
+                            r"amazon.{0,80}(cheaper|much cheaper|less|lower|selling|is having|has the same|for\s*\$|same product|same item)|"
+                            r"(cheaper|price match|match.{0,25}(the )?same price|same price).{0,50}amazon|"
+                            r"go with amazon|unless you.{0,40}(match|able to match)|"
+                            r"(found|saw|see|sharing|share|screenshot|picture).{0,50}amazon|"
+                            r"amazon.{0,40}(picture|screenshot|screen\s*shot)|"
+                            r"on (the )?amazon (website|site)|"
+                            r"(higher|more expensive).{0,40}(price|pay).{0,40}(amazon|cheaper)|"
+                            r"justification.{0,30}(pay|higher)|"
+                            r"ordered from (them|amazon).{0,60}(return|keep your|cancel this)|"
+                            r"available at.{0,30}cheaper",
+                            text,
+                            re.I,
+                        )
+                    )
+
+                def looks_like_independent_site_order_context(text: str) -> bool:
+                    return bool(
+                        re.search(
+                            r"cancel this order|placed directly (with|on)|on your (site|website|store)|"
+                            r"directly with|order (SEDETA|SO\d|#[A-Z0-9]{4,})|"
+                            r"would like to cancel.{0,40}(order|this)|"
+                            r"I placed.{0,30}(with you|on your|directly)",
+                            text,
+                            re.I,
+                        )
+                    )
+
+                def looks_like_amazon_channel_confirmed(text: str, sender: str) -> bool:
                     if re.search(
                         r"@amazon\.(com|co\.uk|de|fr|it|es|ca|com\.au|co\.jp)\b",
                         sender,
@@ -345,12 +376,48 @@ workflow:
                         return True
                     if re.search(r"\b\d{3}-\d{7}-\d{7}\b", text):
                         return True
+                    if re.search(
+                        r"在亚马逊(上)?(购买|下单|买的)|亚马逊渠道|"
+                        r"purchased on amazon|bought on amazon|ordered (on|from|through) amazon|"
+                        r"my amazon (order|purchase)|"
+                        r"amazon order\s*(#|number|no\.?|id)[:#\s]?\s*[\d-]+",
+                        text,
+                        re.I,
+                    ):
+                        if (
+                            looks_like_amazon_price_comparison(text)
+                            and looks_like_independent_site_order_context(text)
+                        ):
+                            return False
+                        return True
+                    return False
+
+                def looks_like_amazon(text: str, sender: str) -> bool:
+                    return looks_like_amazon_channel_confirmed(text, sender)
+
+                def should_correct_amazon_to_cancel(
+                    thread: str, latest: str, sender: str, bi: str,
+                ) -> bool:
+                    if bi != "amazon_marketplace":
+                        return False
+                    if re.search(
+                        r"@amazon\.(com|co\.uk|de|fr|it|es|ca|com\.au|co\.jp)\b",
+                        sender,
+                        re.I,
+                    ):
+                        return False
+                    if re.search(r"\b\d{3}-\d{7}-\d{7}\b", thread):
+                        return False
+                    if not looks_like_amazon_price_comparison(thread):
+                        return False
+                    if looks_like_independent_site_order_context(thread):
+                        return True
+                    if looks_like_customer_cancel_request(latest):
+                        return True
                     return bool(
                         re.search(
-                            r"在亚马逊|亚马逊(上)?购买|亚马逊(渠道|订单|买的)|"
-                            r"purchased on amazon|amazon order|bought on amazon|from amazon|"
-                            r"amazon\.com|marketplace",
-                            text,
+                            r"return process|return shipping label|shipping label|price match",
+                            latest,
                             re.I,
                         )
                     )
@@ -383,15 +450,234 @@ workflow:
                         )
                     )
 
-                def looks_like_product_inquiry(text: str) -> bool:
+                def looks_like_installation_issue(text: str) -> bool:
                     return bool(
                         re.search(
-                            r"怎么安装|如何安装|安装步骤|assembly|how to install|"
-                            r"instruction manual|说明书|规格|多少钱|price\b|in stock|有货|售前|before (i )?order",
+                            r"怎么安装|如何安装|安装步骤|安装问题|安装说明|装不上|装不了|不会装|安装不了|组装|"
+                            r"assembly|how to install|how do i install|put together|setup|"
+                            r"instruction manual|说明书|assemble|cannot assemble|can't assemble|"
+                            r"assembly issue|install issue|pieces don'?t fit|parts don'?t fit|"
+                            r"holes don'?t align|won'?t line up|missing screw|对不齐|孔位",
                             text,
                             re.I,
                         )
                     )
+
+                def looks_like_defect_signal(text: str) -> bool:
+                    return bool(
+                        re.search(
+                            r"缺陷|defect|defective|not\s*working|malfunction|质量问题|品质问题|次品|劣质|"
+                            r"doesn'?t work|don'?t work|won'?t work|不工作|用不了|有问题|"
+                            r"功能.{0,4}(坏|异常|故障)|quality issue|faulty",
+                            text,
+                            re.I,
+                        )
+                    )
+
+                def looks_like_installation_with_defect(text: str) -> bool:
+                    return looks_like_installation_issue(text) and looks_like_defect_signal(text)
+
+                def looks_like_product_inquiry(text: str) -> bool:
+                    return looks_like_installation_issue(text) or bool(
+                        re.search(
+                            r"规格|多少钱|price\b|in stock|有货|售前|before (i )?order",
+                            text,
+                            re.I,
+                        )
+                    )
+
+                def looks_like_merchant_security_review(text: str) -> bool:
+                    return bool(
+                        re.search(
+                            r"security review|fraud|unusual.{0,20}order|"
+                            r"confirm.{0,40}order.{0,30}(placed|by yourself|legality|verify)|"
+                            r"last\s*4\s*digits.{0,30}(payment|purchase|card)|"
+                            r"verify.{0,20}order|protect you from potential fraud|"
+                            r"安全.{0,8}审核|核实.{0,12}订单|验证.{0,12}订单|"
+                            r"确认.{0,12}订单.{0,12}(本人|自己)",
+                            text,
+                            re.I,
+                        )
+                    )
+
+                def looks_like_delay_shipping_request(latest: str) -> bool:
+                    if re.search(
+                        r"sorry\s+for\s+(the\s+)?delay|apologize.*delay|延误.*抱歉",
+                        latest,
+                        re.I,
+                    ) and not re.search(
+                        r"don'?t\s+ship|do\s+not\s+ship|暂缓|晚.{0,4}发|延迟发货|ship\s+later|postpone|hold\s+(the\s+)?order",
+                        latest,
+                        re.I,
+                    ):
+                        return False
+                    return bool(
+                        re.search(
+                            r"延迟发货|暂缓发货|暂停发货|晚点发货|晚几天发|先别发|不要发货|暂不发货|先不要发|"
+                            r"等我.{0,12}再发|发货.{0,6}暂缓|暂停.{0,6}发货|"
+                            r"ship\s+later|postpone\s+(the\s+)?(shipment|delivery|order)|"
+                            r"hold\s+(the\s+)?(shipment|order|delivery)|"
+                            r"don'?t\s+ship\s+(yet|until|before|for)|"
+                            r"do\s+not\s+ship\s+(yet|until|before|for)|"
+                            r"wait\s+(to\s+)?ship|delay\s+(the\s+)?(shipment|shipping|delivery)|"
+                            r"please\s+hold\s+my\s+order",
+                            latest,
+                            re.I,
+                        )
+                    )
+
+                def looks_like_sku_change_request(latest: str) -> bool:
+                    if looks_like_delay_shipping_request(latest):
+                        return False
+                    if re.search(
+                        r"取消订单|cancel\s*(my|the)\s*order|want to cancel|please cancel",
+                        latest,
+                        re.I,
+                    ):
+                        return False
+                    if re.search(
+                        r"发错|错发|收到.{0,8}不对|wrong\s*item|not what i ordered",
+                        latest,
+                        re.I,
+                    ):
+                        return False
+                    return bool(
+                        re.search(
+                            r"换\s*sku|更换\s*sku|改\s*sku|change\s*(the\s*)?(sku|variant|item|product)|"
+                            r"swap\s+(to|for)|different\s+(color|size|variant)|replace\s+with|"
+                            r"换款式|换颜色|换尺码|换型号|换大一号|换小一号|更换商品|改款式|改颜色|改尺码|"
+                            r"发货前.{0,8}换|换成.{0,12}(款|色|码|型号)",
+                            latest,
+                            re.I,
+                        )
+                    )
+
+                def looks_like_customer_cancel_request(latest: str) -> bool:
+                    if looks_like_delay_shipping_request(latest):
+                        return False
+                    return bool(
+                        re.search(
+                            r"取消订单|我要取消|请取消|帮我取消|不想买了|不要了|"
+                            r"want to cancel|please cancel|cancel (my |the )?order|"
+                            r"cancel it|need to cancel|would like to cancel|"
+                            r"stop (my )?order|do not ship|don't ship",
+                            latest,
+                            re.I,
+                        )
+                    )
+
+                def looks_like_active_customer_request(latest: str) -> bool:
+                    return bool(
+                        re.search(
+                            r"please (?!confirm)|want to|need to|help me|complain|refund|return|"
+                            r"damage|broken|defect|not working|doesn'?t work|"
+                            r"投诉|退款|退货|破损|损坏|怎么回事|why did|how come|unhappy|"
+                            r"when will|where is|tracking|ship(ping)?|delivery|物流|快递|什么时候发|"
+                            r"查订单|查一下|帮我查|订单状态|check (my )?order|order status|any update|"
+                            r"please check|help check|status of my order",
+                            latest,
+                            re.I,
+                        )
+                    )
+
+                def has_product_hint(text: str) -> bool:
+                    return bool(
+                        re.search(
+                            r"product|item|type\s*:|dresser|drawer|table|chair|bed|sofa|desk|cabinet|"
+                            r"walnut|\([^)]*drawer|商品|产品",
+                            text,
+                            re.I,
+                        )
+                    )
+
+                def has_address_hint(text: str) -> bool:
+                    return bool(
+                        re.search(
+                            r"\d+\s+\w+\s+(?:street|st|circle|ave|avenue|road|rd|drive|dr|lane|ln|court|ct|way|blvd|boulevard)\b|"
+                            r"\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b|"
+                            r"shipping address|收货地址|地址",
+                            text,
+                            re.I,
+                        )
+                    )
+
+                def has_time_or_digits_hint(text: str) -> bool:
+                    return bool(
+                        re.search(
+                            r"order\s*time|下单时间|购买时间|purchase\s*time|"
+                            r"\d{1,2}\s*(?:am|pm)\s*\d|\d{1,2}/\d{1,2}/\d{2,4}|"
+                            r"(?:last\s*)?(?:4\s*)?digits|payment\s*method|卡号|尾号|\b\d{4}\b",
+                            text,
+                            re.I,
+                        )
+                    )
+
+                def has_name_hint(text: str) -> bool:
+                    return bool(
+                        re.search(
+                            r"contact\s*name|contact\s*:|name\s*:|recipient|姓名|联系人",
+                            text,
+                            re.I,
+                        )
+                    )
+
+                def count_order_detail_signals(latest: str) -> int:
+                    return sum(
+                        1
+                        for fn in (
+                            has_product_hint,
+                            has_address_hint,
+                            has_time_or_digits_hint,
+                            has_name_hint,
+                        )
+                        if fn(latest)
+                    )
+
+                def summary_indicates_verification_not_cancel(summary: str) -> bool:
+                    if not summary:
+                        return False
+                    if re.search(r"要求取消|请求取消|ask.*cancel|want.*cancel|取消订单", summary, re.I):
+                        return False
+                    return bool(
+                        re.search(
+                            r"核验|验证|verification|安全审核|未提出取消|未.*取消|not.*cancel|"
+                            r"no cancel|provid(e|ing).{0,12}(order|信息|核验|验证)|"
+                            r"订单事实|补充.*信息|security review|支付尾号|收货地址",
+                            summary,
+                            re.I,
+                        )
+                    )
+
+                def looks_like_order_verification_response(latest: str, thread: str) -> bool:
+                    if not latest.strip():
+                        return False
+                    if looks_like_customer_cancel_request(latest):
+                        return False
+                    if looks_like_active_customer_request(latest):
+                        return False
+                    has_review = looks_like_merchant_security_review(thread)
+                    signals = count_order_detail_signals(latest)
+                    lines = [ln.strip() for ln in latest.splitlines() if ln.strip()]
+                    # Merchant security review + any 2+ fact types (partial OK)
+                    if has_review and signals >= 2:
+                        return True
+                    # Security review + multi-line factual reply without request verbs (non-standard format OK)
+                    if has_review and len(lines) >= 2 and not re.search(
+                        r"\?|!|please|want |need |help |damage|broken|defect|refund|complain|"
+                        r"破损|损坏|退款|投诉|tracking|物流|快递",
+                        latest,
+                        re.I,
+                    ):
+                        return True
+                    # Security review + single fact line, short data-only reply
+                    if has_review and signals >= 1 and len(lines) <= 6 and len(latest) < 400:
+                        if not re.search(
+                            r"\?|please|want |need |help |damage|broken|defect|refund",
+                            latest,
+                            re.I,
+                        ):
+                            return True
+                    return False
 
                 def looks_like_conversation_idle(text: str) -> bool:
                     if looks_like_solution_accepted(text):
@@ -428,12 +714,26 @@ workflow:
                         and agent_offered_solution_in_thread(full_s)
                     ):
                         return "solution_accepted"
-                    if re.search(r"取消订单|cancel\s*order|cancel\s*the\s*order", latest, re.I):
+                    if looks_like_order_verification_response(latest, thread):
+                        return "other"
+                    if looks_like_customer_cancel_request(latest):
+                        return "order_cancel"
+                    if re.search(
+                        r"取消订单|(?:please|want to|need to|我要|请).{0,12}cancel|cancel\s*(my|the)\s*order",
+                        latest,
+                        re.I,
+                    ):
                         return "order_cancel"
                     if re.search(r"修改地址|change\s*address|update\s*address", latest, re.I):
                         return "address_change"
+                    if looks_like_delay_shipping_request(latest):
+                        return "delay_shipping"
+                    if looks_like_sku_change_request(latest):
+                        return "sku_change"
                     if re.search(r"破损|broken|damage|damaged|crushed", latest, re.I):
                         return "damaged"
+                    if looks_like_installation_with_defect(latest):
+                        return "product_inquiry"
                     if re.search(
                         r"缺陷|defect|defective|not\s*working|malfunction|质量问题|品质问题|次品|劣质",
                         latest,
@@ -458,27 +758,40 @@ workflow:
                         return "conversation_idle"
                     return "other"
 
+                HOLD_BUSINESS_INTENTS = frozenset({
+                    "order_cancel", "address_change", "delay_shipping", "sku_change",
+                })
+
                 def refine_business_intent(bi: str) -> str:
-                    """'other' is lowest priority: re-infer from text before keeping it."""
+                    """Preserve hold intents; Amazon channel wins for consult labels only."""
+                    if bi in HOLD_BUSINESS_INTENTS:
+                        return bi
                     if bi == "other":
-                        return infer_from_text_priority(latest_s or full_s, thread_text, from_s)
-                    if bi == "conversation_idle":
+                        reinferred = infer_from_text_priority(effective_latest, thread_text, from_s)
+                        if reinferred in HOLD_BUSINESS_INTENTS:
+                            return reinferred
                         if looks_like_amazon(thread_text, from_s):
                             return "amazon_marketplace"
+                        return reinferred
+                    if bi == "conversation_idle":
                         if looks_like_solution_accepted(analysis_text) or (
                             looks_like_solution_accepted(thread_text)
                             and agent_offered_solution_in_thread(full_s)
                         ):
                             return "solution_accepted"
-                        short_ok = len(latest_s) < 120 and bool(
+                        short_ok = len(effective_latest) < 120 and bool(
                             re.search(
                                 r"^(好的?|可以|没问题|ok|yes|agree|confirmed)[\s!.，,]*$",
-                                latest_s,
+                                effective_latest,
                                 re.I,
                             )
                         )
                         if short_ok and agent_offered_solution_in_thread(full_s):
                             return "solution_accepted"
+                    if bi == "defect" and looks_like_installation_with_defect(effective_latest):
+                        return "product_inquiry"
+                    if looks_like_amazon(thread_text, from_s):
+                        return "amazon_marketplace"
                     return bi
 
                 if llm_output is None:
@@ -549,9 +862,9 @@ workflow:
                 if result["intent"] not in valid_intents:
                     result["intent"] = "general"
 
-                # Validate business_intent (10 categories, single-select)
+                # Validate business_intent (12 categories, single-select)
                 valid_business_intents = [
-                    "order_cancel", "address_change", "damaged", "defect",
+                    "order_cancel", "address_change", "delay_shipping", "sku_change", "damaged", "defect",
                     "description_mismatch", "logistics", "other",
                     "amazon_marketplace", "product_inquiry",
                     "conversation_idle", "solution_accepted",
@@ -567,12 +880,76 @@ workflow:
                 refined = refine_business_intent(str(result.get("business_intent") or "other"))
                 if refined in valid_business_intents:
                     result["business_intent"] = refined
+
+                if result["business_intent"] == "order_cancel":
+                    summary_s = str(result.get("summary") or "")
+                    if (
+                        looks_like_order_verification_response(effective_latest, thread_text)
+                        or summary_indicates_verification_not_cancel(summary_s)
+                        or not looks_like_customer_cancel_request(effective_latest)
+                    ):
+                        result["business_intent"] = "other"
+                        result["intent"] = "general"
+                        result["category"] = "咨询"
+                        result["risk_level"] = "normal"
+                        if result.get("priority") == "urgent":
+                            result["priority"] = "normal"
+
+                if result["business_intent"] in ("logistics", "other"):
+                    summary_s = str(result.get("summary") or "")
+                    if (
+                        looks_like_delay_shipping_request(effective_latest)
+                        or looks_like_delay_shipping_request(summary_s)
+                    ):
+                        result["business_intent"] = "delay_shipping"
+                        result["category"] = "售后"
+                        result["risk_level"] = "high"
+                    elif (
+                        looks_like_sku_change_request(effective_latest)
+                        or looks_like_sku_change_request(summary_s)
+                    ):
+                        result["business_intent"] = "sku_change"
+                        result["category"] = "售后"
+                        result["risk_level"] = "high"
+
+                if (
+                    looks_like_amazon(thread_text, from_s)
+                    and result["business_intent"] not in HOLD_BUSINESS_INTENTS
+                ):
+                    result["business_intent"] = "amazon_marketplace"
+                    result["category"] = "咨询"
+                    if result.get("intent") in ("cancel_order", "change_address"):
+                        result["intent"] = "general"
+                    if result.get("risk_level") == "high":
+                        result["risk_level"] = "normal"
+                    if result.get("priority") == "urgent":
+                        result["priority"] = "normal"
+
+                if should_correct_amazon_to_cancel(
+                    thread_text,
+                    effective_latest,
+                    from_s,
+                    result["business_intent"],
+                ):
+                    result["business_intent"] = "order_cancel"
+                    result["category"] = "售后"
+                    result["intent"] = "cancel_order"
+                    result["risk_level"] = "high"
+                    if result.get("priority") == "normal":
+                        result["priority"] = "urgent"
+
+                if result["business_intent"] == "defect" and looks_like_installation_with_defect(effective_latest):
+                    result["business_intent"] = "product_inquiry"
+                    result["category"] = "咨询"
+                    if result.get("priority") in ("urgent", "high"):
+                        result["priority"] = "normal"
+
                 consult = {
                     "logistics", "other", "amazon_marketplace", "product_inquiry",
                     "conversation_idle", "solution_accepted",
                 }
                 after_sale = {
-                    "order_cancel", "address_change", "damaged", "defect",
+                    "order_cancel", "address_change", "delay_shipping", "sku_change", "damaged", "defect",
                     "description_mismatch",
                 }
                 bi_final = result["business_intent"]

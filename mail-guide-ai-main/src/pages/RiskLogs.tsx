@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { fetchAccessibleMailboxes, type AccessibleMailbox } from "@/lib/accessible-mailboxes";
 import { TableListPagination } from "@/components/TableListPagination";
 import { clampListPage, listPageCount, listPageRange } from "@/lib/list-pagination";
 import { useAuth } from "@/hooks/useAuth";
@@ -13,11 +14,43 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
-import { AlertTriangle, Eye, RefreshCw, Search } from "lucide-react";
-import { formatDateTimeCST } from "@/lib/format-datetime";
+import { Checkbox } from "@/components/ui/checkbox";
+import { AlertTriangle, Eye, Mail as MailIcon, RefreshCw, Search } from "lucide-react";
+import { cstDayEndIso, cstDayStartIso, formatDateTimeCST } from "@/lib/format-datetime";
+import {
+  AUTO_INTERCEPT_INTENT_OPTIONS,
+  DEFAULT_AUTO_INTERCEPT_INTENTS,
+  type BusinessIntent,
+} from "@/lib/customerService";
 import { toast } from "sonner";
 
-type RiskLog = any;
+type RiskLogEmail = {
+  subject?: string | null;
+  from_email?: string | null;
+  to_email?: string | null;
+  message_id?: string | null;
+  mailbox_id?: string | null;
+};
+
+type RiskLog = {
+  id: string;
+  intercept_no: string;
+  action: string;
+  status: string;
+  trigger_source: string;
+  intercept_reason?: string | null;
+  reason_category?: string | null;
+  referenced_order_no?: string | null;
+  order_id?: string | null;
+  retry_count?: number;
+  error_message?: string | null;
+  shopify_response?: unknown;
+  erp_response?: unknown;
+  created_at: string;
+  updated_at: string;
+  orders?: { order_no?: string | null; customer_email?: string | null } | null;
+  emails?: RiskLogEmail | null;
+};
 
 const statusMap: Record<string, string> = {
   pending: "待执行",
@@ -31,7 +64,13 @@ type RiskLogFilters = {
   searchDebounced: string;
   dateFrom: string;
   dateTo: string;
+  mailboxId: string;
+  mailboxToEmail: string | null;
 };
+
+function postgrestQuoted(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function applyRiskLogFilters<T extends { eq: (...args: unknown[]) => T; gte: (...args: unknown[]) => T; lte: (...args: unknown[]) => T; or: (...args: unknown[]) => T }>(
@@ -40,19 +79,31 @@ function applyRiskLogFilters<T extends { eq: (...args: unknown[]) => T; gte: (..
 ): T {
   let q = query;
   if (filters.status !== "all") q = q.eq("status", filters.status);
-  if (filters.dateFrom) q = q.gte("created_at", new Date(filters.dateFrom).toISOString());
-  if (filters.dateTo) q = q.lte("created_at", new Date(`${filters.dateTo}T23:59:59`).toISOString());
+  if (filters.dateFrom) q = q.gte("created_at", cstDayStartIso(filters.dateFrom));
+  if (filters.dateTo) q = q.lte("created_at", cstDayEndIso(filters.dateTo));
+  if (filters.mailboxId !== "all") {
+    if (filters.mailboxToEmail) {
+      q = q.or(
+        `emails.mailbox_id.eq.${filters.mailboxId},emails.to_email.eq.${postgrestQuoted(filters.mailboxToEmail)}`,
+      );
+    } else {
+      q = q.eq("emails.mailbox_id", filters.mailboxId);
+    }
+  }
   if (filters.searchDebounced) {
     const s = `%${filters.searchDebounced}%`;
     q = q.or(
-      `intercept_no.ilike.${s},referenced_order_no.ilike.${s},intercept_reason.ilike.${s},orders.order_no.ilike.${s},orders.customer_email.ilike.${s},emails.subject.ilike.${s},emails.from_email.ilike.${s}`,
+      `intercept_no.ilike.${s},referenced_order_no.ilike.${s},intercept_reason.ilike.${s},orders.order_no.ilike.${s},orders.customer_email.ilike.${s},emails.subject.ilike.${s},emails.from_email.ilike.${s},emails.to_email.ilike.${s}`,
     );
   }
   return q;
 }
 
+const RISK_LOG_SELECT =
+  "*, orders(order_no, customer_email), emails(subject, from_email, to_email, message_id, mailbox_id)";
+
 export default function RiskLogs() {
-  const { isAdmin } = useAuth();
+  const { isAdmin, hasMailboxAccess, grantsLoading } = useAuth();
   const [logs, setLogs] = useState<RiskLog[]>([]);
   const [listTotal, setListTotal] = useState(0);
   const [listPage, setListPage] = useState(0);
@@ -62,11 +113,20 @@ export default function RiskLogs() {
   const [dateTo, setDateTo] = useState("");
   const [search, setSearch] = useState("");
   const [searchDebounced, setSearchDebounced] = useState("");
+  const [mailboxFilter, setMailboxFilter] = useState("all");
+  const [mailboxes, setMailboxes] = useState<AccessibleMailbox[]>([]);
   const [detail, setDetail] = useState<RiskLog | null>(null);
   const [riskAutoInterceptEnabled, setRiskAutoInterceptEnabled] = useState(false);
+  const [riskInterceptIntents, setRiskInterceptIntents] = useState<BusinessIntent[]>([
+    ...DEFAULT_AUTO_INTERCEPT_INTENTS,
+  ]);
   const [riskSettingLoaded, setRiskSettingLoaded] = useState(false);
   const [savingRiskSetting, setSavingRiskSetting] = useState(false);
   const [statusStats, setStatusStats] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    void fetchAccessibleMailboxes().then(setMailboxes);
+  }, []);
 
   useEffect(() => {
     const t = setTimeout(() => setSearchDebounced(search.trim()), 400);
@@ -75,18 +135,29 @@ export default function RiskLogs() {
 
   useEffect(() => {
     setListPage(0);
-  }, [status, searchDebounced, dateFrom, dateTo]);
+  }, [status, searchDebounced, dateFrom, dateTo, mailboxFilter]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const filters: RiskLogFilters = { status, searchDebounced, dateFrom, dateTo };
+      const mb =
+        mailboxFilter !== "all"
+          ? mailboxes.find((m) => m.id === mailboxFilter)
+          : undefined;
+      const filters: RiskLogFilters = {
+        status,
+        searchDebounced,
+        dateFrom,
+        dateTo,
+        mailboxId: mailboxFilter,
+        mailboxToEmail: mb?.email_address ?? null,
+      };
 
       const statKeys = ["success", "failed", "retrying", "pending"] as const;
       const statEntries = await Promise.all(
         statKeys.map(async (key) => {
           const { count, error } = await applyRiskLogFilters(
-            supabase.from("risk_intercept_logs").select("*", { count: "exact", head: true }),
+            supabase.from("risk_intercept_logs").select(RISK_LOG_SELECT, { count: "exact", head: true }),
             filters,
           ).eq("status", key);
           if (error) throw error;
@@ -96,9 +167,7 @@ export default function RiskLogs() {
       setStatusStats(Object.fromEntries(statEntries));
 
       let query = applyRiskLogFilters(
-        supabase
-          .from("risk_intercept_logs")
-          .select("*, orders(order_no, customer_email), emails(subject, from_email, message_id)", { count: "exact" }),
+        supabase.from("risk_intercept_logs").select(RISK_LOG_SELECT, { count: "exact" }),
         filters,
       );
       const { from, to } = listPageRange(listPage);
@@ -106,7 +175,7 @@ export default function RiskLogs() {
         .order("created_at", { ascending: false })
         .range(from, to);
       if (error) throw error;
-      setLogs(data ?? []);
+      setLogs((data ?? []) as RiskLog[]);
       setListTotal(count ?? 0);
     } catch (error) {
       const message = typeof error === "object" && error && "message" in error
@@ -118,7 +187,7 @@ export default function RiskLogs() {
     } finally {
       setLoading(false);
     }
-  }, [status, searchDebounced, dateFrom, dateTo, listPage]);
+  }, [status, searchDebounced, dateFrom, dateTo, mailboxFilter, mailboxes, listPage]);
 
   useEffect(() => {
     void load();
@@ -142,17 +211,28 @@ export default function RiskLogs() {
     (async () => {
       const { data, error } = await supabase
         .from("automation_settings")
-        .select("risk_auto_intercept_enabled")
+        .select("risk_auto_intercept_enabled, risk_auto_intercept_business_intents")
         .eq("singleton", "default")
         .maybeSingle();
       if (cancelled) return;
       if (error) {
         if (!error.message.includes("column") && error.code !== "42703") {
-          console.warn("automation_settings risk_auto_intercept_enabled:", error.message);
+          console.warn("automation_settings risk_auto_intercept:", error.message);
         }
         setRiskAutoInterceptEnabled(false);
+        setRiskInterceptIntents([...DEFAULT_AUTO_INTERCEPT_INTENTS]);
       } else {
-        setRiskAutoInterceptEnabled(!!(data as { risk_auto_intercept_enabled?: boolean } | null)?.risk_auto_intercept_enabled);
+        const row = data as {
+          risk_auto_intercept_enabled?: boolean;
+          risk_auto_intercept_business_intents?: string[] | null;
+        } | null;
+        setRiskAutoInterceptEnabled(!!row?.risk_auto_intercept_enabled);
+        const raw = row?.risk_auto_intercept_business_intents;
+        const allowed = new Set(AUTO_INTERCEPT_INTENT_OPTIONS.map((o) => o.value));
+        const parsed = Array.isArray(raw)
+          ? raw.filter((x): x is BusinessIntent => typeof x === "string" && allowed.has(x as BusinessIntent))
+          : [];
+        setRiskInterceptIntents(parsed.length > 0 ? parsed : [...DEFAULT_AUTO_INTERCEPT_INTENTS]);
       }
       setRiskSettingLoaded(true);
     })();
@@ -178,6 +258,30 @@ export default function RiskLogs() {
     toast.success("自动拦截设置已保存");
   }
 
+  async function saveRiskInterceptIntents(next: BusinessIntent[]) {
+    const prev = riskInterceptIntents;
+    setRiskInterceptIntents(next);
+    setSavingRiskSetting(true);
+    const { error } = await supabase
+      .from("automation_settings")
+      .update({ risk_auto_intercept_business_intents: next } as never)
+      .eq("singleton", "default");
+    setSavingRiskSetting(false);
+    if (error) {
+      setRiskInterceptIntents(prev);
+      toast.error("保存拦截意图失败：" + error.message);
+      return;
+    }
+    toast.success("自动拦截意图已保存");
+  }
+
+  function toggleRiskInterceptIntent(value: BusinessIntent, checked: boolean) {
+    const next = checked
+      ? [...riskInterceptIntents, value]
+      : riskInterceptIntents.filter((x) => x !== value);
+    void saveRiskInterceptIntents(next);
+  }
+
   return (
     <div className="h-screen flex flex-col p-6 overflow-hidden">
       <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
@@ -187,18 +291,36 @@ export default function RiskLogs() {
           </h1>
           <p className="text-sm text-muted-foreground">自动/人工暂停发货动作、第三方同步结果与失败审计</p>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
           {isAdmin && riskSettingLoaded && (
-            <div className="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-1.5">
-              <Label htmlFor="risk-auto-intercept" className="text-xs font-medium cursor-pointer whitespace-nowrap">
-                自动拦截与补偿
-              </Label>
-              <Switch
-                id="risk-auto-intercept"
-                checked={riskAutoInterceptEnabled}
-                disabled={savingRiskSetting}
-                onCheckedChange={(v) => void saveRiskAutoIntercept(v)}
-              />
+            <div className="flex items-center gap-3 rounded-md border bg-muted/30 px-3 py-1.5 flex-wrap">
+              <div className="flex items-center gap-2">
+                <Label htmlFor="risk-auto-intercept" className="text-xs font-medium cursor-pointer whitespace-nowrap">
+                  自动拦截与补偿
+                </Label>
+                <Switch
+                  id="risk-auto-intercept"
+                  checked={riskAutoInterceptEnabled}
+                  disabled={savingRiskSetting}
+                  onCheckedChange={(v) => void saveRiskAutoIntercept(v)}
+                />
+              </div>
+              <div className="flex items-center gap-3 border-l pl-3 flex-wrap">
+                <span className="text-xs text-muted-foreground whitespace-nowrap">自动拦截意图</span>
+                {AUTO_INTERCEPT_INTENT_OPTIONS.map((opt) => (
+                  <label
+                    key={opt.value}
+                    className="flex items-center gap-1.5 text-xs cursor-pointer"
+                  >
+                    <Checkbox
+                      checked={riskInterceptIntents.includes(opt.value)}
+                      disabled={savingRiskSetting || !riskAutoInterceptEnabled}
+                      onCheckedChange={(v) => toggleRiskInterceptIntent(opt.value, v === true)}
+                    />
+                    {opt.label}
+                  </label>
+                ))}
+              </div>
             </div>
           )}
           <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
@@ -206,6 +328,12 @@ export default function RiskLogs() {
           </Button>
         </div>
       </div>
+
+      {!hasMailboxAccess && !grantsLoading && (
+        <Card className="p-3 mb-4 text-sm text-muted-foreground border-warning/40 bg-warning/10">
+          当前账号未分配授权邮箱，拦截记录列表为空。请联系管理员配置邮箱授权。
+        </Card>
+      )}
 
       <div className="grid grid-cols-4 gap-3 mb-4">
         {(["success", "failed", "retrying", "pending"] as const).map((key) => (
@@ -216,11 +344,25 @@ export default function RiskLogs() {
         ))}
       </div>
 
-      <div className="flex gap-2 mb-3">
-        <div className="relative flex-1 max-w-md">
+      <div className="flex gap-2 mb-3 flex-wrap">
+        <div className="relative flex-1 max-w-md min-w-[200px]">
           <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索编号、订单、邮箱、主题" className="pl-7 h-8 text-sm" />
         </div>
+        <Select value={mailboxFilter} onValueChange={setMailboxFilter}>
+          <SelectTrigger className="w-52 h-8 text-xs">
+            <MailIcon className="w-3.5 h-3.5 mr-1 text-muted-foreground" />
+            <SelectValue placeholder="收件邮箱" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部收件邮箱</SelectItem>
+            {mailboxes.map((m) => (
+              <SelectItem key={m.id} value={m.id}>
+                {m.display_name || m.email_address}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Select value={status} onValueChange={setStatus}>
           <SelectTrigger className="w-40 h-8 text-xs"><SelectValue /></SelectTrigger>
           <SelectContent>
@@ -242,6 +384,7 @@ export default function RiskLogs() {
               <TableRow>
                 <TableHead>编号</TableHead>
                 <TableHead>订单</TableHead>
+                <TableHead>收件邮箱</TableHead>
                 <TableHead>触发</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead>原因</TableHead>
@@ -251,7 +394,7 @@ export default function RiskLogs() {
             </TableHeader>
             <TableBody>
               {logs.length === 0 ? (
-                <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground py-8">{loading ? "加载中…" : "暂无记录"}</TableCell></TableRow>
+                <TableRow><TableCell colSpan={8} className="text-center text-muted-foreground py-8">{loading ? "加载中…" : "暂无记录"}</TableCell></TableRow>
               ) : logs.map((log) => (
                 <TableRow key={log.id}>
                   <TableCell className="font-mono text-xs">{log.intercept_no}</TableCell>
@@ -262,7 +405,12 @@ export default function RiskLogs() {
                         <span className="ml-1 text-[10px] text-muted-foreground">（仅邮件单号）</span>
                       ) : null}
                     </div>
-                    <div className="text-xs text-muted-foreground">{log.orders?.customer_email ?? "—"}</div>
+                    <div className="text-xs text-muted-foreground" title="订单客户邮箱">
+                      订单邮箱：{log.orders?.customer_email ?? "—"}
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground max-w-[180px] truncate" title={log.emails?.to_email ?? undefined}>
+                    {log.emails?.to_email ?? "—"}
                   </TableCell>
                   <TableCell>
                     <Badge
@@ -324,7 +472,15 @@ export default function RiskLogs() {
                   <span className="text-muted-foreground">更新时间：</span>
                   {formatDateTimeCST(detail.updated_at)}
                 </div>
-                <div className="col-span-2 min-w-0 break-words"><span className="text-muted-foreground">邮件：</span>{detail.emails?.subject ?? "—"}</div>
+                <div className="col-span-2 min-w-0 break-words"><span className="text-muted-foreground">邮件主题：</span>{detail.emails?.subject ?? "—"}</div>
+                <div className="min-w-0 break-words">
+                  <span className="text-muted-foreground">触发发件邮箱：</span>
+                  {detail.emails?.from_email ?? "—"}
+                </div>
+                <div className="min-w-0 break-words">
+                  <span className="text-muted-foreground">触发收件邮箱：</span>
+                  {detail.emails?.to_email ?? "—"}
+                </div>
                 {detail.emails?.message_id?.trim() ? (
                   <div className="col-span-2 min-w-0 break-words">
                     <span className="text-muted-foreground">Message-ID：</span>
@@ -333,12 +489,16 @@ export default function RiskLogs() {
                     </span>
                   </div>
                 ) : null}
-                <div className="col-span-2 min-w-0 break-words">
-                  <span className="text-muted-foreground">引用单号：</span>
+                <div className="min-w-0 break-words">
+                  <span className="text-muted-foreground">订单号：</span>
                   {detail.referenced_order_no ?? detail.orders?.order_no ?? "—"}
                   {!detail.order_id && detail.referenced_order_no ? (
                     <span className="text-muted-foreground text-xs">（未关联本地订单）</span>
                   ) : null}
+                </div>
+                <div className="min-w-0 break-words">
+                  <span className="text-muted-foreground">订单客户邮箱：</span>
+                  {detail.orders?.customer_email ?? "—"}
                 </div>
                 <div className="col-span-2 min-w-0 whitespace-pre-wrap break-words break-all">
                   <span className="text-muted-foreground">原因：</span>

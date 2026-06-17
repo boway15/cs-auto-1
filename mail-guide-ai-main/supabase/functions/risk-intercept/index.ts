@@ -90,6 +90,10 @@ function reasonCategoryLabel(cat: string | null | undefined): string {
   const map: Record<string, string> = {
     cancel_order: "取消订单",
     change_address: "修改地址",
+    delay_shipping: "延迟发货",
+    sku_change: "发货前更换 SKU",
+    order_cancel: "取消订单",
+    address_change: "改地址",
     change_product: "更换商品",
     payment_issue: "付款/风控",
     risk_review: "风控复核",
@@ -795,7 +799,14 @@ Deno.serve(async (req) => {
     }
 
     if (trigger_source === "auto" || trigger_source === "retry") {
-      const pol = await assertAutoRiskInterceptAllowed(admin, eligibleEmailId);
+      const reasonCategory = payload.reason_category != null
+        ? String(payload.reason_category).trim()
+        : "";
+      const pol = await assertAutoRiskInterceptAllowed(
+        admin,
+        eligibleEmailId,
+        reasonCategory || null,
+      );
       if (!pol.ok) {
         return new Response(JSON.stringify({ ok: true, skipped: true, reason: pol.reason }), {
           status: 200,

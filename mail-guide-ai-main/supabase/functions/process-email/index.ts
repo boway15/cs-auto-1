@@ -19,7 +19,9 @@ import { upsertOrderFromOmsData } from "../_shared/erp-order-sync.ts";
 import { sanitizeDisplayName } from "../_shared/display-name.ts";
 import {
   CUSTOMER_AUTOMATION_WINDOW_MS,
+  isAutoInterceptIntentEnabled,
   isEmailWithinCustomerAutomationAge,
+  isMustInterceptBusinessIntent,
   nextCompensationRunAtIso,
 } from "../_shared/auto-risk-intercept-policy.ts";
 import {
@@ -80,6 +82,8 @@ function getCustomerAutoReplyBlockReason(email: { received_at?: string | null })
 type BusinessIntent =
   | "order_cancel"
   | "address_change"
+  | "delay_shipping"
+  | "sku_change"
   | "damaged"
   | "defect"
   | "description_mismatch"
@@ -93,6 +97,8 @@ type BusinessIntent =
 const VALID_BUSINESS_INTENTS: ReadonlyArray<BusinessIntent> = [
   "order_cancel",
   "address_change",
+  "delay_shipping",
+  "sku_change",
   "damaged",
   "defect",
   "description_mismatch",
@@ -249,7 +255,8 @@ async function getMaxFirstContactDaysForAutoSlots(admin: any): Promise<number> {
 }
 
 function isR1BusinessIntent(bi: BusinessIntent): boolean {
-  return bi === "order_cancel" || bi === "address_change" || bi === "logistics";
+  return bi === "order_cancel" || bi === "address_change" || bi === "delay_shipping" ||
+    bi === "sku_change" || bi === "logistics";
 }
 
 function isR2BusinessIntent(bi: BusinessIntent): boolean {
@@ -305,12 +312,55 @@ function extractOrderNo(text: string) {
   return null;
 }
 
-function looksLikeAmazonChannel(text: string, fromEmail?: string | null): boolean {
+function looksLikeAmazonPriceComparison(text: string): boolean {
+  return /amazon.{0,80}(cheaper|much cheaper|less|lower|selling|is having|has the same|for\s*\$|same product|same item)|(cheaper|price match|match.{0,25}(the )?same price|same price).{0,50}amazon|go with amazon|unless you.{0,40}(match|able to match)|(found|saw|see|sharing|share|screenshot|picture).{0,50}amazon|amazon.{0,40}(picture|screenshot|screen\s*shot)|on (the )?amazon (website|site)|(higher|more expensive).{0,40}(price|pay).{0,40}(amazon|cheaper)|justification.{0,30}(pay|higher)|ordered from (them|amazon).{0,60}(return|keep your|cancel this)|available at.{0,30}cheaper/i
+    .test(text);
+}
+
+function looksLikeIndependentSiteOrderContext(text: string): boolean {
+  return /cancel this order|placed directly (with|on)|on your (site|website|store)|directly with|order (SEDETA|SO\d|#[A-Z0-9]{4,})|would like to cancel.{0,40}(order|this)|I placed.{0,30}(with you|on your|directly)/i
+    .test(text);
+}
+
+function looksLikeAmazonChannelConfirmed(text: string, fromEmail?: string | null): boolean {
   if (/@amazon\.(com|co\.uk|de|fr|it|es|ca|com\.au|co\.jp)\b/i.test(String(fromEmail ?? ""))) {
     return true;
   }
   if (/\b\d{3}-\d{7}-\d{7}\b/.test(text)) return true;
-  return /在亚马逊|亚马逊(上)?购买|purchased on amazon|amazon order|bought on amazon|from amazon/i.test(text);
+  if (/在亚马逊(上)?(购买|下单|买的)|亚马逊渠道|purchased on amazon|bought on amazon|ordered (on|from|through) amazon|my amazon (order|purchase)|amazon order\s*(#|number|no\.?|id)[:#\s]?\s*[\d-]+/i.test(text)) {
+    if (looksLikeAmazonPriceComparison(text) && looksLikeIndependentSiteOrderContext(text)) {
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+function looksLikeAmazonChannel(text: string, fromEmail?: string | null): boolean {
+  return looksLikeAmazonChannelConfirmed(text, fromEmail);
+}
+
+/** LLM 误标 amazon_marketplace 时，比价取消独立站订单 → order_cancel */
+function correctAmazonMisclassification(
+  bi: BusinessIntent,
+  text: string,
+  fromEmail?: string | null,
+  latestText?: string | null,
+): BusinessIntent {
+  if (bi !== "amazon_marketplace") return bi;
+  if (/@amazon\.(com|co\.uk|de|fr|it|es|ca|com\.au|co\.jp)\b/i.test(String(fromEmail ?? ""))) {
+    return bi;
+  }
+  if (/\b\d{3}-\d{7}-\d{7}\b/.test(text)) return bi;
+  if (!looksLikeAmazonPriceComparison(text)) return bi;
+  const latest = String(latestText ?? "").trim();
+  if (
+    looksLikeIndependentSiteOrderContext(text) ||
+    /cancel|return process|return shipping label|shipping label|price match/i.test(latest)
+  ) {
+    return "order_cancel";
+  }
+  return bi;
 }
 
 function looksLikeSolutionAccepted(text: string): boolean {
@@ -353,6 +403,51 @@ function inferInquirySubtype(text: string): string {
   return "pre_sales";
 }
 
+/** 客户要求在发货前更换 SKU/款式/颜色/尺码（非取消、非仅延迟发货） */
+function looksLikeSkuChangeRequest(text: string): boolean {
+  if (looksLikeDelayShippingRequest(text)) return false;
+  if (/取消订单|cancel\s*(my|the)\s*order|want to cancel|please cancel/i.test(text)) return false;
+  if (/发错|错发|收到.{0,8}不对|wrong\s*item|not what i ordered/i.test(text)) return false;
+  return /换\s*sku|更换\s*sku|改\s*sku|change\s*(the\s*)?(sku|variant|item|product)|swap\s+(to|for)|different\s+(color|size|variant)|replace\s+with|换款式|换颜色|换尺码|换型号|换大一号|换小一号|更换商品|改款式|改颜色|改尺码|发货前.{0,8}换|换成.{0,12}(款|色|码|型号)/i
+    .test(text);
+}
+
+/** LLM 误标 logistics/other 时，用正文或 summary 纠正为 sku_change */
+function correctSkuChangeIntent(
+  bi: BusinessIntent,
+  text: string,
+  summary?: string | null,
+): BusinessIntent {
+  if (bi !== "logistics" && bi !== "other") return bi;
+  const combined = `${String(summary ?? "").trim()}\n${text}`.trim();
+  if (!combined) return bi;
+  return looksLikeSkuChangeRequest(combined) ? "sku_change" : bi;
+}
+
+/** 客户要求暂缓/延迟发货（非查物流、非对物流迟到的抱怨） */
+function looksLikeDelayShippingRequest(text: string): boolean {
+  if (
+    /sorry\s+for\s+(the\s+)?delay|apologize.*delay|延误.*抱歉|迟到.*抱歉/i.test(text) &&
+    !/please\s+(don'?t|do not)\s+ship|don'?t\s+ship|暂缓|晚.{0,4}发|延迟发货|hold.{0,12}ship|postpone|ship\s+later/i.test(text)
+  ) {
+    return false;
+  }
+  return /延迟发货|暂缓发货|暂停发货|晚点发货|晚几天发|先别发|不要发货|暂不发货|先不要发|等我.{0,12}再发|发货.{0,6}暂缓|暂停.{0,6}发货|ship\s+later|postpone\s+(the\s+)?(shipment|delivery|order)|hold\s+(the\s+)?(shipment|order|delivery)|don'?t\s+ship\s+(yet|until|before|for)|do\s+not\s+ship\s+(yet|until|before|for)|wait\s+(to\s+)?ship|delay\s+(the\s+)?(shipment|shipping|delivery)|please\s+hold\s+my\s+order/i
+    .test(text);
+}
+
+/** LLM 误标 logistics/other 时，用正文或 summary 纠正为 delay_shipping */
+function correctDelayShippingIntent(
+  bi: BusinessIntent,
+  text: string,
+  summary?: string | null,
+): BusinessIntent {
+  if (bi !== "logistics" && bi !== "other") return bi;
+  const combined = `${String(summary ?? "").trim()}\n${text}`.trim();
+  if (!combined) return bi;
+  return looksLikeDelayShippingRequest(combined) ? "delay_shipping" : bi;
+}
+
 /** 将 legacy intent / 关键词映射到 business_intent（Dify 未给出合法枚举时的兜底；text 应为最新正文） */
 function mapToBusinessIntent(
   rawIntent: string | undefined,
@@ -369,6 +464,12 @@ function mapToBusinessIntent(
   }
   if (rawIntent === "change_address" || /修改地址|change\s*address|update\s*address/i.test(text)) {
     return "address_change";
+  }
+  if (rawIntent === "sku_change" || looksLikeSkuChangeRequest(text)) {
+    return "sku_change";
+  }
+  if (rawIntent === "delay_shipping" || looksLikeDelayShippingRequest(text)) {
+    return "delay_shipping";
   }
   if (/破损|broken|damage|damaged|crushed/i.test(text)) return "damaged";
   if (
@@ -413,11 +514,17 @@ function analyzeLocally(email: any): Analysis {
   const textLower = analysisText.toLowerCase();
   const orderNo = extractOrderNo(analysisText);
   const missing = new Set<string>();
-  const isAfterSale = /refund|return|broken|damage|wrong|missing|replace|cancel|address|退款|退货|损坏|取消|地址/.test(textLower);
-  const risk = /cancel|change address|修改地址|取消订单|拦截|stop shipment/.test(textLower);
+  const isAfterSale = /refund|return|broken|damage|wrong|missing|replace|cancel|address|退款|退货|损坏|取消|地址|延迟发货|暂缓发货/.test(textLower);
+  const risk = /cancel|change address|修改地址|取消订单|拦截|stop shipment|换\s*sku|更换\s*sku|换颜色|换尺码|change\s*(sku|variant)/i.test(textLower);
+  const isDelay = looksLikeDelayShippingRequest(analysisText);
+
+  const latestBody = getLatestBodyText(email.body_text);
+  const summarySource = (latestBody || email.subject || "").replace(/\s+/g, " ").trim();
 
   const intent = risk
     ? (/address|地址/.test(textLower) ? "change_address" : "cancel_order")
+    : isDelay
+    ? "delay_shipping"
     : /refund|退款/.test(textLower)
     ? "refund"
     : /track|shipping|物流|快递|发货/.test(textLower)
@@ -426,7 +533,20 @@ function analyzeLocally(email: any): Analysis {
     ? "after_sale"
     : "general";
 
-  const business_intent = mapToBusinessIntent(intent, analysisText, email.from_email);
+  const business_intent = correctAmazonMisclassification(
+    correctSkuChangeIntent(
+      correctDelayShippingIntent(
+        mapToBusinessIntent(intent, analysisText, email.from_email),
+        analysisText,
+        summarySource,
+      ),
+      analysisText,
+      summarySource,
+    ),
+    analysisText,
+    email.from_email,
+    latestBody,
+  );
 
   if (isR2BusinessIntent(business_intent)) {
     if (!orderNo) missing.add("order_no");
@@ -443,8 +563,6 @@ function analyzeLocally(email: any): Analysis {
   const detectedLanguage = hasChinese ? "zh" : "en";
   const isAngry = /angry|frustrated|terrible|awful|horrible|worst|unacceptable|outrageous|投诉|愤怒|太差|极差|不满|差评|欺骗|骗子/.test(textLower);
 
-  const latestBody = getLatestBodyText(email.body_text);
-  const summarySource = (latestBody || email.subject || "").replace(/\s+/g, " ").trim();
   const analysis: Analysis = {
     intent,
     business_intent,
@@ -529,12 +647,26 @@ async function analyzeWithAi(email: any): Promise<{
     const analysisText = getAnalysisText(email.subject, email.body_text);
     const biRaw = typeof parsed.business_intent === "string" ? parsed.business_intent.trim() : "";
     const intentRaw = typeof parsed.intent === "string" ? parsed.intent.trim() : "";
-    merged.business_intent = resolveBusinessIntent(
-      biRaw,
-      intentRaw,
+    const latestBody = getLatestBodyText(email.body_text);
+    merged.business_intent = correctAmazonMisclassification(
+      correctSkuChangeIntent(
+        correctDelayShippingIntent(
+          resolveBusinessIntent(
+            biRaw,
+            intentRaw,
+            analysisText,
+            String(merged.intent ?? ""),
+            email.from_email,
+          ),
+          analysisText,
+          typeof parsed.summary === "string" ? parsed.summary : merged.summary,
+        ),
+        analysisText,
+        typeof parsed.summary === "string" ? parsed.summary : merged.summary,
+      ),
       analysisText,
-      String(merged.intent ?? ""),
       email.from_email,
+      latestBody,
     );
     merged.category = categoryForBusinessIntent(
       merged.business_intent,
@@ -994,11 +1126,12 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
     status: email.status === "pending" && analysis.priority === "urgent" ? "processing" : email.status,
   }).eq("id", emailId);
 
-  // 拦截分流：取消/改地址 + 已关联订单 → 必拦
-  const mustIntercept =
-    (analysis.business_intent === "order_cancel" || analysis.business_intent === "address_change");
+  // 拦截分流：取消/改地址/延迟发货/换 SKU + 已关联订单 → 按配置自动 hold
+  const interceptCandidate = isMustInterceptBusinessIntent(analysis.business_intent);
+  const autoIntercept = interceptCandidate &&
+    await isAutoInterceptIntentEnabled(admin, analysis.business_intent);
 
-  if (mustIntercept && linkedOrders.length) {
+  if (autoIntercept && linkedOrders.length) {
     const response = await fetch(`${SUPABASE_URL}/functions/v1/risk-intercept`, {
       method: "POST",
       headers: { Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" },
@@ -1032,8 +1165,8 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
 
   const providedOrderNo = String(analysis.order_no ?? "").trim();
 
-  // 拦截分流：取消/改地址 + 有邮件单号但未关联本地订单 → 仍按单号调 ERP hold（与关联解耦）
-  if (!skipAutoAssociation && mustIntercept && !linkedOrders.length && providedOrderNo) {
+  // 拦截分流：有邮件单号但未关联本地订单 → 仍按单号调 ERP hold（与关联解耦）
+  if (!skipAutoAssociation && autoIntercept && !linkedOrders.length && providedOrderNo) {
     const response = await fetch(`${SUPABASE_URL}/functions/v1/risk-intercept`, {
       method: "POST",
       headers: { Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" },
@@ -1130,14 +1263,14 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
     }
   }
 
-  if (!skipAutoAssociation && mustIntercept && !linkedOrders.length && !hasOrder && !missingInfoTemplateSent) {
+  if (!skipAutoAssociation && interceptCandidate && !linkedOrders.length && !hasOrder && !missingInfoTemplateSent) {
     await recordEvent(
       admin,
       emailId,
       "risk_intercept_skipped_no_order",
-      "取消/改地址缺单号且未自动回邮（未发或条件不满足）",
+      "取消/改地址/延迟发货缺单号且未自动回邮（未发或条件不满足）",
     );
-  } else if (skipAutoAssociation && mustIntercept && !linkedOrders.length) {
+  } else if (skipAutoAssociation && interceptCandidate && !linkedOrders.length) {
     await recordEvent(
       admin,
       emailId,

@@ -34,7 +34,7 @@ Authorization: Bearer {ERP_NOTIFY_API_KEY}
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `template_code` | 是 | `risk_shopify` \| `risk_payoneer` \| `risk_qty_ge_4` |
+| `template_code` | 是 | `risk_shopify` \| `risk_payoneer` \| `risk_qty_ge_4` \| `po_box` |
 | `order_no` | 是 | 替换模板 `{{order_no}}` |
 | `item_count` | 是 | 订单购买总件数（正整数），替换模板 `{{item_count}}` |
 | `site_code` | 是 | 独立站站点编码，用于解析发件邮箱；替换模板 `{{site_code}}` |
@@ -50,6 +50,7 @@ Authorization: Bearer {ERP_NOTIFY_API_KEY}
 | `risk_shopify` | Shopify 系统风控订单 |
 | `risk_payoneer` | Payoneer 邮件风控订单 |
 | `risk_qty_ge_4` | 单订单购买数量 ≥ 4 |
+| `po_box` | 收件地址为 PO Box，需客户提供物理街道地址 |
 
 ### 模板变量
 
@@ -103,7 +104,7 @@ Authorization: Bearer {ERP_NOTIFY_API_KEY}
 
 1. 管理端「迅捷回邮模板」→ **站点邮箱关联**：为每个 ERP 会传的 `site_code` 配置发件邮箱与站点名称。
 2. 发件邮箱须在「邮箱配置」中完成 SMTP；可选启用签名（发信时追加在正文末尾）。
-3. 同页配置三个场景的邮件主题/正文（**不再按场景选择发件邮箱**）。
+3. 同页配置各场景的邮件主题/正文（**不再按场景选择发件邮箱**）。
 4. 发信记录见「发送日志」，类型为 **ERP 拦截通知**；详情可查看站点编码/名称。
 
 ## 给迅捷 ERP 的变更说明（可转发）

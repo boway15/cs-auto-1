@@ -214,11 +214,13 @@ components:
             - risk_shopify
             - risk_payoneer
             - risk_qty_ge_4
+            - po_box
           description: |
             通知场景：
             - risk_shopify：Shopify 风控订单
             - risk_payoneer：Payoneer 风控订单
             - risk_qty_ge_4：单订单购买数量≥4
+            - po_box：PO Box 地址需核实物理街道地址
         order_no:
           type: string
           description: 订单号，用于替换模板中的 {{order_no}}

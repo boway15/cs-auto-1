@@ -1,9 +1,11 @@
-// 客服域：业务意图（10 类）、关联状态、SLA 桶 的展示与计算工具
+// 客服域：业务意图（12 类）、关联状态、SLA 桶 的展示与计算工具
 // 与后端 emails.business_intent / association_status / received_at 的口径保持一致
 
 export type BusinessIntent =
   | "order_cancel"
   | "address_change"
+  | "delay_shipping"
+  | "sku_change"
   | "damaged"
   | "defect"
   | "description_mismatch"
@@ -18,6 +20,8 @@ export type BusinessIntent =
 export const BUSINESS_INTENT_OPTIONS: ReadonlyArray<{ value: BusinessIntent; label: string }> = [
   { value: "order_cancel", label: "订单取消" },
   { value: "address_change", label: "订单改地址" },
+  { value: "delay_shipping", label: "延迟发货" },
+  { value: "sku_change", label: "发货前更换 SKU" },
   { value: "damaged", label: "破损" },
   { value: "defect", label: "产品缺陷" },
   { value: "description_mismatch", label: "商品描述不符" },
@@ -32,6 +36,20 @@ export const BUSINESS_INTENT_OPTIONS: ReadonlyArray<{ value: BusinessIntent; lab
 const BUSINESS_INTENT_LABEL_MAP: Record<string, string> = Object.fromEntries(
   BUSINESS_INTENT_OPTIONS.map((o) => [o.value, o.label]),
 );
+
+/** 可配置自动拦截的 business_intent（与 Edge MUST_INTERCEPT_BUSINESS_INTENTS 对齐） */
+export const AUTO_INTERCEPT_INTENT_OPTIONS: ReadonlyArray<{ value: BusinessIntent; label: string }> = [
+  { value: "order_cancel", label: "订单取消" },
+  { value: "address_change", label: "订单改地址" },
+  { value: "delay_shipping", label: "延迟发货" },
+  { value: "sku_change", label: "发货前更换 SKU" },
+];
+
+export const DEFAULT_AUTO_INTERCEPT_INTENTS: readonly BusinessIntent[] = [
+  "order_cancel",
+  "address_change",
+  "delay_shipping",
+];
 
 export function businessIntentLabel(value: string | null | undefined): string {
   if (!value) return "—";
