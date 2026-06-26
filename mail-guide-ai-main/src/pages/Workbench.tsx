@@ -96,6 +96,13 @@ import {
   type WorkbenchListStatusFilter,
 } from "@/lib/workbench-email-list";
 import {
+  defaultWorkbenchViewState,
+  isDefaultWorkbenchQueryState,
+  readInitialWorkbenchViewState,
+  serializeWorkbenchViewStateToParams,
+  type WorkbenchViewState,
+} from "@/lib/workbench-view-state";
+import {
   displayAttachmentFilename,
   isPlaceholderAttachment,
   placeholderAttachmentCount,
@@ -181,28 +188,37 @@ export default function Workbench() {
     authGateLoading,
   } = useAuth();
   const canOperate = hasMailboxAccess && !grantsLoading;
-  const initialSelectedId = readEmailIdFromUrl();
+  const initialViewState = useMemo(() => readInitialWorkbenchViewState(), []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.removeItem("mail-guide-ai:workbench-view:v1");
+    } catch {
+      // ignore
+    }
+  }, []);
+  const initialSelectedId = initialViewState.email ?? readEmailIdFromUrl();
   const [emails, setEmails] = useState<Email[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId);
   const selectedIdRef = useRef<string | null>(initialSelectedId);
-  const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState("");
+  const [searchInput, setSearchInput] = useState(initialViewState.search);
+  const [search, setSearch] = useState(initialViewState.search);
   const [listDateRange, setListDateRange] = useState(() =>
-    clampWorkbenchDateRange(defaultWorkbenchListDateFrom(), defaultWorkbenchListDateTo()),
+    clampWorkbenchDateRange(initialViewState.dateFrom, initialViewState.dateTo),
   );
   const listDateFrom = listDateRange.dateFrom;
   const listDateTo = listDateRange.dateTo;
-  const [listPage, setListPage] = useState(0);
+  const [listPage, setListPage] = useState(initialViewState.page);
   const [listTotal, setListTotal] = useState(0);
   const [listLoading, setListLoading] = useState(false);
   const [selectedEmailDetail, setSelectedEmailDetail] = useState<Email | null>(null);
-  const [filter, setFilter] = useState<WorkbenchListStatusFilter>("all");
-  const [intentFilter, setIntentFilter] = useState<string>("all");
+  const [filter, setFilter] = useState<WorkbenchListStatusFilter>(initialViewState.status);
+  const [intentFilter, setIntentFilter] = useState<string>(initialViewState.intent);
   const [updatingStatus, setUpdatingStatus] = useState(false);
   const [savingIntent, setSavingIntent] = useState(false);
-  const [mailboxFilter, setMailboxFilter] = useState<string>("all");
-  const [associationFilter, setAssociationFilter] = useState<string>("all");
-  const [timeFilter, setTimeFilter] = useState<"all" | SlaBucket>("all");
+  const [mailboxFilter, setMailboxFilter] = useState<string>(initialViewState.mailbox);
+  const [associationFilter, setAssociationFilter] = useState<string>(initialViewState.association);
+  const [timeFilter, setTimeFilter] = useState<"all" | SlaBucket>(initialViewState.sla);
   const [mailboxes, setMailboxes] = useState<{ id: string; email_address: string; display_name: string | null }[]>([]);
 
   const [orders, setOrders] = useState<Order[]>([]);
@@ -226,7 +242,7 @@ export default function Workbench() {
   const [conversationCollapsed, setConversationCollapsed] = useState(true);
   const [timelineCollapsed, setTimelineCollapsed] = useState(true);
   /** 更多查询（时间/意图/关联/时效），默认收起；上行邮箱、中行状态、下行搜索+更多查询 */
-  const [listFiltersCollapsed, setListFiltersCollapsed] = useState(true);
+  const [listFiltersCollapsed, setListFiltersCollapsed] = useState(initialViewState.filtersCollapsed);
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
   const [guidance, setGuidance] = useState("");
   const [generating, setGenerating] = useState(false);
@@ -359,18 +375,44 @@ export default function Workbench() {
 
   const listFiltersKey = useMemo(() => JSON.stringify(listFilters), [listFilters]);
 
+  const workbenchViewState = useMemo<WorkbenchViewState>(
+    () => ({
+      dateFrom: listDateFrom,
+      dateTo: listDateTo,
+      status: filter,
+      mailbox: mailboxFilter,
+      intent: intentFilter,
+      association: associationFilter,
+      sla: timeFilter,
+      search: searchInput.trim(),
+      page: listPage,
+      email: selectedId,
+      filtersCollapsed: listFiltersCollapsed,
+    }),
+    [
+      listDateFrom,
+      listDateTo,
+      filter,
+      mailboxFilter,
+      intentFilter,
+      associationFilter,
+      timeFilter,
+      searchInput,
+      listPage,
+      selectedId,
+      listFiltersCollapsed,
+    ],
+  );
+
   useEffect(() => {
     selectedIdRef.current = selectedId;
     setSearchParams(
       (prev) => {
-        const next = new URLSearchParams(prev);
-        if (selectedId) next.set(WORKBENCH_EMAIL_ID_PARAM, selectedId);
-        else next.delete(WORKBENCH_EMAIL_ID_PARAM);
-        return next;
+        return serializeWorkbenchViewStateToParams(prev, workbenchViewState);
       },
       { replace: true },
     );
-  }, [selectedId, setSearchParams]);
+  }, [selectedId, setSearchParams, workbenchViewState]);
 
   const loadEmails = useCallback(
     async (opts?: { keepSelection?: boolean; selectFirst?: boolean }): Promise<Email[]> => {
@@ -899,6 +941,7 @@ export default function Workbench() {
 
   useEffect(() => {
     if (mailboxFilter === "all") return;
+    if (mailboxes.length === 0) return;
     if (!mailboxes.some((m) => m.id === mailboxFilter)) {
       setMailboxFilter("all");
     }
@@ -1561,6 +1604,45 @@ export default function Workbench() {
     );
   }, [emails, associationFilter, compensationByEmailId]);
 
+  const hasActiveListFilters = useMemo(
+    () =>
+      !isDefaultWorkbenchQueryState({
+        dateFrom: listDateFrom,
+        dateTo: listDateTo,
+        status: filter,
+        mailbox: mailboxFilter,
+        intent: intentFilter,
+        association: associationFilter,
+        sla: timeFilter,
+        search: searchInput.trim(),
+        page: listPage,
+      }),
+    [
+      listDateFrom,
+      listDateTo,
+      filter,
+      mailboxFilter,
+      intentFilter,
+      associationFilter,
+      timeFilter,
+      searchInput,
+      listPage,
+    ],
+  );
+
+  const resetListFilters = useCallback(() => {
+    const defaults = defaultWorkbenchViewState();
+    setListDateRange(clampWorkbenchDateRange(defaults.dateFrom, defaults.dateTo));
+    setFilter(defaults.status);
+    setMailboxFilter(defaults.mailbox);
+    setIntentFilter(defaults.intent);
+    setAssociationFilter(defaults.association);
+    setTimeFilter(defaults.sla);
+    setSearchInput(defaults.search);
+    setSearch(defaults.search);
+    setListPage(defaults.page);
+  }, []);
+
   const activeMoreFilterSummary = useMemo(() => {
     const parts: string[] = [];
     const defaultFrom = defaultWorkbenchListDateFrom();
@@ -1653,6 +1735,16 @@ export default function Workbench() {
                 className="pl-7 h-8 text-sm"
               />
             </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 px-2 text-xs shrink-0"
+              onClick={resetListFilters}
+              disabled={!hasActiveListFilters}
+            >
+              重置
+            </Button>
             <Button
               type="button"
               variant="outline"

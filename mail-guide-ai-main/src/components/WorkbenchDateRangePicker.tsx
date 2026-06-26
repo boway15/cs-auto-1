@@ -29,6 +29,11 @@ function pickerDateToDateStr(d: Date): string {
   return cstTodayDateStr(d);
 }
 
+function dateStrsToRange(dateFrom: string, dateTo: string): DateRange | undefined {
+  if (!dateFrom || !dateTo) return undefined;
+  return { from: dateStrToPickerDate(dateFrom), to: dateStrToPickerDate(dateTo) };
+}
+
 export function WorkbenchDateRangePicker({
   dateFrom,
   dateTo,
@@ -36,26 +41,44 @@ export function WorkbenchDateRangePicker({
   className,
 }: WorkbenchDateRangePickerProps) {
   const [open, setOpen] = useState(false);
-  const today = useMemo(() => dateStrToPickerDate(cstTodayDateStr()), []);
+  const [draftRange, setDraftRange] = useState<DateRange | undefined>(undefined);
+  const todayStr = useMemo(() => cstTodayDateStr(), []);
+  const today = useMemo(() => dateStrToPickerDate(todayStr), [todayStr]);
 
-  const selected: DateRange | undefined =
-    dateFrom && dateTo
-      ? { from: dateStrToPickerDate(dateFrom), to: dateStrToPickerDate(dateTo) }
-      : undefined;
+  const committedRange = useMemo(
+    () => dateStrsToRange(dateFrom, dateTo),
+    [dateFrom, dateTo],
+  );
 
-  const handleSelect = (range: DateRange | undefined) => {
-    if (!range?.from) return;
-    const end = range.to ?? range.from;
-    const clamped = clampWorkbenchDateRange(
-      pickerDateToDateStr(range.from),
-      pickerDateToDateStr(end),
-    );
-    onChange(clamped.dateFrom, clamped.dateTo);
-    if (range.to) setOpen(false);
+  const handleOpenChange = (nextOpen: boolean) => {
+    setOpen(nextOpen);
+    if (nextOpen) {
+      setDraftRange(committedRange);
+    }
   };
 
+  const handleDayClick = (day: Date) => {
+    if (!draftRange?.from || draftRange.to) {
+      setDraftRange({ from: day, to: undefined });
+      return;
+    }
+
+    const clamped = clampWorkbenchDateRange(
+      pickerDateToDateStr(draftRange.from),
+      pickerDateToDateStr(day),
+    );
+    onChange(clamped.dateFrom, clamped.dateTo);
+    setDraftRange({
+      from: dateStrToPickerDate(clamped.dateFrom),
+      to: dateStrToPickerDate(clamped.dateTo),
+    });
+    setOpen(false);
+  };
+
+  const calendarSelected = open ? draftRange : committedRange;
+
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         <Button
           type="button"
@@ -72,15 +95,15 @@ export function WorkbenchDateRangePicker({
       <PopoverContent className="w-auto p-0" align="start">
         <Calendar
           mode="range"
-          defaultMonth={selected?.from ?? today}
-          selected={selected}
-          onSelect={handleSelect}
+          defaultMonth={calendarSelected?.from ?? today}
+          selected={calendarSelected}
+          onDayClick={handleDayClick}
           numberOfMonths={1}
           disabled={(date) => {
-            if (date > today) return true;
-            if (selected?.from && !selected?.to) {
-              const fromStr = pickerDateToDateStr(selected.from);
-              const candStr = pickerDateToDateStr(date);
+            const candStr = pickerDateToDateStr(date);
+            if (candStr > todayStr) return true;
+            if (draftRange?.from && !draftRange?.to) {
+              const fromStr = pickerDateToDateStr(draftRange.from);
               return workbenchDaysBetweenDateStrs(fromStr, candStr) > WORKBENCH_LIST_MAX_DATE_RANGE_DAYS;
             }
             return false;
