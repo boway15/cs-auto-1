@@ -1,9 +1,18 @@
-import { useEffect, useState, useCallback } from "react";
-import type { Session, User } from "@supabase/supabase-js";
+import { useEffect, useRef, useState, useCallback } from "react";
+import type { AuthChangeEvent, Session, User } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 
 export type AppRole = "admin" | "leader" | "agent" | "guest";
 const FALLBACK_ADMIN_EMAILS = new Set(["369404600@qq.com", "admin@test.com"]);
+
+export function shouldRefetchAccessForAuthEvent(
+  _event: AuthChangeEvent,
+  loadedUserId: string | null,
+  nextUserId: string | null | undefined,
+): boolean {
+  if (!nextUserId) return false;
+  return loadedUserId !== nextUserId;
+}
 
 export function useAuth() {
   const [session, setSession] = useState<Session | null>(null);
@@ -13,6 +22,7 @@ export function useAuth() {
   const [loading, setLoading] = useState(true);
   const [rolesLoading, setRolesLoading] = useState(false);
   const [grantsLoading, setGrantsLoading] = useState(false);
+  const accessLoadedUserIdRef = useRef<string | null>(null);
 
   const fetchGrants = useCallback(async (uid: string, isAdminUser: boolean) => {
     if (isAdminUser) {
@@ -62,12 +72,20 @@ export function useAuth() {
   );
 
   useEffect(() => {
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
       setSession(s);
-      setUser(s?.user ?? null);
-      if (s?.user) {
-        setTimeout(() => void fetchRoles(s.user.id, s.user.email), 0);
+      const nextUser = s?.user ?? null;
+      setUser(nextUser);
+      if (nextUser) {
+        if (shouldRefetchAccessForAuthEvent(event, accessLoadedUserIdRef.current, nextUser.id)) {
+          setTimeout(() => {
+            void fetchRoles(nextUser.id, nextUser.email).finally(() => {
+              accessLoadedUserIdRef.current = nextUser.id;
+            });
+          }, 0);
+        }
       } else {
+        accessLoadedUserIdRef.current = null;
         setRoles([]);
         setAllowedMailboxIds([]);
         setRolesLoading(false);
@@ -79,7 +97,11 @@ export function useAuth() {
       setSession(data.session);
       setUser(data.session?.user ?? null);
       if (data.session?.user) {
-        void fetchRoles(data.session.user.id, data.session.user.email).finally(() => setLoading(false));
+        const initialUser = data.session.user;
+        void fetchRoles(initialUser.id, initialUser.email).finally(() => {
+          accessLoadedUserIdRef.current = initialUser.id;
+          setLoading(false);
+        });
       } else {
         setLoading(false);
       }

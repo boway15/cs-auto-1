@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  clearWorkbenchListScrollTop,
   clearWorkbenchViewParams,
   defaultWorkbenchQueryState,
   isDefaultWorkbenchQueryState,
   parseWorkbenchViewState,
+  readWorkbenchListScrollAnchor,
+  readWorkbenchListScrollTop,
   serializeWorkbenchViewStateToParams,
+  writeWorkbenchListScrollAnchor,
+  writeWorkbenchListScrollTop,
+  WORKBENCH_LIST_ANCHOR_SESSION_KEY,
+  WORKBENCH_LIST_SCROLL_SESSION_KEY,
 } from "./workbench-view-state";
 
 describe("workbench-view-state", () => {
@@ -87,5 +94,25 @@ describe("workbench-view-state", () => {
     expect(isDefaultWorkbenchQueryState({ ...defaults, search: "abc" })).toBe(false);
     expect(isDefaultWorkbenchQueryState({ ...defaults, status: "pending" })).toBe(false);
     expect(isDefaultWorkbenchQueryState({ ...defaults, page: 2 })).toBe(false);
+  });
+
+  it("读写邮件列表滚动位置", () => {
+    clearWorkbenchListScrollTop();
+    expect(readWorkbenchListScrollTop()).toBeNull();
+    writeWorkbenchListScrollTop(420);
+    expect(readWorkbenchListScrollTop()).toBe(420);
+    expect(sessionStorage.getItem(WORKBENCH_LIST_SCROLL_SESSION_KEY)).toBe("420");
+    clearWorkbenchListScrollTop();
+    expect(readWorkbenchListScrollTop()).toBeNull();
+  });
+
+  it("读写邮件列表滚动锚点", () => {
+    clearWorkbenchListScrollTop();
+    expect(readWorkbenchListScrollAnchor()).toBeNull();
+    writeWorkbenchListScrollAnchor({ emailId: "email-1", offsetTop: 12 });
+    expect(readWorkbenchListScrollAnchor()).toEqual({ emailId: "email-1", offsetTop: 12 });
+    expect(sessionStorage.getItem(WORKBENCH_LIST_ANCHOR_SESSION_KEY)).toContain("email-1");
+    clearWorkbenchListScrollTop();
+    expect(readWorkbenchListScrollAnchor()).toBeNull();
   });
 });

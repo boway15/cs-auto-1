@@ -96,10 +96,16 @@ import {
   type WorkbenchListStatusFilter,
 } from "@/lib/workbench-email-list";
 import {
+  clearWorkbenchListScrollTop,
   defaultWorkbenchViewState,
   isDefaultWorkbenchQueryState,
   readInitialWorkbenchViewState,
+  readWorkbenchListScrollAnchor,
+  readWorkbenchListScrollTop,
   serializeWorkbenchViewStateToParams,
+  writeWorkbenchListScrollAnchor,
+  writeWorkbenchListScrollTop,
+  type WorkbenchListScrollAnchor,
   type WorkbenchViewState,
 } from "@/lib/workbench-view-state";
 import {
@@ -201,6 +207,21 @@ export default function Workbench() {
   const [emails, setEmails] = useState<Email[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId);
   const selectedIdRef = useRef<string | null>(initialSelectedId);
+  const listScrollViewportRef = useRef<HTMLDivElement>(null);
+  const savedListScrollOnMount = readWorkbenchListScrollTop();
+  const savedListScrollAnchorOnMount = readWorkbenchListScrollAnchor();
+  /** 仅左侧菜单切走再回工作台时恢复；浏览器标签切换不触发 */
+  const shouldRestoreListScrollRef = useRef(
+    savedListScrollOnMount != null || savedListScrollAnchorOnMount != null,
+  );
+  const pendingListScrollRestoreRef = useRef<number | null>(
+    shouldRestoreListScrollRef.current ? savedListScrollOnMount : null,
+  );
+  const pendingListScrollAnchorRef = useRef<WorkbenchListScrollAnchor | null>(
+    shouldRestoreListScrollRef.current ? savedListScrollAnchorOnMount : null,
+  );
+  /** 列表静默刷新后恢复当前滚动，避免 realtime 重载把位置打回顶部 */
+  const listScrollPreserveAfterLoadRef = useRef<number | null>(null);
   const [searchInput, setSearchInput] = useState(initialViewState.search);
   const [search, setSearch] = useState(initialViewState.search);
   const [listDateRange, setListDateRange] = useState(() =>
@@ -417,6 +438,11 @@ export default function Workbench() {
   const loadEmails = useCallback(
     async (opts?: { keepSelection?: boolean; selectFirst?: boolean }): Promise<Email[]> => {
       const keepSelection = opts?.keepSelection ?? true;
+      const selectFirst = opts?.selectFirst ?? false;
+      if (keepSelection && !selectFirst && !shouldRestoreListScrollRef.current) {
+        const viewport = listScrollViewportRef.current;
+        if (viewport) listScrollPreserveAfterLoadRef.current = viewport.scrollTop;
+      }
       setListLoading(true);
       try {
         const { rows, total } = await fetchWorkbenchEmailList(
@@ -429,7 +455,7 @@ export default function Workbench() {
         setListTotal(total);
         await loadCompensationHints(list);
         const currentSelectedId = selectedIdRef.current;
-        if (opts?.selectFirst || !keepSelection) {
+        if (selectFirst || !keepSelection) {
           if (list.length === 0) {
             setSelectedId(null);
             setSelectedEmailDetail(null);
@@ -1641,7 +1667,137 @@ export default function Workbench() {
     setSearchInput(defaults.search);
     setSearch(defaults.search);
     setListPage(defaults.page);
+    pendingListScrollRestoreRef.current = null;
+    pendingListScrollAnchorRef.current = null;
+    shouldRestoreListScrollRef.current = false;
+    listScrollPreserveAfterLoadRef.current = null;
+    clearWorkbenchListScrollTop();
+    const viewport = listScrollViewportRef.current;
+    if (viewport) viewport.scrollTop = 0;
   }, []);
+
+  const getCurrentListScrollAnchor = useCallback((): WorkbenchListScrollAnchor | null => {
+    const viewport = listScrollViewportRef.current;
+    if (!viewport) return null;
+    const viewportRect = viewport.getBoundingClientRect();
+    const rows = Array.from(
+      viewport.querySelectorAll<HTMLElement>("[data-workbench-email-id]"),
+    );
+    for (const row of rows) {
+      const rect = row.getBoundingClientRect();
+      if (rect.bottom <= viewportRect.top) continue;
+      const emailId = row.dataset.workbenchEmailId;
+      if (!emailId) return null;
+      return {
+        emailId,
+        offsetTop: Math.max(0, rect.top - viewportRect.top),
+      };
+    }
+    return null;
+  }, []);
+
+  const saveListScrollPosition = useCallback(() => {
+    const viewport = listScrollViewportRef.current;
+    if (!viewport) return;
+    writeWorkbenchListScrollTop(viewport.scrollTop);
+    writeWorkbenchListScrollAnchor(getCurrentListScrollAnchor());
+  }, [getCurrentListScrollAnchor]);
+
+  useEffect(() => {
+    return () => {
+      saveListScrollPosition();
+    };
+  }, [saveListScrollPosition]);
+
+  useEffect(() => {
+    const viewport = listScrollViewportRef.current;
+    if (!viewport) return;
+
+    const onScroll = saveListScrollPosition;
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      viewport.removeEventListener("scroll", onScroll);
+    };
+  }, [listEmails.length, saveListScrollPosition]);
+
+  useEffect(() => {
+    if (listLoading || listEmails.length === 0) return;
+    const preserve = listScrollPreserveAfterLoadRef.current;
+    if (preserve == null || shouldRestoreListScrollRef.current) return;
+    listScrollPreserveAfterLoadRef.current = null;
+
+    let frame = 0;
+    let frameId = 0;
+    const applyPreserve = () => {
+      const viewport = listScrollViewportRef.current;
+      if (!viewport) return;
+      const maxTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      if (maxTop > 0) {
+        viewport.scrollTop = Math.min(preserve, maxTop);
+        return;
+      }
+      if (frame >= 20) return;
+      frame += 1;
+      frameId = requestAnimationFrame(applyPreserve);
+    };
+
+    frameId = requestAnimationFrame(applyPreserve);
+    return () => {
+      if (frameId) cancelAnimationFrame(frameId);
+    };
+  }, [listLoading, listEmails.length]);
+
+  useEffect(() => {
+    if (!shouldRestoreListScrollRef.current) return;
+    if (listLoading || listEmails.length === 0) return;
+    const top = pendingListScrollRestoreRef.current;
+    const anchor = pendingListScrollAnchorRef.current;
+    if (top == null && anchor == null) {
+      shouldRestoreListScrollRef.current = false;
+      return;
+    }
+
+    let frame = 0;
+    let frameId = 0;
+    const finishRestore = () => {
+      pendingListScrollAnchorRef.current = null;
+      pendingListScrollRestoreRef.current = null;
+      shouldRestoreListScrollRef.current = false;
+    };
+    const restore = () => {
+      const viewport = listScrollViewportRef.current;
+      if (!viewport) return;
+      if (anchor) {
+        const row = viewport.querySelector<HTMLElement>(
+          `[data-workbench-email-id="${CSS.escape(anchor.emailId)}"]`,
+        );
+        if (row) {
+          const viewportRect = viewport.getBoundingClientRect();
+          const rowRect = row.getBoundingClientRect();
+          viewport.scrollTop += rowRect.top - viewportRect.top - anchor.offsetTop;
+          finishRestore();
+          return;
+        }
+      }
+      const maxTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      if (maxTop > 0) {
+        if (top != null) viewport.scrollTop = Math.min(top, maxTop);
+        finishRestore();
+        return;
+      }
+      if (frame >= 40) {
+        finishRestore();
+        return;
+      }
+      frame += 1;
+      frameId = requestAnimationFrame(restore);
+    };
+
+    frameId = requestAnimationFrame(restore);
+    return () => {
+      if (frameId) cancelAnimationFrame(frameId);
+    };
+  }, [listLoading, listEmails.length, listPage]);
 
   const activeMoreFilterSummary = useMemo(() => {
     const parts: string[] = [];
@@ -1814,7 +1970,7 @@ export default function Workbench() {
           </div>
         )}
 
-        <ScrollArea className="flex-1 min-h-0">
+        <ScrollArea viewportRef={listScrollViewportRef} className="flex-1 min-h-0">
           {listEmails.length === 0 ? (
             <div className="p-8 text-center text-muted-foreground text-sm">
               {grantsLoading || authGateLoading
@@ -1836,6 +1992,7 @@ export default function Workbench() {
               return (
                 <button
                   key={email.id}
+                  data-workbench-email-id={email.id}
                   onClick={() => handleSelectEmail(email)}
                   className={`w-full text-left p-3 pl-4 border-b hover:bg-accent transition-colors relative ${
                     selectedId === email.id ? "bg-accent" : ""

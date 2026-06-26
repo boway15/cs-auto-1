@@ -225,3 +225,71 @@ function setOrDelete(params: URLSearchParams, key: string, value: string, defaul
   if (value === defaultValue) params.delete(key);
   else params.set(key, value);
 }
+
+/** 工作台邮件列表滚动位置（同标签页内菜单切换后恢复） */
+export const WORKBENCH_LIST_SCROLL_SESSION_KEY = "mail-guide-ai:workbench-list-scroll:v1";
+export const WORKBENCH_LIST_ANCHOR_SESSION_KEY = "mail-guide-ai:workbench-list-anchor:v1";
+
+export type WorkbenchListScrollAnchor = {
+  emailId: string;
+  offsetTop: number;
+};
+
+export function getWorkbenchListScrollViewport(root: HTMLElement | null): HTMLElement | null {
+  if (!root) return null;
+  return root.querySelector("[data-radix-scroll-area-viewport]");
+}
+
+export function readWorkbenchListScrollTop(): number | null {
+  try {
+    const raw = window.sessionStorage.getItem(WORKBENCH_LIST_SCROLL_SESSION_KEY);
+    if (raw == null) return null;
+    const top = Number.parseInt(raw, 10);
+    return Number.isFinite(top) && top >= 0 ? top : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeWorkbenchListScrollTop(scrollTop: number): void {
+  if (!Number.isFinite(scrollTop) || scrollTop < 0) return;
+  try {
+    window.sessionStorage.setItem(WORKBENCH_LIST_SCROLL_SESSION_KEY, String(Math.round(scrollTop)));
+  } catch {
+    // sessionStorage 不可用时忽略
+  }
+}
+
+export function clearWorkbenchListScrollTop(): void {
+  try {
+    window.sessionStorage.removeItem(WORKBENCH_LIST_SCROLL_SESSION_KEY);
+    window.sessionStorage.removeItem(WORKBENCH_LIST_ANCHOR_SESSION_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export function readWorkbenchListScrollAnchor(): WorkbenchListScrollAnchor | null {
+  try {
+    const raw = window.sessionStorage.getItem(WORKBENCH_LIST_ANCHOR_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<WorkbenchListScrollAnchor>;
+    if (typeof parsed.emailId !== "string" || !parsed.emailId) return null;
+    if (typeof parsed.offsetTop !== "number" || !Number.isFinite(parsed.offsetTop)) return null;
+    return { emailId: parsed.emailId, offsetTop: parsed.offsetTop };
+  } catch {
+    return null;
+  }
+}
+
+export function writeWorkbenchListScrollAnchor(anchor: WorkbenchListScrollAnchor | null): void {
+  try {
+    if (!anchor) {
+      window.sessionStorage.removeItem(WORKBENCH_LIST_ANCHOR_SESSION_KEY);
+      return;
+    }
+    window.sessionStorage.setItem(WORKBENCH_LIST_ANCHOR_SESSION_KEY, JSON.stringify(anchor));
+  } catch {
+    // sessionStorage 不可用时忽略
+  }
+}
