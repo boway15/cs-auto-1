@@ -4,12 +4,24 @@ import { sendMail } from "../_shared/smtp.ts";
 import { appendMailboxSignature } from "../_shared/mail-signature.ts";
 import { buildReplySubject, resolveAutoReplyRecipient } from "../_shared/mail-reply-subject.ts";
 import { assertCanAccessEmail } from "../_shared/mailbox-access.ts";
+import {
+  loadOutboundAttachments,
+  type OutboundAttachmentInput,
+} from "../_shared/outbound-attachment.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type",
 };
+
+async function hashIdempotencyFragment(input: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(buf))
+    .slice(0, 8)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -31,14 +43,22 @@ Deno.serve(async (req) => {
       });
     }
 
-    const { email_id, content, subject_override, idempotency_key, quick_reply_template_id } =
-      await req.json();
+    const {
+      email_id,
+      content,
+      subject_override,
+      idempotency_key,
+      quick_reply_template_id,
+      attachments: attachmentInputs,
+    } = await req.json();
     if (!email_id || !content) {
       return new Response(JSON.stringify({ error: "缺少 email_id 或 content" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
+
+    const attachments = (attachmentInputs ?? []) as OutboundAttachmentInput[];
 
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     try {
@@ -59,7 +79,11 @@ Deno.serve(async (req) => {
     if (!mb) throw new Error("该邮件没有关联邮箱配置，无法发送");
     if (!mb.smtp_host || !mb.smtp_port) throw new Error("邮箱未配置 SMTP 服务器");
 
-    const sendKey = idempotency_key ?? `manual:${email_id}:${userData.user.id}:${await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content)).then((buf) => Array.from(new Uint8Array(buf)).slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join(""))}`;
+    const attKey = attachments.map((a) => a.storage_path).sort().join("|");
+    const hashInput = `${content}\n${attKey}`;
+    const sendKey = idempotency_key ??
+      `manual:${email_id}:${userData.user.id}:${await hashIdempotencyFragment(hashInput)}`;
+
     const { data: existingLog } = await admin
       .from("email_send_logs")
       .select("id, status, message_id, retry_count")
@@ -68,7 +92,7 @@ Deno.serve(async (req) => {
     if (existingLog?.status === "sent") {
       return new Response(
         JSON.stringify({ success: true, messageId: existingLog.message_id, deduped: true }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
@@ -85,13 +109,16 @@ Deno.serve(async (req) => {
     let sendError: string | null = null;
     const bodyWithSignature = appendMailboxSignature(content, mb);
 
+    let mailAttachments: Awaited<ReturnType<typeof loadOutboundAttachments>> = [];
     try {
+      mailAttachments = await loadOutboundAttachments(admin, userData.user.id, attachments);
       messageId = await sendMail(mb, {
         to: replyToEmail,
         subject: replySubject,
         text: bodyWithSignature,
         inReplyTo: email.message_id ?? undefined,
         references: email.message_id ?? undefined,
+        attachments: mailAttachments,
       });
     } catch (err) {
       sendError = err instanceof Error ? err.message : String(err);
@@ -109,6 +136,16 @@ Deno.serve(async (req) => {
       operator_email: userData.user.email ?? null,
       operator_display_name: profileRow?.display_name ?? null,
     };
+
+    const attachmentMetadata = attachments.length
+      ? {
+        attachments: attachments.map((a) => ({
+          filename: a.filename,
+          content_type: a.content_type,
+          storage_path: a.storage_path,
+        })),
+      }
+      : {};
 
     // 写入发送日志（无论成功失败）
     const sendLogPayload = {
@@ -132,6 +169,7 @@ Deno.serve(async (req) => {
         ...(typeof quick_reply_template_id === "string" && quick_reply_template_id
           ? { quick_reply_template_id }
           : {}),
+        ...attachmentMetadata,
       },
     };
     const { error: sendLogError } = existingLog
@@ -143,6 +181,16 @@ Deno.serve(async (req) => {
     }
 
     if (sendError) throw new Error(sendError);
+
+    if (attachments.length > 0) {
+      for (const a of attachments) {
+        try {
+          await admin.storage.from("outbound-attachments").remove([a.storage_path]);
+        } catch (e) {
+          console.warn("outbound attachment cleanup failed:", a.storage_path, e);
+        }
+      }
+    }
 
     await admin
       .from("emails")
@@ -173,15 +221,17 @@ Deno.serve(async (req) => {
       JSON.stringify({
         success: true,
         messageId,
-        warning: sendLogError ? "邮件已发送，但发送日志写入失败，请联系管理员检查 email_send_logs 表结构或权限。" : undefined,
+        warning: sendLogError
+          ? "邮件已发送，但发送日志写入失败，请联系管理员检查 email_send_logs 表结构或权限。"
+          : undefined,
       }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   } catch (e) {
     console.error("send-reply error:", e);
     return new Response(
       JSON.stringify({ error: e instanceof Error ? e.message : "未知错误" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
 });

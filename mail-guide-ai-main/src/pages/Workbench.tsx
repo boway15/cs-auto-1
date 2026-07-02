@@ -119,7 +119,12 @@ import {
   partitionWorkbenchAttachments,
 } from "@/lib/workbench-attachments";
 import QuickReplyPicker from "@/components/QuickReplyPicker";
+import ReplyAttachmentBar from "@/components/ReplyAttachmentBar";
 import { buildQuickReplyContextFromEmail } from "@/lib/quick-reply-templates";
+import {
+  sanitizeOutboundFilename,
+  type OutboundAttachmentDraft,
+} from "@/lib/outbound-attachments";
 import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -193,6 +198,7 @@ export default function Workbench() {
   const navigate = useNavigate();
   const [, setSearchParams] = useSearchParams();
   const {
+    user,
     hasAllMailboxAccess,
     hasMailboxAccess,
     allowedMailboxIds,
@@ -277,6 +283,8 @@ export default function Workbench() {
   const [replyContent, setReplyContent] = useState("");
   const [replySubjectOverride, setReplySubjectOverride] = useState<string | null>(null);
   const [lastQuickReplyTemplateId, setLastQuickReplyTemplateId] = useState<string | null>(null);
+  const [replyAttachmentSessionId] = useState(() => crypto.randomUUID());
+  const [replyAttachments, setReplyAttachments] = useState<OutboundAttachmentDraft[]>([]);
   const [allOrders, setAllOrders] = useState<Order[]>([]);
   /** 手工关联弹窗：从 OMS 拉单 */
   const [erpPullOrderNo, setErpPullOrderNo] = useState("");
@@ -667,6 +675,7 @@ export default function Workbench() {
     }
     setReplySubjectOverride(null);
     setLastQuickReplyTemplateId(null);
+    setReplyAttachments([]);
     setGuidance("");
   }, [triggerMissingAnalysisIfNeeded]);
 
@@ -1593,6 +1602,15 @@ export default function Workbench() {
 
   async function sendReply() {
     if (!selectedId || !replyContent.trim()) return;
+    if (replyAttachments.some((a) => a.uploading)) {
+      toast.error("请等待附件上传完成");
+      return;
+    }
+    if (replyAttachments.some((a) => a.error)) {
+      toast.error("请移除上传失败的附件后再发送");
+      return;
+    }
+    const readyAttachments = replyAttachments.filter((a) => a.storagePath);
     setSending(true);
     const { data, error } = await supabase.functions.invoke("send-reply", {
       body: {
@@ -1600,6 +1618,15 @@ export default function Workbench() {
         content: replyContent,
         ...(replySubjectOverride ? { subject_override: replySubjectOverride } : {}),
         ...(lastQuickReplyTemplateId ? { quick_reply_template_id: lastQuickReplyTemplateId } : {}),
+        ...(readyAttachments.length
+          ? {
+            attachments: readyAttachments.map((a) => ({
+              storage_path: a.storagePath!,
+              filename: sanitizeOutboundFilename(a.file.name),
+              content_type: a.file.type || "application/octet-stream",
+            })),
+          }
+          : {}),
       },
     });
     setSending(false);
@@ -1615,6 +1642,7 @@ export default function Workbench() {
     else toast.success("邮件已发送");
     setReplySubjectOverride(null);
     setLastQuickReplyTemplateId(null);
+    setReplyAttachments([]);
     void loadEmails({ keepSelection: true });
     if (selected) loadDetail(selected);
   }
@@ -2906,6 +2934,17 @@ export default function Workbench() {
                   rows={10}
                   className="text-sm font-mono"
                 />
+                {user?.id ? (
+                  <div className="mt-2">
+                    <ReplyAttachmentBar
+                      disabled={!canOperate || !selected || sending}
+                      userId={user.id}
+                      sessionId={replyAttachmentSessionId}
+                      items={replyAttachments}
+                      onChange={setReplyAttachments}
+                    />
+                  </div>
+                ) : null}
                 <div className="flex justify-end mt-2">
                   <Button onClick={sendReply} disabled={!canOperate || !replyContent.trim() || sending}>
                     <Send className="w-4 h-4 mr-2" /> {sending ? "发送中..." : "发送回复"}

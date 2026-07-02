@@ -20,7 +20,14 @@ interface SendOpts {
   text: string;
   inReplyTo?: string;
   references?: string;
+  attachments?: MailAttachment[];
 }
+
+export type MailAttachment = {
+  filename: string;
+  contentType: string;
+  content: Uint8Array;
+};
 
 type AuthMethod = "LOGIN" | "PLAIN";
 
@@ -44,6 +51,15 @@ function encodeSubject(s: string) {
 
 function foldBase64(encoded: string): string {
   return encoded.replace(/(.{76})/g, "$1\r\n");
+}
+
+function b64Bytes(bytes: Uint8Array): string {
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
 }
 
 function normalizeSmtpRecipients(to: string | string[]): string[] {
@@ -106,6 +122,42 @@ export function buildMultipartAlternativeBody(
     "",
     htmlPart,
     `--${boundary}--`,
+    "",
+  ].join("\r\n");
+}
+
+/** multipart/mixed：首 part 为 nested alternative，后续为附件 */
+export function buildMultipartMixedBody(
+  plain: string,
+  html: string,
+  attachments: MailAttachment[],
+  altBoundary: string,
+  mixedBoundary: string,
+): string {
+  const alternativePart = [
+    `--${mixedBoundary}`,
+    `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
+    "",
+    buildMultipartAlternativeBody(plain, html, altBoundary),
+  ].join("\r\n");
+
+  const attachmentParts = attachments.map((att) => {
+    const encodedName = encodeSubject(att.filename);
+    const b64Content = foldBase64(b64Bytes(att.content));
+    return [
+      `--${mixedBoundary}`,
+      `Content-Type: ${att.contentType}; name="${encodedName}"`,
+      "Content-Transfer-Encoding: base64",
+      `Content-Disposition: attachment; filename="${encodedName}"`,
+      "",
+      b64Content,
+    ].join("\r\n");
+  });
+
+  return [
+    alternativePart,
+    ...attachmentParts,
+    `--${mixedBoundary}--`,
     "",
   ].join("\r\n");
 }
@@ -275,10 +327,20 @@ export async function sendMail(mb: Mailbox, opts: SendOpts): Promise<string> {
     if (opts.inReplyTo) headers.push(`In-Reply-To: ${opts.inReplyTo}`);
     if (opts.references) headers.push(`References: ${opts.references}`);
 
-    const boundary = createMultipartBoundary();
+    const altBoundary = createMultipartBoundary();
     const html = plainTextToHtmlEmail(opts.text);
-    headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
-    const body = buildMultipartAlternativeBody(opts.text, html, boundary);
+    const attachments = opts.attachments ?? [];
+
+    let body: string;
+    if (attachments.length === 0) {
+      headers.push(`Content-Type: multipart/alternative; boundary="${altBoundary}"`);
+      body = buildMultipartAlternativeBody(opts.text, html, altBoundary);
+    } else {
+      const mixedBoundary = createMultipartBoundary();
+      headers.push(`Content-Type: multipart/mixed; boundary="${mixedBoundary}"`);
+      body = buildMultipartMixedBody(opts.text, html, attachments, altBoundary, mixedBoundary);
+    }
+
     const data = headers.join("\r\n") + "\r\n\r\n" + body + "\r\n.\r\n";
     await session.write(data);
     await session.expect("250", "BODY");

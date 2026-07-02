@@ -1,6 +1,7 @@
 import { assertEquals, assertMatch } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   buildMultipartAlternativeBody,
+  buildMultipartMixedBody,
   createMultipartBoundary,
 } from "./smtp.ts";
 
@@ -21,4 +22,20 @@ Deno.test("multipart Content-Type belongs in headers not body", () => {
   const bodySection = raw.slice(headerBodySplit + 4);
   assertEquals(headerSection.includes("multipart/alternative"), true);
   assertEquals(bodySection.startsWith(`--${boundary}`), true);
+});
+
+Deno.test("multipart/mixed nests alternative and attachment", () => {
+  const altB = createMultipartBoundary();
+  const mixB = createMultipartBoundary();
+  const body = buildMultipartMixedBody(
+    "hello",
+    "<p>hello</p>",
+    [{ filename: "a.pdf", contentType: "application/pdf", content: new Uint8Array([1, 2, 3]) }],
+    altB,
+    mixB,
+  );
+  assertEquals(body.includes("multipart/alternative"), true);
+  assertEquals(body.includes("Content-Disposition: attachment"), true);
+  assertEquals(body.startsWith(`--${mixB}`), true);
+  assertEquals(body.includes("Content-Type: multipart/mixed"), false);
 });
