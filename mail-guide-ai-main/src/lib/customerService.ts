@@ -74,6 +74,29 @@ export const ASSOCIATION_FILTER_OPTIONS: ReadonlyArray<{ value: AssociationStatu
   { value: "manual_unlink", label: "人工解除" },
 ];
 
+const BUSINESS_INTENT_VALUES = new Set<string>(BUSINESS_INTENT_OPTIONS.map((o) => o.value));
+const ASSOCIATION_FILTER_VALUES = new Set<string>(ASSOCIATION_FILTER_OPTIONS.map((o) => o.value));
+
+export function isKnownBusinessIntent(value: string | null | undefined): value is BusinessIntent {
+  return !!value && BUSINESS_INTENT_VALUES.has(value);
+}
+
+/** Radix Select 要求 value 必须在选项内；非法值回退 all */
+export function coerceIntentFilter(value: string): string {
+  if (value === "all") return "all";
+  return isKnownBusinessIntent(value) ? value : "all";
+}
+
+export function coerceAssociationFilter(value: string): AssociationStatus | "all" {
+  if (value === "all") return "all";
+  return ASSOCIATION_FILTER_VALUES.has(value) ? (value as AssociationStatus) : "all";
+}
+
+export function coerceMailboxFilter(value: string, mailboxIds: readonly string[]): string {
+  if (value === "all") return "all";
+  return mailboxIds.includes(value) ? value : "all";
+}
+
 const ASSOCIATION_LABEL_MAP: Record<string, string> = {
   linked: "已关联",
   not_provided: "未提供",

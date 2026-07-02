@@ -14,6 +14,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Eye } from "lucide-react";
 import { toast } from "sonner";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import QuickReplyTemplatesTab from "@/components/QuickReplyTemplatesTab";
+import { useAuth } from "@/hooks/useAuth";
 import { BUSINESS_INTENT_OPTIONS } from "@/lib/customerService";
 
 const SLOT_ORDER = "ar_missing_order";
@@ -207,6 +210,16 @@ function SlotEditor({
 
 export default function TemplatesPage() {
   const location = useLocation();
+  const { isAdmin, user } = useAuth();
+  const hashTab =
+    location.hash === "#quick-replies"
+      ? "quick-replies"
+      : location.hash === "#auto-reply-settings"
+        ? "auto-reply"
+        : null;
+  const [activeTab, setActiveTab] = useState(
+    isAdmin ? (hashTab ?? "auto-reply") : "quick-replies",
+  );
   const [slotOrder, setSlotOrder] = useState<SlotDraft>(() => emptySlotDraft(SLOT_ORDER));
   const [slotOrderOrAtt, setSlotOrderOrAtt] = useState<SlotDraft>(() => emptySlotDraft(SLOT_ORDER_OR_ATT));
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -235,6 +248,11 @@ export default function TemplatesPage() {
   useEffect(() => {
     load();
   }, []);
+
+  useEffect(() => {
+    if (location.hash === "#quick-replies") setActiveTab("quick-replies");
+    else if (location.hash === "#auto-reply-settings" && isAdmin) setActiveTab("auto-reply");
+  }, [location.hash, isAdmin]);
 
   useEffect(() => {
     if (location.hash !== "#auto-reply-settings") {
@@ -303,30 +321,54 @@ export default function TemplatesPage() {
   return (
     <div ref={scrollContainerRef} className="p-6 h-full overflow-auto">
       <div className="mb-4">
-        <h1 className="text-xl font-semibold">自动回邮模板</h1>
+        <h1 className="text-xl font-semibold">模板管理</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          系统固定两条自动回邮模板，不支持新建或删除。每条可单独配置首封窗口、主题/正文、适用意图及「自动回复」。
+          配置自动回邮双槽（管理员）与人工快捷回复模板（团队 + 个人）。
         </p>
       </div>
 
-      <div id="auto-reply-settings" className="grid gap-4 scroll-mt-4">
-        <SlotEditor
-          title="模板一：缺失订单号"
-          description="适用于取消订单、改地址、物流等仅需补充订单号的场景（以 process-email 判定为准）。"
-          draft={slotOrder}
-          setDraft={setSlotOrder}
-          onSave={saveSlot}
-          onPreview={openPreview}
-        />
-        <SlotEditor
-          title="模板二：缺失订单号或附件"
-          description="适用于破损、缺陷、描述不符等需单号或附件（或两者）的场景；一封内可同时说明。"
-          draft={slotOrderOrAtt}
-          setDraft={setSlotOrderOrAtt}
-          onSave={saveSlot}
-          onPreview={openPreview}
-        />
-      </div>
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
+        <TabsList className="mb-4">
+          {isAdmin && <TabsTrigger value="auto-reply">自动回邮</TabsTrigger>}
+          <TabsTrigger value="quick-replies">快捷回复</TabsTrigger>
+        </TabsList>
+
+        {isAdmin && (
+          <TabsContent value="auto-reply" className="mt-0">
+            <div className="mb-4">
+              <p className="text-sm text-muted-foreground">
+                系统固定两条自动回邮模板，不支持新建或删除。每条可单独配置首封窗口、主题/正文、适用意图及「自动回复」。
+              </p>
+            </div>
+            <div id="auto-reply-settings" className="grid gap-4 scroll-mt-4">
+              <SlotEditor
+                title="模板一：缺失订单号"
+                description="适用于取消订单、改地址、物流等仅需补充订单号的场景（以 process-email 判定为准）。"
+                draft={slotOrder}
+                setDraft={setSlotOrder}
+                onSave={saveSlot}
+                onPreview={openPreview}
+              />
+              <SlotEditor
+                title="模板二：缺失订单号或附件"
+                description="适用于破损、缺陷、描述不符等需单号或附件（或两者）的场景；一封内可同时说明。"
+                draft={slotOrderOrAtt}
+                setDraft={setSlotOrderOrAtt}
+                onSave={saveSlot}
+                onPreview={openPreview}
+              />
+            </div>
+          </TabsContent>
+        )}
+
+        <TabsContent value="quick-replies" className="mt-0">
+          {user ? (
+            <QuickReplyTemplatesTab isAdmin={isAdmin} userId={user.id} />
+          ) : (
+            <p className="text-sm text-muted-foreground">加载用户信息…</p>
+          )}
+        </TabsContent>
+      </Tabs>
 
       <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">

@@ -1,4 +1,4 @@
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/lib/supabase";
@@ -26,7 +26,12 @@ import {
   FileText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import RouteErrorBoundary from "@/components/RouteErrorBoundary";
+import {
+  clearWorkbenchViewParams,
+  hasWorkbenchViewParams,
+} from "@/lib/workbench-view-state";
 
 type NavItem = {
   to: string;
@@ -48,6 +53,7 @@ const navGroups: NavGroup[] = [
     items: [
       { to: "/", label: "工作台", icon: Inbox, end: true },
       { to: "/linked-orders", label: "订单关联", icon: Link2 },
+      { to: "/templates", label: "模板管理", icon: MessageSquare },
     ],
   },
   {
@@ -65,7 +71,6 @@ const navGroups: NavGroup[] = [
       { to: "/mailboxes", label: "邮箱配置", icon: Mail, adminOnly: true },
       // Shopify 入口暂时关闭，订单主链路走 ERP。
       // { to: "/shops", label: "Shopify 店铺", icon: Store, adminOnly: true },
-      { to: "/templates", label: "自动回邮模板", icon: MessageSquare, adminOnly: true },
       { to: "/erp-notify-templates", label: "迅捷回邮模板", icon: FileText, adminOnly: true },
       { to: "/users", label: "用户管理", icon: Users, adminOnly: true },
     ],
@@ -79,7 +84,25 @@ const navGroups: NavGroup[] = [
 export default function AppLayout() {
   const { user, isAdmin, roles } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const prevPathRef = useRef(location.pathname);
   const [collapsed, setCollapsed] = useState(false);
+
+  useEffect(() => {
+    const prev = prevPathRef.current;
+    prevPathRef.current = location.pathname;
+    if (prev === "/" && location.pathname !== "/") {
+      const params = new URLSearchParams(location.search);
+      if (hasWorkbenchViewParams(params)) {
+        const cleaned = clearWorkbenchViewParams(params);
+        const search = cleaned.toString();
+        navigate(
+          { pathname: location.pathname, search: search ? `?${search}` : "" },
+          { replace: true },
+        );
+      }
+    }
+  }, [location.pathname, location.search, navigate]);
 
   async function handleLogout() {
     await supabase.auth.signOut();
@@ -299,7 +322,9 @@ export default function AppLayout() {
       </aside>
 
       <main className="flex-1 overflow-hidden">
-        <Outlet />
+        <RouteErrorBoundary key={location.pathname}>
+          <Outlet />
+        </RouteErrorBoundary>
       </main>
     </div>
   );

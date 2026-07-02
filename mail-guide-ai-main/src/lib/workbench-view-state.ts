@@ -4,7 +4,11 @@ import {
   defaultWorkbenchListDateTo,
   type WorkbenchListStatusFilter,
 } from "@/lib/workbench-email-list";
-import type { SlaBucket } from "@/lib/customerService";
+import {
+  coerceAssociationFilter,
+  coerceIntentFilter,
+  type SlaBucket,
+} from "@/lib/customerService";
 
 const WORKBENCH_VIEW_PARAMS = [
   "from",
@@ -176,8 +180,8 @@ function normalizeWorkbenchViewState(raw: RawWorkbenchViewState | null | undefin
     dateTo: range.dateTo,
     status: readStatus(raw?.status),
     mailbox: readNonEmpty(raw?.mailbox, "all"),
-    intent: readNonEmpty(raw?.intent, "all"),
-    association: readNonEmpty(raw?.association, "all"),
+    intent: coerceIntentFilter(readNonEmpty(raw?.intent, "all")),
+    association: coerceAssociationFilter(readNonEmpty(raw?.association, "all")),
     sla: readSla(raw?.sla),
     search: typeof raw?.search === "string" ? raw.search : "",
     page: readPage(raw?.page),

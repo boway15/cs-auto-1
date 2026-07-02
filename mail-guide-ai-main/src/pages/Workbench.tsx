@@ -78,9 +78,13 @@ import {
   ASSOCIATION_FILTER_OPTIONS,
   BUSINESS_INTENT_OPTIONS,
   associationStatusLabel,
+  coerceAssociationFilter,
+  coerceIntentFilter,
+  coerceMailboxFilter,
   effectiveAssociationStatus,
   businessIntentLabel,
   computeSlaBucket,
+  isKnownBusinessIntent,
   SLA_BUCKET_LABEL,
   type BusinessIntent,
   type SlaBucket,
@@ -114,6 +118,8 @@ import {
   placeholderAttachmentCount,
   partitionWorkbenchAttachments,
 } from "@/lib/workbench-attachments";
+import QuickReplyPicker from "@/components/QuickReplyPicker";
+import { buildQuickReplyContextFromEmail } from "@/lib/quick-reply-templates";
 import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -269,6 +275,8 @@ export default function Workbench() {
   const [generating, setGenerating] = useState(false);
   const [reanalyzing, setReanalyzing] = useState(false);
   const [replyContent, setReplyContent] = useState("");
+  const [replySubjectOverride, setReplySubjectOverride] = useState<string | null>(null);
+  const [lastQuickReplyTemplateId, setLastQuickReplyTemplateId] = useState<string | null>(null);
   const [allOrders, setAllOrders] = useState<Order[]>([]);
   /** 手工关联弹窗：从 OMS 拉单 */
   const [erpPullOrderNo, setErpPullOrderNo] = useState("");
@@ -395,6 +403,16 @@ export default function Workbench() {
   ]);
 
   const listFiltersKey = useMemo(() => JSON.stringify(listFilters), [listFilters]);
+
+  const mailboxSelectValue = useMemo(
+    () => coerceMailboxFilter(mailboxFilter, mailboxes.map((m) => m.id)),
+    [mailboxFilter, mailboxes],
+  );
+  const intentSelectValue = useMemo(() => coerceIntentFilter(intentFilter), [intentFilter]);
+  const associationSelectValue = useMemo(
+    () => coerceAssociationFilter(associationFilter),
+    [associationFilter],
+  );
 
   const workbenchViewState = useMemo<WorkbenchViewState>(
     () => ({
@@ -647,6 +665,8 @@ export default function Workbench() {
       setReplyContent("");
       setSelectedDraftId(null);
     }
+    setReplySubjectOverride(null);
+    setLastQuickReplyTemplateId(null);
     setGuidance("");
   }, [triggerMissingAnalysisIfNeeded]);
 
@@ -1575,7 +1595,12 @@ export default function Workbench() {
     if (!selectedId || !replyContent.trim()) return;
     setSending(true);
     const { data, error } = await supabase.functions.invoke("send-reply", {
-      body: { email_id: selectedId, content: replyContent },
+      body: {
+        email_id: selectedId,
+        content: replyContent,
+        ...(replySubjectOverride ? { subject_override: replySubjectOverride } : {}),
+        ...(lastQuickReplyTemplateId ? { quick_reply_template_id: lastQuickReplyTemplateId } : {}),
+      },
     });
     setSending(false);
     if (error) {
@@ -1588,6 +1613,8 @@ export default function Workbench() {
     }
     if (data?.warning) toast.warning(data.warning);
     else toast.success("邮件已发送");
+    setReplySubjectOverride(null);
+    setLastQuickReplyTemplateId(null);
     void loadEmails({ keepSelection: true });
     if (selected) loadDetail(selected);
   }
@@ -1851,7 +1878,7 @@ export default function Workbench() {
               {syncing ? "同步中" : "同步"}
             </Button>
           </div>
-          <Select value={mailboxFilter} onValueChange={setMailboxFilter}>
+          <Select value={mailboxSelectValue} onValueChange={setMailboxFilter}>
             <SelectTrigger className="h-8 text-xs">
               <MailIcon className="w-3.5 h-3.5 mr-1 text-muted-foreground" />
               <SelectValue />
@@ -1932,7 +1959,7 @@ export default function Workbench() {
                 }}
               />
               <div className="grid grid-cols-2 gap-1">
-                <Select value={intentFilter} onValueChange={setIntentFilter}>
+                <Select value={intentSelectValue} onValueChange={setIntentFilter}>
                   <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="意图" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">全部意图</SelectItem>
@@ -1941,7 +1968,7 @@ export default function Workbench() {
                     ))}
                   </SelectContent>
                 </Select>
-                <Select value={associationFilter} onValueChange={setAssociationFilter}>
+                <Select value={associationSelectValue} onValueChange={setAssociationFilter}>
                   <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     {ASSOCIATION_FILTER_OPTIONS.map((o) => (
@@ -2121,7 +2148,11 @@ export default function Workbench() {
                     <div className="text-muted-foreground">业务意图（可改）</div>
                     <div className="mt-1">
                       <Select
-                        value={selected.business_intent ?? ""}
+                        value={
+                          isKnownBusinessIntent(selected.business_intent)
+                            ? selected.business_intent
+                            : undefined
+                        }
                         onValueChange={(v) => updateBusinessIntent(v as BusinessIntent)}
                         disabled={savingIntent}
                       >
@@ -2236,7 +2267,16 @@ export default function Workbench() {
                       className="text-warning h-auto p-0 ml-auto shrink-0"
                       onClick={() => navigate("/templates#auto-reply-settings")}
                     >
-                      使用模板自动回复
+                      自动回邮配置
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="link"
+                      className="text-warning h-auto p-0 shrink-0"
+                      onClick={() => navigate("/templates#quick-replies")}
+                    >
+                      管理快捷回复
                     </Button>
                   </div>
                 )}
@@ -2836,6 +2876,29 @@ export default function Workbench() {
               {/* 回复编辑 */}
               <div>
                 <h3 className="font-medium text-sm mb-2">回复内容</h3>
+                <div className="flex flex-wrap items-center gap-2 mb-2">
+                  <QuickReplyPicker
+                    disabled={!canOperate || !selected}
+                    context={buildQuickReplyContextFromEmail(
+                      selected ?? {},
+                      String(orders[0]?.order_no ?? "").trim() || emailProvidedOrderNo,
+                      selected?.from_email ?? "",
+                    )}
+                    businessIntent={selected?.business_intent}
+                    onInsert={({ body, subject, templateId, mode }) => {
+                      setReplyContent((prev) =>
+                        mode === "replace" ? body : prev ? `${prev}\n\n${body}` : body,
+                      );
+                      if (subject) setReplySubjectOverride(subject);
+                      setLastQuickReplyTemplateId(templateId);
+                    }}
+                  />
+                  {replySubjectOverride ? (
+                    <span className="text-xs text-muted-foreground">
+                      已设置自定义主题
+                    </span>
+                  ) : null}
+                </div>
                 <Textarea
                   value={replyContent}
                   onChange={(e) => setReplyContent(e.target.value)}

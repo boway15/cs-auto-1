@@ -32,7 +32,7 @@ const App = () => (
             <Route path="/" element={<Workbench />} />
             <Route path="/linked-orders" element={<LinkedOrders />} />
             <Route path="/mailboxes" element={<ProtectedRoute adminOnly><Mailboxes /></ProtectedRoute>} />
-            <Route path="/templates" element={<ProtectedRoute adminOnly><Templates /></ProtectedRoute>} />
+            <Route path="/templates" element={<Templates />} />
             <Route path="/erp-notify-templates" element={<ProtectedRoute adminOnly><ErpNotifyTemplates /></ProtectedRoute>} />
             <Route path="/users" element={<ProtectedRoute adminOnly><Users /></ProtectedRoute>} />
             <Route path="/send-logs" element={<SendLogs />} />

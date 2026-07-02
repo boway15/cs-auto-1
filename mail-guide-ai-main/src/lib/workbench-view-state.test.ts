@@ -41,7 +41,7 @@ describe("workbench-view-state", () => {
 
   it("无效值回退到安全默认值", () => {
     const state = parseWorkbenchViewState(
-      "?from=bad&to=2026-06-24&status=bad&page=-1&sla=bad",
+      "?from=bad&to=2026-06-24&status=bad&page=-1&sla=bad&intent=bad&association=bad",
     );
 
     expect(state.dateFrom).toBeTruthy();
@@ -49,6 +49,8 @@ describe("workbench-view-state", () => {
     expect(state.status).toBe("all");
     expect(state.page).toBe(0);
     expect(state.sla).toBe("all");
+    expect(state.intent).toBe("all");
+    expect(state.association).toBe("all");
   });
 
   it("序列化为可分享 URL 参数并保留未知参数", () => {

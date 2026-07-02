@@ -31,7 +31,8 @@ Deno.serve(async (req) => {
       });
     }
 
-    const { email_id, content, subject_override, idempotency_key } = await req.json();
+    const { email_id, content, subject_override, idempotency_key, quick_reply_template_id } =
+      await req.json();
     if (!email_id || !content) {
       return new Response(JSON.stringify({ error: "缺少 email_id 或 content" }), {
         status: 400,
@@ -126,7 +127,12 @@ Deno.serve(async (req) => {
       sent_by: userData.user.id,
       retry_count: existingLog ? (existingLog.retry_count ?? 0) + 1 : 0,
       idempotency_key: sendKey,
-      metadata: operatorMetadata,
+      metadata: {
+        ...operatorMetadata,
+        ...(typeof quick_reply_template_id === "string" && quick_reply_template_id
+          ? { quick_reply_template_id }
+          : {}),
+      },
     };
     const { error: sendLogError } = existingLog
       ? await admin.from("email_send_logs").update(sendLogPayload).eq("id", existingLog.id)

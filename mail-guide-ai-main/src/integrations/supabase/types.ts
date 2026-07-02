@@ -822,6 +822,51 @@ export type Database = {
         }
         Relationships: []
       }
+      quick_reply_templates: {
+        Row: {
+          body_template: string
+          business_intents: string[]
+          category: string | null
+          created_at: string
+          id: string
+          is_active: boolean
+          owner_id: string | null
+          scope: string
+          sort_order: number
+          subject_template: string | null
+          title: string
+          updated_at: string
+        }
+        Insert: {
+          body_template: string
+          business_intents?: string[]
+          category?: string | null
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          owner_id?: string | null
+          scope: string
+          sort_order?: number
+          subject_template?: string | null
+          title: string
+          updated_at?: string
+        }
+        Update: {
+          body_template?: string
+          business_intents?: string[]
+          category?: string | null
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          owner_id?: string | null
+          scope?: string
+          sort_order?: number
+          subject_template?: string | null
+          title?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       reply_templates: {
         Row: {
           auto_reply_first_contact_days: number
