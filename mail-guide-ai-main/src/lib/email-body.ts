@@ -8,13 +8,16 @@ export function isEmailBodyEmpty(email: {
   return !String(email.body_text ?? "").trim() && !String(email.body_html ?? "").trim();
 }
 
-/** 正文需补拉：库内为空，或未解码的 base64 脏数据 */
+/** 正文需补拉：库内为空，或未解码的 base64 脏数据，或仅 MIME 头 */
 export function needsEmailBodyRepair(email: {
   body_text?: string | null;
   body_html?: string | null;
 }): boolean {
   if (isEmailBodyEmpty(email)) return true;
   if (isUndecodedBase64Body(email.body_text) || isUndecodedBase64Body(email.body_html)) {
+    return true;
+  }
+  if (isMimeHeadersOnlyBody(email.body_text) || isMimeHeadersOnlyBody(email.body_html)) {
     return true;
   }
   return false;
@@ -79,14 +82,27 @@ export function isUndecodedBase64Body(text: string | null | undefined): boolean 
   return decodeBase64BodyLoose(raw) !== null;
 }
 
+const MIME_PART_HEADER_LINE_RE =
+  /^(content-type|content-transfer-encoding|content-disposition|content-id|content-description|mime-version)\s*:/i;
+
+/** 与 Edge mime-parse 同步：仅 MIME 头、无实质正文 */
+export function isMimeHeadersOnlyBody(text: string | null | undefined): boolean {
+  const s = String(text ?? "").trim();
+  if (!s || s.length > 2000) return false;
+  const lines = s.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0 || lines.length > 12) return false;
+  if (!MIME_PART_HEADER_LINE_RE.test(lines[0])) return false;
+  return lines.every((line) => MIME_PART_HEADER_LINE_RE.test(line));
+}
+
 export function hasReadableEmailBodyForDisplay(
   bodyText: string | null | undefined,
   bodyHtml: string | null | undefined,
 ): boolean {
   const text = String(bodyText ?? "").trim();
   const html = String(bodyHtml ?? "").trim();
-  if (html && !isUndecodedBase64Body(html)) return true;
-  if (text && !isUndecodedBase64Body(text)) return true;
+  if (html && !isUndecodedBase64Body(html) && !isMimeHeadersOnlyBody(html)) return true;
+  if (text && !isUndecodedBase64Body(text) && !isMimeHeadersOnlyBody(text)) return true;
   return false;
 }
 
@@ -455,6 +471,9 @@ export function normalizeEmailBodyForDisplay(
 ): { text: string; html: string | null } {
   let html = bodyHtml?.trim() ? bodyHtml.trim() : null;
   let text = bodyText?.trim() ?? "";
+
+  if (isMimeHeadersOnlyBody(text)) text = "";
+  if (isMimeHeadersOnlyBody(html)) html = null;
 
   if (html && isUndecodedBase64Body(html)) {
     html = decodeBase64BodyLoose(html);

@@ -4,7 +4,9 @@ import { Paperclip, X } from "lucide-react";
 import { toast } from "sonner";
 import {
   formatOutboundFileSize,
+  OUTBOUND_MAX_FILE_BYTES,
   OUTBOUND_MAX_FILES,
+  OUTBOUND_MAX_TOTAL_BYTES,
   type OutboundAttachmentDraft,
   uploadOutboundAttachment,
   validateOutboundFile,
@@ -16,6 +18,8 @@ export type ReplyAttachmentBarProps = {
   sessionId: string;
   items: OutboundAttachmentDraft[];
   onChange: (items: OutboundAttachmentDraft[]) => void;
+  /** toolbar：仅「添加附件」按钮；list：仅文件列表；full：全部 */
+  layout?: "full" | "toolbar" | "list";
 };
 
 export default function ReplyAttachmentBar({
@@ -24,8 +28,12 @@ export default function ReplyAttachmentBar({
   sessionId,
   items,
   onChange,
+  layout = "full",
 }: ReplyAttachmentBarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const showToolbar = layout === "full" || layout === "toolbar";
+  const showList = layout === "full" || layout === "list";
+  const sizeHint = `单文件 ≤${OUTBOUND_MAX_FILE_BYTES / 1024 / 1024}MB，总计 ≤${OUTBOUND_MAX_TOTAL_BYTES / 1024 / 1024}MB，最多 ${OUTBOUND_MAX_FILES} 个`;
 
   async function handleFilesSelected(fileList: FileList | null) {
     if (!fileList?.length) return;
@@ -84,31 +92,33 @@ export default function ReplyAttachmentBar({
   }
 
   return (
-    <div className="space-y-2">
-      <input
-        ref={inputRef}
-        type="file"
-        multiple
-        className="hidden"
-        disabled={disabled}
-        onChange={(e) => void handleFilesSelected(e.target.files)}
-      />
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={disabled || items.length >= OUTBOUND_MAX_FILES}
-          onClick={() => inputRef.current?.click()}
-        >
-          <Paperclip className="w-4 h-4 mr-1" />
-          添加附件
-        </Button>
-        <span className="text-xs text-muted-foreground">
-          单文件 ≤10MB，总计 ≤25MB，最多 {OUTBOUND_MAX_FILES} 个
-        </span>
-      </div>
-      {items.length > 0 && (
+    <div className={layout === "toolbar" ? "contents" : "space-y-2"}>
+      {showToolbar ? (
+        <>
+          <input
+            ref={inputRef}
+            type="file"
+            multiple
+            className="hidden"
+            disabled={disabled}
+            onChange={(e) => void handleFilesSelected(e.target.files)}
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={disabled || items.length >= OUTBOUND_MAX_FILES}
+            onClick={() => inputRef.current?.click()}
+          >
+            <Paperclip className="w-4 h-4 mr-1" />
+            添加附件
+          </Button>
+          {layout === "full" ? (
+            <span className="text-xs text-muted-foreground">{sizeHint}</span>
+          ) : null}
+        </>
+      ) : null}
+      {showList && items.length > 0 ? (
         <ul className="space-y-1">
           {items.map((item) => (
             <li
@@ -138,7 +148,7 @@ export default function ReplyAttachmentBar({
             </li>
           ))}
         </ul>
-      )}
+      ) : null}
     </div>
   );
 }

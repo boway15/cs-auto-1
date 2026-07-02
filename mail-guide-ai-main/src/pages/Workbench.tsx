@@ -199,6 +199,7 @@ export default function Workbench() {
   const [, setSearchParams] = useSearchParams();
   const {
     user,
+    isAdmin,
     hasAllMailboxAccess,
     hasMailboxAccess,
     allowedMailboxIds,
@@ -1612,39 +1613,48 @@ export default function Workbench() {
     }
     const readyAttachments = replyAttachments.filter((a) => a.storagePath);
     setSending(true);
-    const { data, error } = await supabase.functions.invoke("send-reply", {
-      body: {
-        email_id: selectedId,
-        content: replyContent,
-        ...(replySubjectOverride ? { subject_override: replySubjectOverride } : {}),
-        ...(lastQuickReplyTemplateId ? { quick_reply_template_id: lastQuickReplyTemplateId } : {}),
-        ...(readyAttachments.length
-          ? {
-            attachments: readyAttachments.map((a) => ({
-              storage_path: a.storagePath!,
-              filename: sanitizeOutboundFilename(a.file.name),
-              content_type: a.file.type || "application/octet-stream",
-            })),
-          }
-          : {}),
-      },
-    });
-    setSending(false);
-    if (error) {
-      toast.error("发送失败：" + (await formatFunctionsInvokeError(error)));
-      return;
+    try {
+      const { data, error } = await supabase.functions.invoke("send-reply", {
+        body: {
+          email_id: selectedId,
+          content: replyContent,
+          ...(replySubjectOverride ? { subject_override: replySubjectOverride } : {}),
+          ...(lastQuickReplyTemplateId ? { quick_reply_template_id: lastQuickReplyTemplateId } : {}),
+          ...(readyAttachments.length
+            ? {
+              attachments: readyAttachments.map((a) => ({
+                storage_path: a.storagePath!,
+                filename: sanitizeOutboundFilename(a.file.name),
+                content_type: a.file.type || "application/octet-stream",
+              })),
+            }
+            : {}),
+        },
+      });
+      if (error) {
+        toast.error("发送失败：" + (await formatFunctionsInvokeError(error)));
+        return;
+      }
+      if (data?.error) {
+        toast.error("发送失败：" + data.error);
+        return;
+      }
+      if (!data?.success) {
+        toast.error("发送失败：未收到服务器确认，请稍后重试");
+        return;
+      }
+      if (data?.warning) toast.warning(data.warning);
+      else toast.success(data?.deduped ? "邮件已发送（重复请求已忽略）" : "邮件已发送");
+      setReplySubjectOverride(null);
+      setLastQuickReplyTemplateId(null);
+      setReplyAttachments([]);
+      void loadEmails({ keepSelection: true });
+      if (selected) loadDetail(selected);
+    } catch (e) {
+      toast.error("发送失败：" + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setSending(false);
     }
-    if (data?.error) {
-      toast.error("发送失败：" + data.error);
-      return;
-    }
-    if (data?.warning) toast.warning(data.warning);
-    else toast.success("邮件已发送");
-    setReplySubjectOverride(null);
-    setLastQuickReplyTemplateId(null);
-    setReplyAttachments([]);
-    void loadEmails({ keepSelection: true });
-    if (selected) loadDetail(selected);
   }
 
   async function handleSelectEmail(email: Email) {
@@ -2288,21 +2298,23 @@ export default function Workbench() {
                                 : m}
                       </Badge>
                     ))}
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="link"
-                      className="text-warning h-auto p-0 ml-auto shrink-0"
-                      onClick={() => navigate("/templates#auto-reply-settings")}
-                    >
-                      自动回邮配置
-                    </Button>
+                    {isAdmin ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="link"
+                        className="text-warning h-auto p-0 ml-auto shrink-0"
+                        onClick={() => navigate("/auto-reply-templates")}
+                      >
+                        自动回邮配置
+                      </Button>
+                    ) : null}
                     <Button
                       type="button"
                       size="sm"
                       variant="link"
                       className="text-warning h-auto p-0 shrink-0"
-                      onClick={() => navigate("/templates#quick-replies")}
+                      onClick={() => navigate("/quick-reply-templates")}
                     >
                       管理快捷回复
                     </Button>
@@ -2903,8 +2915,32 @@ export default function Workbench() {
 
               {/* 回复编辑 */}
               <div>
-                <h3 className="font-medium text-sm mb-2">回复内容</h3>
-                <div className="flex flex-wrap items-center gap-2 mb-2">
+                <div className="flex items-center gap-2 mb-2">
+                  <h3 className="font-medium text-sm">回复内容</h3>
+                  {replySubjectOverride ? (
+                    <span className="text-xs text-muted-foreground">已设置自定义主题</span>
+                  ) : null}
+                </div>
+                <div className="relative">
+                  <Textarea
+                    value={replyContent}
+                    onChange={(e) => setReplyContent(e.target.value)}
+                    placeholder="AI 草稿生成后会自动填充到这里，可手工编辑后发送"
+                    rows={10}
+                    className="text-sm font-mono min-h-[240px] pb-12 pr-28 resize-y"
+                  />
+                  <Button
+                    type="button"
+                    onClick={sendReply}
+                    disabled={!canOperate || !replyContent.trim() || sending}
+                    size="sm"
+                    className="absolute bottom-3 right-3 shadow-sm"
+                  >
+                    <Send className="w-4 h-4 mr-1.5" />
+                    {sending ? "发送中…" : "发送回复"}
+                  </Button>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 mt-2">
                   <QuickReplyPicker
                     disabled={!canOperate || !selected}
                     context={buildQuickReplyContextFromEmail(
@@ -2921,22 +2957,24 @@ export default function Workbench() {
                       setLastQuickReplyTemplateId(templateId);
                     }}
                   />
-                  {replySubjectOverride ? (
-                    <span className="text-xs text-muted-foreground">
-                      已设置自定义主题
-                    </span>
+                  {user?.id ? (
+                    <ReplyAttachmentBar
+                      layout="toolbar"
+                      disabled={!canOperate || !selected || sending}
+                      userId={user.id}
+                      sessionId={replyAttachmentSessionId}
+                      items={replyAttachments}
+                      onChange={setReplyAttachments}
+                    />
                   ) : null}
+                  <span className="text-xs text-muted-foreground">
+                    单文件 ≤35MB，总计 ≤100MB，最多 5 个
+                  </span>
                 </div>
-                <Textarea
-                  value={replyContent}
-                  onChange={(e) => setReplyContent(e.target.value)}
-                  placeholder="AI 草稿生成后会自动填充到这里，可手工编辑后发送"
-                  rows={10}
-                  className="text-sm font-mono"
-                />
-                {user?.id ? (
+                {user?.id && replyAttachments.length > 0 ? (
                   <div className="mt-2">
                     <ReplyAttachmentBar
+                      layout="list"
                       disabled={!canOperate || !selected || sending}
                       userId={user.id}
                       sessionId={replyAttachmentSessionId}
@@ -2945,11 +2983,6 @@ export default function Workbench() {
                     />
                   </div>
                 ) : null}
-                <div className="flex justify-end mt-2">
-                  <Button onClick={sendReply} disabled={!canOperate || !replyContent.trim() || sending}>
-                    <Send className="w-4 h-4 mr-2" /> {sending ? "发送中..." : "发送回复"}
-                  </Button>
-                </div>
               </div>
             </div>
           </ScrollArea>

@@ -34,8 +34,12 @@ const CHARSET_ALIASES: Record<string, string> = {
   "iso-8859-1": "windows-1252",
   latin1: "windows-1252",
   us_ascii: "utf-8",
+  "us-ascii": "utf-8",
   ascii: "utf-8",
 };
+
+const MIME_PART_HEADER_LINE_RE =
+  /^(content-type|content-transfer-encoding|content-disposition|content-id|content-description|mime-version)\s*:/i;
 
 /** Normalize declared MIME charset to a label TextDecoder accepts. */
 export function normalizeMimeCharset(charset: string | null | undefined): string {
@@ -97,14 +101,54 @@ function unfoldHeaders(block: string): string {
   return block.replace(/\r?\n[\t ]+/g, " ");
 }
 
+/** BODY[TEXT] 等片段偶发无空行分隔，整段 MIME 头被误当正文入库 */
+export function isMimeHeadersOnlyBody(text: string | null | undefined): boolean {
+  const s = String(text ?? "").trim();
+  if (!s || s.length > 2000) return false;
+  const lines = s.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0 || lines.length > 12) return false;
+  if (!MIME_PART_HEADER_LINE_RE.test(lines[0])) return false;
+  return lines.every((line) => MIME_PART_HEADER_LINE_RE.test(line));
+}
+
+function splitHeadersBodyLoose(part: string): { headers: string; body: string } | null {
+  const p = part.replace(/^\r?\n/, "").trimStart();
+  if (!/^content-type\s*:/i.test(p)) return null;
+
+  const lines = p.split(/\r?\n/);
+  const headerLines: string[] = [];
+  let i = 0;
+  for (; i < lines.length; i++) {
+    const line = lines[i];
+    if (i === 0 && /^content-type\s*:/i.test(line)) {
+      headerLines.push(line);
+      continue;
+    }
+    if (headerLines.length > 0 && /^[\w-]+\s*:/.test(line)) {
+      headerLines.push(line);
+      continue;
+    }
+    break;
+  }
+  if (headerLines.length === 0) return null;
+  return {
+    headers: headerLines.join("\r\n"),
+    body: lines.slice(i).join("\r\n").replace(/\r?\n$/, "").trimEnd(),
+  };
+}
+
 export function splitHeadersBody(part: string): { headers: string; body: string } {
   const p = part.replace(/^\r?\n/, "").trimStart();
   const m = /\r?\n\r?\n/.exec(p);
-  if (!m) return { headers: "", body: p };
-  return {
-    headers: p.slice(0, m.index),
-    body: p.slice(m.index + m[0].length).replace(/\r?\n$/, "").trimEnd(),
-  };
+  if (m) {
+    return {
+      headers: p.slice(0, m.index),
+      body: p.slice(m.index + m[0].length).replace(/\r?\n$/, "").trimEnd(),
+    };
+  }
+  const loose = splitHeadersBodyLoose(p);
+  if (loose) return loose;
+  return { headers: "", body: p };
 }
 
 function headerParam(headers: string, name: string): string | null {
@@ -405,8 +449,8 @@ export function hasReadableEmailBody(
 ): boolean {
   const text = String(bodyText ?? "").trim();
   const html = String(bodyHtml ?? "").trim();
-  if (html && !isUndecodedBase64Body(html)) return true;
-  if (text && !isUndecodedBase64Body(text)) return true;
+  if (html && !isUndecodedBase64Body(html) && !isMimeHeadersOnlyBody(html)) return true;
+  if (text && !isUndecodedBase64Body(text) && !isMimeHeadersOnlyBody(text)) return true;
   return false;
 }
 
@@ -866,7 +910,9 @@ function fallbackBodyFromRaw(raw: string): { bodyText: string; bodyHtml: string 
   if (looksHtml) {
     return { bodyText: htmlToText(payload), bodyHtml: payload };
   }
-  return { bodyText: payload.trim(), bodyHtml: null };
+  const bodyText = payload.trim();
+  if (isMimeHeadersOnlyBody(bodyText)) return { bodyText: "", bodyHtml: null };
+  return { bodyText, bodyHtml: null };
 }
 
 /** 根据魔数/内容修正类型与文件名，避免无扩展名或 HTML 误当二进制附件 */
@@ -1033,6 +1079,9 @@ function finalizeParseResult(r: ParseMimeResult, raw: string): ParseMimeResult {
     bodyHtml = bodyText;
     bodyText = htmlToText(bodyText);
   }
+
+  if (isMimeHeadersOnlyBody(bodyText)) bodyText = "";
+  if (isMimeHeadersOnlyBody(bodyHtml)) bodyHtml = null;
 
   return { bodyText, bodyHtml, attachments };
 }

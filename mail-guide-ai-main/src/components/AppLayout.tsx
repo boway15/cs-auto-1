@@ -22,6 +22,7 @@ import {
   PanelLeftClose,
   PanelLeft,
   Link2,
+  Bot,
   CircleHelp,
   FileText,
 } from "lucide-react";
@@ -53,7 +54,6 @@ const navGroups: NavGroup[] = [
     items: [
       { to: "/", label: "工作台", icon: Inbox, end: true },
       { to: "/linked-orders", label: "订单关联", icon: Link2 },
-      { to: "/templates", label: "模板管理", icon: MessageSquare },
     ],
   },
   {
@@ -66,8 +66,9 @@ const navGroups: NavGroup[] = [
   },
   {
     title: "系统配置",
-    adminOnly: true,
     items: [
+      { to: "/auto-reply-templates", label: "自动回复", icon: Bot, adminOnly: true },
+      { to: "/quick-reply-templates", label: "快捷回复", icon: MessageSquare },
       { to: "/mailboxes", label: "邮箱配置", icon: Mail, adminOnly: true },
       // Shopify 入口暂时关闭，订单主链路走 ERP。
       // { to: "/shops", label: "Shopify 店铺", icon: Store, adminOnly: true },

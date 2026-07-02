@@ -5,7 +5,8 @@ export type OutboundAttachmentInput = {
 };
 
 const MAX_FILES = 5;
-const MAX_TOTAL = 25 * 1024 * 1024;
+const MAX_FILE = 35 * 1024 * 1024;
+const MAX_TOTAL = 100 * 1024 * 1024;
 
 type StorageAdmin = {
   storage: {
@@ -40,9 +41,12 @@ export async function loadOutboundAttachments(
       throw new Error(`读取附件失败: ${item.filename}`);
     }
     const buf = new Uint8Array(await data.arrayBuffer());
+    if (buf.byteLength > MAX_FILE) {
+      throw new Error(`单文件不能超过 ${MAX_FILE / 1024 / 1024}MB`);
+    }
     total += buf.byteLength;
     if (total > MAX_TOTAL) {
-      throw new Error("附件总大小超过限制");
+      throw new Error(`附件总大小不能超过 ${MAX_TOTAL / 1024 / 1024}MB`);
     }
     out.push({
       filename: item.filename,

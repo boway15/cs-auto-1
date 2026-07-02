@@ -8,7 +8,9 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 import AuthPage from "./pages/Auth";
 import Workbench from "./pages/Workbench";
 import Mailboxes from "./pages/Mailboxes";
-import Templates from "./pages/Templates";
+import TemplatesRedirect from "./pages/Templates";
+import AutoReplyTemplates from "./pages/AutoReplyTemplates";
+import QuickReplyTemplates from "./pages/QuickReplyTemplates";
 import ErpNotifyTemplates from "./pages/ErpNotifyTemplates";
 import Users from "./pages/Users";
 import SendLogs from "./pages/SendLogs";
@@ -31,8 +33,10 @@ const App = () => (
           <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
             <Route path="/" element={<Workbench />} />
             <Route path="/linked-orders" element={<LinkedOrders />} />
+            <Route path="/auto-reply-templates" element={<ProtectedRoute adminOnly><AutoReplyTemplates /></ProtectedRoute>} />
+            <Route path="/quick-reply-templates" element={<QuickReplyTemplates />} />
+            <Route path="/templates" element={<TemplatesRedirect />} />
             <Route path="/mailboxes" element={<ProtectedRoute adminOnly><Mailboxes /></ProtectedRoute>} />
-            <Route path="/templates" element={<Templates />} />
             <Route path="/erp-notify-templates" element={<ProtectedRoute adminOnly><ErpNotifyTemplates /></ProtectedRoute>} />
             <Route path="/users" element={<ProtectedRoute adminOnly><Users /></ProtectedRoute>} />
             <Route path="/send-logs" element={<SendLogs />} />

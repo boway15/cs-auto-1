@@ -42,6 +42,8 @@ DSL 文件位于：
 
 > 2026-06 业务升级：`email-analysis.yml` 的 `business_intent` 为 **12 类**（售后 9，含 `delay_shipping` / `sku_change` + `amazon_marketplace` / `product_inquiry` / `conversation_idle` / `solution_accepted`）。Edge `process-email` 传入 `body_latest`（客户最新回复，无引用）。**修改 YAML 后须在 Dify 重新导入并发布**，并同步 Edge Functions。
 
+> 2026-07：`NewEmailDraft.yaml` 优化**订单核实确认**草稿（如客户回复 Yes, that is correct）：不误生成「查不到订单」；自动纠正误提取的 CONFIRMATION 等伪订单号，从主题/引用正文解析 SEDETA 单号。方式B 线上网关见 `gateway_url` 环境变量。
+
 ## 4. 发布并记录 API 信息
 
 发布两个工作流后，为每个工作流创建 API Key，记录：
@@ -99,5 +101,5 @@ DSL 文件位于：
 - **Dify 打不开**：确认 `docker-compose.cs.yml` 已启动，并访问 `8090` 不是 `8081`
 - **Edge Function 调 Dify 超时**：检查 ngrok 隧道是否在线（`4040`），且 `DIFY_ANALYZE_URL` / `DIFY_DRAFT_URL` 与自建 `.env.functions`（或云端 secrets）一致
 - **草稿生成失败**：确认 `DIFY_DRAFT_*` 或 `LOVABLE_API_KEY` 至少有一套可用
-- **Dify「获取邮件上下文」曾报 `url is required` / `InvalidURLError`**：`NewEmailDraft` 已改为由 Edge `callDifyDraftWorkflow` **随请求传入** `gateway_url`、`gateway_api_key`、`max_search_depth`（开始变量），不再依赖 Dify 应用环境变量。请重新导入 DSL；并确保 Functions 已配置 **`DIFY_GATEWAY_API_KEY`**，且 **`DIFY_GATEWAY_URL` 或 `SUPABASE_URL`** 至少其一可用（未显式配置 URL 时将自动拼装 `{SUPABASE_URL}/functions/v1/dify-gateway`）。
+- **Dify「获取邮件上下文」HTTP 404**：常见两类原因。(1) **SSRF 代理拦截**：Dify 工作流 HTTP 经 `ssrf_proxy` 访问 `host.docker.internal:8000` 会被拒绝并返回 `404 page not found`；已在 `dify/docker/ssrf_proxy/squid.conf.template` 放行私网地址，修改后需 `docker compose -f docker-compose.cs.yml up -d --force-recreate ssrf_proxy`。(2) **测试 email_id 不存在**：须用工作台里真实邮件 UUID；`gateway_api_key` 与 `DIFY_GATEWAY_API_KEY` 一致。
 - **dify-gateway 返回未授权**：确认 `DIFY_GATEWAY_API_KEY` 已设置且请求带 `x-api-key`

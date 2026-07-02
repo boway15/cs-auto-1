@@ -177,6 +177,13 @@ workflow:
                 7. Output ONLY the email body text — no Subject line, no metadata
                 8. Keep paragraphs concise (2-4 sentences each)
                 9. If guidance is provided, follow it carefully
+
+                ## Order verification confirmation (HIGH PRIORITY)
+                If the customer confirms order details we asked them to verify (short replies like "yes", "correct", "confirmed", or subject mentions order confirmation):
+                - Thank them and cite the order number from subject/body/quoted text
+                - Confirm shipment within 48 hours and delivery in 3–7 business days after ship
+                - Do NOT say you cannot find the order or ask again for order number / email / address
+                - This applies even when Order Information shows no linked order
             - role: user
               text: |
                 ## Customer Email

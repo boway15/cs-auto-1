@@ -7,6 +7,7 @@ import {
   formatGmailCollapsedPlainBody,
   hasReadableEmailBodyForDisplay,
   isEmailBodyEmpty,
+  isMimeHeadersOnlyBody,
   needsEmailBodyRepair,
   isGmailCollapsedPlainBody,
   isGmailStructuredHtml,
@@ -38,6 +39,17 @@ describe("isEmailBodyEmpty", () => {
     expect(isEmailBodyEmpty({ body_text: payload, body_html: null })).toBe(false);
     expect(needsEmailBodyRepair({ body_text: payload, body_html: null })).toBe(true);
     expect(hasReadableEmailBodyForDisplay(payload, null)).toBe(false);
+  });
+
+  it("仅 MIME 头视为需补拉、不可展示", () => {
+    const headersOnly = [
+      "Content-Type: text/plain; charset=us-ascii",
+      "Content-Transfer-Encoding: 7bit",
+    ].join("\n");
+    expect(isMimeHeadersOnlyBody(headersOnly)).toBe(true);
+    expect(needsEmailBodyRepair({ body_text: headersOnly, body_html: null })).toBe(true);
+    expect(hasReadableEmailBodyForDisplay(headersOnly, null)).toBe(false);
+    expect(normalizeEmailBodyForDisplay(headersOnly, null).text).toBe("");
   });
 });
 

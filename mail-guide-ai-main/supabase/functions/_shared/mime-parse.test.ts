@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { decodeBytesWithCharset, hasReadableEmailBody, parseFullMime } from "./mime-parse.ts";
+import { decodeBytesWithCharset, hasReadableEmailBody, isMimeHeadersOnlyBody, parseFullMime } from "./mime-parse.ts";
 
 Deno.test("decodeBytesWithCharset decodes gb2312 body", () => {
   const bytes = new Uint8Array([0xd6, 0xd0, 0xce, 0xc4, 0xb2, 0xe2, 0xca, 0xd4]);
@@ -177,4 +177,38 @@ Deno.test("hasReadableEmailBody treats undecoded base64 as missing", () => {
   const payload = btoa(unescape(encodeURIComponent(plain)));
   assertEquals(hasReadableEmailBody(payload, null), false);
   assertEquals(hasReadableEmailBody(plain, null), true);
+});
+
+Deno.test("hasReadableEmailBody treats MIME headers only as missing", () => {
+  const headersOnly = [
+    "Content-Type: text/plain; charset=us-ascii",
+    "Content-Transfer-Encoding: 7bit",
+  ].join("\r\n");
+  assertEquals(isMimeHeadersOnlyBody(headersOnly), true);
+  assertEquals(hasReadableEmailBody(headersOnly, null), false);
+});
+
+Deno.test("parseFullMime decodes text part without blank line after headers (iCloud BODY[TEXT])", () => {
+  const raw = [
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: 7bit",
+    "您好，金属杆缺少螺丝配件，请协助处理。",
+  ].join("\r\n");
+
+  const parsed = parseFullMime(raw);
+
+  assertStringIncludes(parsed.bodyText, "金属杆缺少螺丝配件");
+  assertEquals(isMimeHeadersOnlyBody(parsed.bodyText), false);
+});
+
+Deno.test("parseFullMime rejects MIME headers only fragment", () => {
+  const raw = [
+    "Content-Type: text/plain; charset=us-ascii",
+    "Content-Transfer-Encoding: 7bit",
+  ].join("\r\n");
+
+  const parsed = parseFullMime(raw);
+
+  assertEquals(parsed.bodyText, "");
+  assertEquals(parsed.bodyHtml, null);
 });

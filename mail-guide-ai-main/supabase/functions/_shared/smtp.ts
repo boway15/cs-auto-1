@@ -126,7 +126,60 @@ export function buildMultipartAlternativeBody(
   ].join("\r\n");
 }
 
-/** multipart/mixed：首 part 为 nested alternative，后续为附件 */
+export function formatAttachmentContentDisposition(filename: string): string {
+  const asciiFallback = filename
+    .replace(/[^\x20-\x7E]/g, "")
+    .replace(/"/g, "")
+    .trim() || "attachment";
+  if (/^[\x20-\x7E]*$/.test(filename)) {
+    return `attachment; filename="${filename.replace(/"/g, '\\"')}"`;
+  }
+  return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
+async function writeSmtpDotStuffedLine(session: SmtpSession, line: string) {
+  const stuffed = line.startsWith(".") ? `.${line}` : line;
+  await session.write(stuffed + "\r\n");
+}
+
+/** 分块 base64 写出 SMTP DATA，避免大附件整封拼进内存 */
+async function writeBase64BodyChunked(session: SmtpSession, bytes: Uint8Array) {
+  const rawChunk = 57;
+  for (let i = 0; i < bytes.length; i += rawChunk) {
+    const slice = bytes.subarray(i, Math.min(i + rawChunk, bytes.length));
+    let bin = "";
+    for (let j = 0; j < slice.length; j++) bin += String.fromCharCode(slice[j]!);
+    await writeSmtpDotStuffedLine(session, btoa(bin));
+  }
+}
+
+async function writeMultipartMixedStreaming(
+  session: SmtpSession,
+  plain: string,
+  html: string,
+  attachments: MailAttachment[],
+  altBoundary: string,
+  mixedBoundary: string,
+) {
+  await writeSmtpDotStuffedLine(session, `--${mixedBoundary}`);
+  await writeSmtpDotStuffedLine(session, `Content-Type: multipart/alternative; boundary="${altBoundary}"`);
+  await writeSmtpDotStuffedLine(session, "");
+  for (const line of buildMultipartAlternativeBody(plain, html, altBoundary).split("\r\n")) {
+    await writeSmtpDotStuffedLine(session, line);
+  }
+  for (const att of attachments) {
+    const encodedName = encodeSubject(att.filename);
+    await writeSmtpDotStuffedLine(session, `--${mixedBoundary}`);
+    await writeSmtpDotStuffedLine(session, `Content-Type: ${att.contentType}; name="${encodedName}"`);
+    await writeSmtpDotStuffedLine(session, "Content-Transfer-Encoding: base64");
+    await writeSmtpDotStuffedLine(session, `Content-Disposition: ${formatAttachmentContentDisposition(att.filename)}`);
+    await writeSmtpDotStuffedLine(session, "");
+    await writeBase64BodyChunked(session, att.content);
+  }
+  await writeSmtpDotStuffedLine(session, `--${mixedBoundary}--`);
+}
+
+/** multipart/mixed：首 part 为 nested alternative，后续为附件（测试/小文件路径） */
 export function buildMultipartMixedBody(
   plain: string,
   html: string,
@@ -331,18 +384,25 @@ export async function sendMail(mb: Mailbox, opts: SendOpts): Promise<string> {
     const html = plainTextToHtmlEmail(opts.text);
     const attachments = opts.attachments ?? [];
 
-    let body: string;
     if (attachments.length === 0) {
       headers.push(`Content-Type: multipart/alternative; boundary="${altBoundary}"`);
-      body = buildMultipartAlternativeBody(opts.text, html, altBoundary);
+      const body = buildMultipartAlternativeBody(opts.text, html, altBoundary);
+      const data = headers.join("\r\n") + "\r\n\r\n" + body + "\r\n.\r\n";
+      await session.write(data);
     } else {
       const mixedBoundary = createMultipartBoundary();
       headers.push(`Content-Type: multipart/mixed; boundary="${mixedBoundary}"`);
-      body = buildMultipartMixedBody(opts.text, html, attachments, altBoundary, mixedBoundary);
+      await session.write(headers.join("\r\n") + "\r\n\r\n");
+      await writeMultipartMixedStreaming(
+        session,
+        opts.text,
+        html,
+        attachments,
+        altBoundary,
+        mixedBoundary,
+      );
+      await session.write("\r\n.\r\n");
     }
-
-    const data = headers.join("\r\n") + "\r\n\r\n" + body + "\r\n.\r\n";
-    await session.write(data);
     await session.expect("250", "BODY");
     return messageId;
   });
