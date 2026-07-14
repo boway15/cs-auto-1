@@ -143,12 +143,50 @@ export function decodeQuotedPrintableLoose(input: string): string {
   }
 }
 
+/**
+ * 剥离泄漏进正文的 CSS（Froala/编辑器 &lt;style&gt; 内容进 text/plain，或标签被剥落后规则残留）。
+ * 只清理 style 块与「连续规则块」前缀，不碰正文里偶尔出现的单个大括号。
+ */
+export function stripCssPollutionFromEmailText(input: string): string {
+  let s = String(input ?? "");
+  if (!s) return "";
+
+  s = s
+    .replace(/<\s*style\b[\s\S]*?<\s*\/\s*style\s*>/gi, "\n")
+    .replace(/&lt;\s*style\b[\s\S]*?&lt;\s*\/\s*style\s*&gt;/gi, "\n");
+
+  // 选择器 { 声明 } — 常见 .class / #id / @media / tag.class
+  const ruleChunk =
+    /(?:\/\*[\s\S]*?\*\/\s*)*(?:@[-\w]+(?:\s+[^{]+)?|(?:[.#]?[-\w]+(?:\.[-\w]+)*(?::+[-\w()]+)?(?:\s*,\s*[.#]?[-\w]+(?:\.[-\w]+)*(?::+[-\w()]+)?)*)\s*\{[^{}]*\})/;
+  const leadingRules = new RegExp(`^(?:\\s*(?:${ruleChunk.source}))+\\s*`, "i");
+
+  // 正文开头或 HTML 标签前的孤立 CSS 规则链
+  for (let i = 0; i < 8; i++) {
+    const before = s;
+    s = s.replace(leadingRules, "");
+    if (s === before) break;
+  }
+
+  return s.replace(/^\s+/, "");
+}
+
 /** 展示前移除会污染全局页面的 HTML 标签（邮件正文常含全局 a/color 规则） */
 export function sanitizeEmailHtmlForDisplay(html: string): string {
-  return html
+  let out = html
     .replace(/<\s*script\b[\s\S]*?<\s*\/\s*script\s*>/gi, "")
     .replace(/<\s*style\b[\s\S]*?<\s*\/\s*style\s*>/gi, "")
+    .replace(/&lt;\s*style\b[\s\S]*?&lt;\s*\/\s*style\s*&gt;/gi, "")
     .replace(/<\s*link\b[^>]*\brel=["']?stylesheet["']?[^>]*>/gi, "");
+
+  const firstTag = out.search(/</);
+  if (firstTag < 0) {
+    return stripCssPollutionFromEmailText(out);
+  }
+  if (firstTag > 0) {
+    const head = stripCssPollutionFromEmailText(out.slice(0, firstTag));
+    out = `${head}${out.slice(firstTag)}`;
+  }
+  return out;
 }
 
 /** 从 HTML 提取可见纯文本（用于判断 Word 空壳、回退展示） */
@@ -195,7 +233,8 @@ export function plainTextNotRepresentedInHtml(
   plain: string,
   html: string | null | undefined,
 ): boolean {
-  const p = plain.trim();
+  // 先去掉泄漏的 CSS，避免 .fr-emoticon / background-repeat 等伪词误判「HTML 不含正文」
+  const p = stripCssPollutionFromEmailText(plain).trim();
   if (p.length < 20) return false;
   if (isGmailStructuredHtml(html)) return false;
   const hVis = html?.trim() ? htmlBodyVisibleText(html) : "";
@@ -293,7 +332,9 @@ function escapeHtmlForEmailDisplay(s: string): string {
  * 历史同步/纯文本 MIME 常把换行压成空格；恢复邮件头、段落与引用块换行。
  */
 export function formatPlainTextEmailForDisplay(text: string): string {
-  let s = decodePlainTextEntities(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  let s = decodePlainTextEntities(stripCssPollutionFromEmailText(text))
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
   if (!s.trim()) return "";
 
   if (isGmailCollapsedPlainBody(s)) {
@@ -425,7 +466,10 @@ export function pickRenderableEmailBody(
   bodyHtml: string | null | undefined,
 ): { text: string; html: string | null } {
   const n = normalizeEmailBodyForDisplay(bodyText, bodyHtml);
-  const textFallback = (bodyText ?? "").trim() || n.text.trim();
+  const rawTextFallback = (bodyText ?? "").trim() || n.text.trim();
+  const textFallback =
+    stripCssPollutionFromEmailText(rawTextFallback).trim() ||
+    stripCssPollutionFromEmailText(n.text).trim();
   const visibleHtml = n.html ? htmlBodyVisibleText(n.html) : "";
 
   if (!n.html || !looksLikeHtmlEmailContent(n.html)) {
@@ -433,7 +477,10 @@ export function pickRenderableEmailBody(
   }
 
   if (isGmailStructuredHtml(n.html) && htmlBodyVisibleText(n.html).length > 15) {
-    return { text: n.text || textFallback, html: n.html };
+    return {
+      text: stripCssPollutionFromEmailText(n.text || textFallback).trim(),
+      html: n.html,
+    };
   }
 
   const htmlNearlyEmpty =
@@ -445,12 +492,15 @@ export function pickRenderableEmailBody(
     return { text: textFallback || visibleHtml || n.text, html: null };
   }
 
-  if (plainTextNotRepresentedInHtml(textFallback, n.html)) {
+  if (plainTextNotRepresentedInHtml(rawTextFallback, n.html)) {
     return { text: textFallback, html: null };
   }
 
   if (visibleHtml.length > 0) {
-    return { text: n.text || textFallback, html: n.html };
+    return {
+      text: stripCssPollutionFromEmailText(n.text || textFallback).trim(),
+      html: n.html,
+    };
   }
 
   return { text: textFallback || n.text, html: null };

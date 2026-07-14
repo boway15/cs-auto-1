@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.7.2] - 2026-07-14
+
+### Features
+
+- **工作台历史往来含发件信息**：同配对的入站邮件与 `email_send_logs` 发件记录按时间混排；可查看已发送内容（手工回复 / AI 草稿 / 自动模板 / ERP 通知等）；点击入站可跳转，点击发件可看发送详情。
+
+### Frontend
+
+- `Workbench`、`EmailPairHistoryList`、`workbench-send-logs`；可选正文展示清理（`email-body`）
+
+### Database
+
+- 无新增 migration（读现有 `email_send_logs`）
+
 ## [1.7.1] - 2026-07-14
 
 ### Changed

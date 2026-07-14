@@ -18,6 +18,7 @@ import {
   pickRenderableEmailBody,
   plainTextNotRepresentedInHtml,
   plainTextEmailToDisplayHtml,
+  sanitizeEmailHtmlForDisplay,
   splitPlainEmailTopAndQuoted,
 } from "@/lib/email-body";
 
@@ -116,6 +117,51 @@ describe("pickRenderableEmailBody", () => {
     expect(picked.html).toBeNull();
     expect(picked.text).toContain("sorry for the delay");
     expect(picked.text).toContain("<service@sedetalife.com>");
+  });
+
+  it("Froala style CSS 泄漏进 body_text 时仍优先可读 HTML（勿把 CSS 当正文）", () => {
+    const css = `.fr-emoticon.fr-emoticon-img {
+  background-repeat: no-repeat !important;
+  font-size: inherit;
+  height: 1em;
+  width: 1em;
+  min-height: 20px;
+  min-width: 20px;
+  display: inline-block;
+  margin: -0.1em 0.1em 0.1em;
+  line-height: 1;
+  vertical-align: middle;
+}
+.fr-emoticon {
+  font-weight: normal;
+  font-family: "Apple Color Emoji","Segoe UI Emoji";
+  display: inline;
+  line-height: 0;
+}`;
+    const german =
+      "Ich habe das AOGLLATI Polsterbett 140×200 mit Steckdosen gekauft. BESTELLNR. 303-8110169-1809925 Nachdem ich alles zusammen gebaut habe, ist aufgefallen das der Lattenrost nicht oben bleibt.";
+    const html = `<html><head><style>${css}</style></head><body>
+<p>Ich habe das</p>
+<p style="font-size:24px">AOGLLATI Polsterbett 140×200 mit Steckdosen gekauft.</p>
+<div style="background:#eee">BESTELLNR. 303-8110169-1809925</div>
+<p>Nachdem ich alles zusammen gebaut habe, ist aufgefallen das der Lattenrost nicht oben bleibt.</p>
+</body></html>`;
+    const bodyText = `${css}\n${german}`;
+    expect(plainTextNotRepresentedInHtml(bodyText, html)).toBe(false);
+    const picked = pickRenderableEmailBody(bodyText, html);
+    expect(picked.html).toContain("BESTELLNR");
+    expect(picked.html).toContain("font-size:24px");
+    expect(picked.text.trimStart().startsWith(".fr-emoticon")).toBe(false);
+  });
+
+  it("sanitize 移除转义 style 块与正文前孤立 CSS 规则", () => {
+    const css = `.fr-emoticon { display: inline; line-height: 0; }`;
+    const dirty =
+      `&lt;style&gt;${css}&lt;/style&gt;` +
+      `${css}\n<p>Ich habe das Bett gekauft.</p>`;
+    const out = sanitizeEmailHtmlForDisplay(dirty);
+    expect(out).not.toContain(".fr-emoticon");
+    expect(out).toContain("Ich habe das Bett gekauft");
   });
 });
 

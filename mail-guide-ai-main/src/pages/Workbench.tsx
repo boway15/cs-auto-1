@@ -120,6 +120,11 @@ import {
 } from "@/lib/workbench-attachments";
 import QuickReplyPicker from "@/components/QuickReplyPicker";
 import ReplyAttachmentBar from "@/components/ReplyAttachmentBar";
+import { EmailPairHistoryList } from "@/components/EmailPairHistoryList";
+import {
+  fetchWorkbenchSendLogsForEmails,
+  type WorkbenchSendLog,
+} from "@/lib/workbench-send-logs";
 import { buildQuickReplyContextFromEmail } from "@/lib/quick-reply-templates";
 import {
   sanitizeOutboundFilename,
@@ -220,6 +225,9 @@ export default function Workbench() {
   const [emails, setEmails] = useState<Email[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId);
   const selectedIdRef = useRef<string | null>(initialSelectedId);
+  /** 列表/详情异步加载序号：仅最新一次请求可写回 state */
+  const loadEmailsSeqRef = useRef(0);
+  const loadDetailSeqRef = useRef(0);
   const listScrollViewportRef = useRef<HTMLDivElement>(null);
   const savedListScrollOnMount = readWorkbenchListScrollTop();
   const savedListScrollAnchorOnMount = readWorkbenchListScrollAnchor();
@@ -261,6 +269,7 @@ export default function Workbench() {
   const [timeline, setTimeline] = useState<any[]>([]);
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [conversationEmails, setConversationEmails] = useState<Email[]>([]);
+  const [sendLogs, setSendLogs] = useState<WorkbenchSendLog[]>([]);
   const [conversationLoading, setConversationLoading] = useState(false);
   const [bodyRepairingId, setBodyRepairingId] = useState<string | null>(null);
   const [bodyRepairUiStatus, setBodyRepairUiStatus] = useState<BodyRepairUiStatus>("idle");
@@ -383,16 +392,21 @@ export default function Workbench() {
     setCompensationByEmailId(map);
   }, []);
 
+  const mailboxSelectValue = useMemo(
+    () => coerceMailboxFilter(mailboxFilter, mailboxes.map((m) => m.id)),
+    [mailboxFilter, mailboxes],
+  );
+
   const listFilters = useMemo((): WorkbenchListFilters => {
     const mb =
-      mailboxFilter !== "all"
-        ? mailboxes.find((m) => m.id === mailboxFilter)
+      mailboxSelectValue !== "all"
+        ? mailboxes.find((m) => m.id === mailboxSelectValue)
         : undefined;
     return {
       dateFrom: listDateFrom,
       dateTo: listDateTo,
       status: filter,
-      mailboxId: mailboxFilter,
+      mailboxId: mailboxSelectValue,
       mailboxToEmail: mb?.email_address ?? null,
       association: associationFilter,
       intent: intentFilter,
@@ -403,7 +417,7 @@ export default function Workbench() {
     listDateFrom,
     listDateTo,
     filter,
-    mailboxFilter,
+    mailboxSelectValue,
     mailboxes,
     associationFilter,
     intentFilter,
@@ -412,11 +426,6 @@ export default function Workbench() {
   ]);
 
   const listFiltersKey = useMemo(() => JSON.stringify(listFilters), [listFilters]);
-
-  const mailboxSelectValue = useMemo(
-    () => coerceMailboxFilter(mailboxFilter, mailboxes.map((m) => m.id)),
-    [mailboxFilter, mailboxes],
-  );
   const intentSelectValue = useMemo(() => coerceIntentFilter(intentFilter), [intentFilter]);
   const associationSelectValue = useMemo(
     () => coerceAssociationFilter(associationFilter),
@@ -466,6 +475,8 @@ export default function Workbench() {
     async (opts?: { keepSelection?: boolean; selectFirst?: boolean }): Promise<Email[]> => {
       const keepSelection = opts?.keepSelection ?? true;
       const selectFirst = opts?.selectFirst ?? false;
+      const seq = ++loadEmailsSeqRef.current;
+      const isStale = () => loadEmailsSeqRef.current !== seq;
       if (keepSelection && !selectFirst && !shouldRestoreListScrollRef.current) {
         const viewport = listScrollViewportRef.current;
         if (viewport) listScrollPreserveAfterLoadRef.current = viewport.scrollTop;
@@ -477,10 +488,12 @@ export default function Workbench() {
           listFilters,
           listPage,
         );
+        if (isStale()) return [];
         const list = rows as Email[];
         setEmails(list);
         setListTotal(total);
         await loadCompensationHints(list);
+        if (isStale()) return list;
         const currentSelectedId = selectedIdRef.current;
         if (selectFirst || !keepSelection) {
           if (list.length === 0) {
@@ -494,6 +507,7 @@ export default function Workbench() {
         }
         return list;
       } catch (error) {
+        if (isStale()) return [];
         const message =
           typeof error === "object" && error && "message" in error
             ? String((error as { message: string }).message)
@@ -504,7 +518,7 @@ export default function Workbench() {
         setListTotal(0);
         return [];
       } finally {
-        setListLoading(false);
+        if (!isStale()) setListLoading(false);
       }
     },
     [listFilters, listPage, loadCompensationHints],
@@ -534,12 +548,16 @@ export default function Workbench() {
     options?: { skipBodyRepair?: boolean; skipAnalysisCompensation?: boolean },
   ) => {
     const emailId = email.id;
+    const seq = ++loadDetailSeqRef.current;
+    const isStale = () =>
+      loadDetailSeqRef.current !== seq || selectedIdRef.current !== emailId;
 
     const { data: fullRow, error: fullErr } = await supabase
       .from("emails")
       .select("*")
       .eq("id", emailId)
       .maybeSingle();
+    if (isStale()) return;
     if (fullErr) {
       console.warn("[loadDetail full email]", fullErr.message);
     } else if (fullRow) {
@@ -560,25 +578,42 @@ export default function Workbench() {
     }
 
     setConversationLoading(true);
-    if (email.from_email && email.to_email) {
-      const { data: history } = await supabase
-        .from("emails")
-        .select("id, from_email, from_name, to_email, subject, body_text, received_at, status, is_read")
-        .eq("from_email", email.from_email)
-        .eq("to_email", email.to_email)
-        .neq("id", emailId)
-        .order("received_at", { ascending: false })
-        .limit(10);
-      setConversationEmails(history ?? []);
-    } else {
-      setConversationEmails([]);
+    setConversationEmails([]);
+    setSendLogs([]);
+    const historyPromise =
+      email.from_email && email.to_email
+        ? supabase
+            .from("emails")
+            .select(
+              "id, from_email, from_name, to_email, subject, body_text, received_at, status, processing_status, is_read",
+            )
+            .eq("from_email", email.from_email)
+            .eq("to_email", email.to_email)
+            .neq("id", emailId)
+            .order("received_at", { ascending: false })
+            .limit(10)
+        : Promise.resolve({ data: [] as Email[] });
+    const historyResult = await historyPromise;
+    if (isStale()) return;
+    const historyRows = historyResult.data ?? [];
+    setConversationEmails(historyRows);
+
+    const sendLogsResult = await fetchWorkbenchSendLogsForEmails([
+      emailId,
+      ...historyRows.map((row: Email) => String(row.id)),
+    ]);
+    if (isStale()) return;
+    if (sendLogsResult.error) {
+      console.warn("[loadDetail send logs]", sendLogsResult.error);
     }
+    setSendLogs(sendLogsResult.data);
     setConversationLoading(false);
 
     const { data: links } = await supabase
       .from("email_order_links")
       .select("id, link_source, orders(*)")
       .eq("email_id", emailId);
+    if (isStale()) return;
     const linkRows = links ?? [];
     setOrders(
       linkRows.map((l: any) => ({ ...l.orders, _link_id: l.id, _link_source: l.link_source }))
@@ -591,6 +626,7 @@ export default function Workbench() {
       .order("updated_at", { ascending: false })
       .limit(1)
       .maybeSingle();
+    if (isStale()) return;
     if (compTask?.status) {
       setCompensationByEmailId((prev) => ({
         ...prev,
@@ -608,13 +644,13 @@ export default function Workbench() {
         .from("emails")
         .update({ association_status: "not_found" } as any)
         .eq("id", emailId);
-      if (!repairFailedErr) {
+      if (!repairFailedErr && !isStale()) {
         setEmails((prev) =>
           prev.map((row) =>
             row.id === emailId ? { ...row, association_status: "not_found" } : row,
           ),
         );
-      } else {
+      } else if (repairFailedErr) {
         console.warn("[association_status repair failed task]", repairFailedErr.message);
       }
     }
@@ -628,7 +664,7 @@ export default function Workbench() {
           processing_status: "associated",
         } as any)
         .eq("id", emailId);
-      if (!repairErr) {
+      if (!repairErr && !isStale()) {
         setEmails((prev) =>
           prev.map((row) =>
             row.id === emailId
@@ -641,7 +677,7 @@ export default function Workbench() {
               : row,
           ),
         );
-      } else {
+      } else if (repairErr) {
         console.warn("[association_status repair]", repairErr.message);
       }
     }
@@ -652,6 +688,7 @@ export default function Workbench() {
       .eq("email_id", emailId)
       .eq("status", "pending")
       .order("score", { ascending: false });
+    if (isStale()) return;
     setRecommendations(recs ?? []);
 
     const { data: events } = await supabase
@@ -659,6 +696,7 @@ export default function Workbench() {
       .select("*")
       .eq("email_id", emailId)
       .order("created_at", { ascending: false });
+    if (isStale()) return;
     setTimeline(events ?? []);
 
     const { data: ds } = await supabase
@@ -666,6 +704,7 @@ export default function Workbench() {
       .select("*")
       .eq("email_id", emailId)
       .order("version", { ascending: false });
+    if (isStale()) return;
     setDrafts(ds ?? []);
     if (ds && ds.length > 0) {
       setReplyContent(ds[0].draft_content);
@@ -974,6 +1013,9 @@ export default function Workbench() {
   const prevListFiltersKey = useRef(listFiltersKey);
   const prevListPage = useRef(listPage);
   useEffect(() => {
+    if (authGateLoading || grantsLoading) return;
+    if (mailboxFilter !== "all" && mailboxes.length === 0) return;
+
     const filtersChanged = prevListFiltersKey.current !== listFiltersKey;
     const pageChanged = prevListPage.current !== listPage;
     prevListFiltersKey.current = listFiltersKey;
@@ -984,11 +1026,39 @@ export default function Workbench() {
       return;
     }
 
+    if (filtersChanged || pageChanged) {
+      loadDetailSeqRef.current += 1;
+      listScrollPreserveAfterLoadRef.current = null;
+      shouldRestoreListScrollRef.current = false;
+      pendingListScrollRestoreRef.current = null;
+      pendingListScrollAnchorRef.current = null;
+      setEmails([]);
+      setListTotal(0);
+      setSelectedEmailDetail(null);
+      setConversationEmails([]);
+      setSendLogs([]);
+      setConversationLoading(false);
+      setOrders([]);
+      setRecommendations([]);
+      setTimeline([]);
+      setDrafts([]);
+      const viewport = listScrollViewportRef.current;
+      if (viewport) viewport.scrollTop = 0;
+    }
+
     void loadEmails({
       keepSelection: !(filtersChanged || pageChanged),
       selectFirst: filtersChanged || pageChanged,
     });
-  }, [listFiltersKey, listPage, loadEmails]);
+  }, [
+    listFiltersKey,
+    listPage,
+    loadEmails,
+    authGateLoading,
+    grantsLoading,
+    mailboxFilter,
+    mailboxes.length,
+  ]);
 
   useEffect(() => {
     if (authGateLoading) return;
@@ -2035,7 +2105,7 @@ export default function Workbench() {
           </div>
         )}
 
-        <ScrollArea viewportRef={listScrollViewportRef} className="flex-1 min-h-0">
+        <ScrollArea key={listFiltersKey} viewportRef={listScrollViewportRef} className="flex-1 min-h-0">
           {listEmails.length === 0 ? (
             <div className="p-8 text-center text-muted-foreground text-sm">
               {grantsLoading || authGateLoading
@@ -2540,7 +2610,7 @@ export default function Workbench() {
                 );
               })()}
 
-              {/* 同往来历史 */}
+              {/* 同往来历史：收（入站）+ 发（已发回复）按时间混排 */}
               <div>
                 <button
                   type="button"
@@ -2552,48 +2622,39 @@ export default function Workbench() {
                   ) : (
                     <ChevronDown className="w-4 h-4 text-muted-foreground" />
                   )}
-                  <MailIcon className="w-4 h-4" /> 同发件人与收件人历史邮件（最近 10 封）
-                  {conversationEmails.length > 0 && (
+                  <MailIcon className="w-4 h-4" /> 同发件人与收件人往来
+                  {!conversationLoading && (conversationEmails.length > 0 || sendLogs.length > 0) && (
                     <span className="text-xs text-muted-foreground font-normal">
-                      （{conversationEmails.length} 封）
+                      （收 {conversationEmails.length + (selected ? 1 : 0)} · 发 {sendLogs.length}）
                     </span>
                   )}
                 </button>
                 {!conversationCollapsed && (
                   <Card className="p-3">
-                    {conversationLoading ? (
-                      <div className="text-xs text-muted-foreground">历史邮件加载中...</div>
-                    ) : conversationEmails.length === 0 ? (
-                      <div className="text-xs text-muted-foreground">暂无同一发件人与收件人的历史邮件</div>
-                    ) : (
-                      <div className="space-y-2">
-                        {conversationEmails.map((email) => (
-                          <button
-                            key={email.id}
-                            type="button"
-                            onClick={() => handleSelectEmail(email)}
-                            className="w-full text-left rounded border p-3 hover:bg-accent transition-colors"
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0 flex-1">
-                                <div className="text-sm font-medium truncate">
-                                  {decodeRfc2047(email.subject) || "(无主题)"}
-                                </div>
-                                <div className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                                  <EmailBody content={email.body_text} className="text-xs line-clamp-2" />
-                                </div>
-                              </div>
-                              <div className="shrink-0 text-right space-y-1">
-                                <StatusBadge status={email.status} processingStatus={email.processing_status} />
-                                <div className="text-[10px] text-muted-foreground">
-                                  {new Date(email.received_at).toLocaleString("zh-CN")}
-                                </div>
-                              </div>
-                            </div>
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                    <EmailPairHistoryList
+                      loading={conversationLoading}
+                      currentEmail={
+                        selected
+                          ? {
+                              id: selected.id,
+                              subject: selected.subject,
+                              body_text: selected.body_text,
+                              received_at: selected.received_at,
+                              status: selected.status,
+                              processing_status: selected.processing_status,
+                              from_email: selected.from_email,
+                              from_name: selected.from_name,
+                            }
+                          : null
+                      }
+                      historyEmails={conversationEmails}
+                      sendLogs={sendLogs}
+                      decodeSubject={decodeRfc2047}
+                      onSelectInbound={(id) => {
+                        const row = conversationEmails.find((e) => e.id === id);
+                        if (row) void handleSelectEmail(row);
+                      }}
+                    />
                   </Card>
                 )}
               </div>
