@@ -135,8 +135,12 @@ Deno.serve(async (req) => {
         } else {
           const maxAttempts = locked.max_attempts ?? 6;
           const attempts = locked.attempt_count ?? 1;
+          const failureText =
+            (typeof row?.error === "string" && row.error) ||
+            (typeof row?.queue_reason === "string" && row.queue_reason) ||
+            "附件补拉未完成";
           const classification = classifyAttachmentRepairFailure(
-            "补拉结果未返回 repaired",
+            failureText,
             attempts,
             maxAttempts,
           );

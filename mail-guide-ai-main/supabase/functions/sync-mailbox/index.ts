@@ -33,7 +33,11 @@ import {
   isDegradableSyncError,
   degradableSyncMessage,
 } from "../_shared/email-sync-degrade.ts";
-import { parseAttachmentPartSections } from "../_shared/imap-bodystructure.ts";
+import {
+  countUserAttachments,
+  extractBodyStructure,
+  parseAttachmentPartSections,
+} from "../_shared/imap-bodystructure.ts";
 import {
   buildMessageIdSearchCandidates,
   messageIdMatchesHeader,
@@ -155,7 +159,7 @@ function getBatchAttachmentRfc822MaxBytes(): number {
 }
 
 /** 增量同步单封邮件在 Edge 内联拉正文的上限；超过则先入队后台拉取，避免 CPU time limit */
-const DEFAULT_INCREMENTAL_INLINE_MAX_BYTES_AUTO = 1_500_000;
+const DEFAULT_INCREMENTAL_INLINE_MAX_BYTES_AUTO = 3_000_000;
 const DEFAULT_INCREMENTAL_INLINE_MAX_BYTES_INTERACTIVE = 5_000_000;
 
 function envPositiveInt(name: string, fallback: number): number {
@@ -792,20 +796,9 @@ function attachmentsJsonNeedsBinarySync(value: unknown): boolean {
   return !hasValid;
 }
 
-/** 历史轻量同步占位：count 较大或历史占位说明时不宜在批量同步里拉整封 */
-function placeholderSuggestsLargeMail(attachments: unknown): boolean {
-  if (!Array.isArray(attachments) || attachments.length === 0) return false;
-  let maxCount = 0;
-  let hasHistoricalPlaceholder = false;
-  for (const item of attachments) {
-    if (!item || typeof item !== "object") continue;
-    const o = item as Record<string, unknown>;
-    const c = o.count;
-    if (typeof c === "number" && c > maxCount) maxCount = c;
-    const note = String(o.note ?? "");
-    if (/历史邮件轻量|占位|未拉取/i.test(note)) hasHistoricalPlaceholder = true;
-  }
-  return maxCount >= 3 || hasHistoricalPlaceholder;
+/** 2026-07-14：大邮件判定仅依赖 RFC822.SIZE，不再用占位 count≥3 门闸 */
+function placeholderSuggestsLargeMail(_attachments: unknown): boolean {
+  return false;
 }
 
 /** 上传 MIME 解析出的附件到 Storage，写 email_attachments 并返回 emails.attachments JSON 数组项 */
@@ -906,33 +899,21 @@ async function persistEmailAttachments(
 function detectAttachments(metaRaw: string): { hasAttachment: boolean; count: number } {
   const raw = metaRaw;
   let hasAttachment = false;
-  let count = 0;
 
-  // 1) 全文启发式（不依赖嵌套括号解析）
-  if (/"attachment"/i.test(raw)) {
-    hasAttachment = true;
-    count = Math.max(count, (raw.match(/"attachment"/gi) ?? []).length);
-  }
-  if (/BODYSTRUCTURE/i.test(raw) && /\bMIXED\b/i.test(raw)) {
-    hasAttachment = true;
-  }
-  if (/FILENAME\s*=/i.test(raw) || /\bNAME\s*=\s*"/i.test(raw)) {
-    hasAttachment = true;
-  }
+  if (/"attachment"/i.test(raw)) hasAttachment = true;
+  if (/BODYSTRUCTURE/i.test(raw) && /\bMIXED\b/i.test(raw)) hasAttachment = true;
+  if (/FILENAME\s*=/i.test(raw) || /\bNAME\s*=\s*"/i.test(raw)) hasAttachment = true;
 
-  // 2) 仅从 BODYSTRUCTURE 起始处截取一段做细化（避免误把整个 FETCH 当 structure）
-  const bs = raw.match(/BODYSTRUCTURE\s*\(/i);
-  if (bs && bs.index !== undefined) {
-    const slice = raw.slice(bs.index, Math.min(bs.index + 400_000, raw.length));
-    if (/mixed/i.test(slice)) hasAttachment = true;
-    const attachMatches = slice.match(/"attachment"|"ATTACHMENT"|FILENAME\s*["\[]|NAME\s*["\[]/gi);
-    if (attachMatches) {
-      hasAttachment = true;
-      count = Math.max(count, attachMatches.length);
-    }
-  }
+  const structureOk = extractBodyStructure(raw) != null;
+  const userCount = countUserAttachments(raw);
+  if (userCount > 0) hasAttachment = true;
 
-  return { hasAttachment, count: Math.max(count, hasAttachment ? 1 : 0) };
+  // BODYSTRUCTURE 解析成功时信任用户附件数（可为 0，避免内嵌图虚报 count）；仅解析失败才启发式回退
+  const count = structureOk
+    ? userCount
+    : (hasAttachment ? 1 : 0);
+
+  return { hasAttachment, count };
 }
 
 /** 拉取整封 RFC822 时 readUntil 等待 tagged OK 的超时：大体积+慢链路需要更长 */
@@ -1274,22 +1255,6 @@ async function repairEmailById(
 
   if (!isBodyEmpty(row.body_text, row.body_html)) {
     if (row.has_attachment && attachmentsJsonNeedsBinarySync(row.attachments)) {
-      if (placeholderSuggestsLargeMail(row.attachments)) {
-        const enq = await enqueueAttachmentRepairTask(
-          admin,
-          emailId,
-          "interactive_large_placeholder_attachment",
-          "interactive",
-        );
-        return emptyResult(mb.email_address, {
-          repaired: 0,
-          queued: enq.enqueued,
-          queue_reason: "large_placeholder_attachment",
-          terminal: enq.terminal ?? !enq.enqueued,
-          error: enq.enqueued ? undefined : "超大附件已入队，请稍后刷新",
-        });
-      }
-
       const prequeue = await enqueueAttachmentRepairTask(
         admin,
         emailId,
@@ -1496,8 +1461,30 @@ async function repairEmailByIdFull(
             post_processed: false,
           };
         }
+        if (attStatus === "queued_large") {
+          return {
+            ...emptyResult(mb.email_address, {
+              repaired: 0,
+              queued: true,
+              queue_reason: "rfc822_size_exceeds_batch_limit",
+            }),
+            post_processed: false,
+          };
+        }
+        const errMsg = attStatus === "skip_no_uid"
+          ? "无法在邮箱中定位该邮件（Message-ID 未命中）"
+          : "附件补拉未完成，仍缺少可下载的二进制内容";
+        return {
+          ...emptyResult(mb.email_address, { repaired: 0, error: errMsg }),
+          post_processed: false,
+        };
       } catch (attErr) {
-        console.error("[repair full] attachment-only", emailId, attErr);
+        const msg = attErr instanceof Error ? attErr.message : String(attErr);
+        console.error("[repair full] attachment-only", emailId, msg);
+        return {
+          ...emptyResult(mb.email_address, { repaired: 0, error: msg }),
+          post_processed: false,
+        };
       } finally {
         if (client) await client.logout();
       }
@@ -1697,9 +1684,7 @@ async function repairAttachmentsForRecord(
   const batchRfc822Max = opts.rfc822MaxBytes ?? getBatchAttachmentRfc822MaxBytes();
   const rfc822Limit = opts.interactive ? batchRfc822Max : getBatchAttachmentRfc822MaxBytes();
 
-  const deferLarge =
-    rfc822Size > rfc822Limit ||
-    (!opts.skipPlaceholderGate && placeholderSuggestsLargeMail(row.attachments));
+  const deferLarge = rfc822Size > rfc822Limit;
   if (deferLarge) {
     console.log("[repair-att] enqueue large rfc822:", rfc822Size, "email_id:", row.id);
     return "queued_large";
@@ -1707,10 +1692,14 @@ async function repairAttachmentsForRecord(
 
   const partMaxBytes = getAttachmentPartMaxBytes();
   const partSections = parseAttachmentPartSections(metaRaw);
+  const ordered = [
+    ...partSections.filter((s) => s.kind === "user"),
+    ...partSections.filter((s) => s.kind === "inline"),
+  ];
   let mimeParts: MimeAttachmentPart[] = [];
 
-  if (partSections.length > 0) {
-    for (const sec of partSections) {
+  if (ordered.length > 0) {
+    for (const sec of ordered) {
       if (sec.sizeBytes <= 0) continue;
       if (sec.sizeBytes > partMaxBytes) {
         console.log("[repair-att] skip oversized part", sec.section, sec.sizeBytes);
@@ -2419,10 +2408,7 @@ async function syncOne(mb: any, admin: any, opts: SyncOptions = {}): Promise<Syn
           }
 
           const batchRfc822Max = getBatchAttachmentRfc822MaxBytes();
-          if (
-            rfc822Size > batchRfc822Max ||
-            placeholderSuggestsLargeMail(existing.attachments)
-          ) {
+          if (rfc822Size > batchRfc822Max) {
             await enqueueAttachmentRepairTask(
               admin,
               existing.id,

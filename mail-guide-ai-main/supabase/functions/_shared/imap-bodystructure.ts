@@ -2,12 +2,15 @@
  * Parse IMAP BODYSTRUCTURE to list attachment part sections for per-part FETCH.
  */
 
+export type AttachmentPartKind = "user" | "inline";
+
 export type AttachmentPartSection = {
   section: string;
   filename: string | null;
   contentType: string;
   sizeBytes: number;
   contentId: string | null;
+  kind: AttachmentPartKind;
 };
 
 export function extractBodyStructure(raw: string): string | null {
@@ -114,6 +117,32 @@ function readDisposition(tokens: string[], startIndex: { i: number }): { type: s
   return { type, filename };
 }
 
+function classifyAttachmentKind(
+  type: string,
+  dispType: string | null,
+  filename: string | null,
+): AttachmentPartKind | null {
+  if (type === "multipart" || type === "message") return null;
+
+  const isImage = type === "image";
+
+  if (type === "text") {
+    return dispType === "attachment" ? "user" : null;
+  }
+
+  if (dispType === "attachment") return "user";
+  if (dispType === "inline" && isImage) return "inline";
+  if (dispType === "inline") return "user"; // inline non-image e.g. PDF
+
+  if (!dispType) {
+    if (filename) return "user";
+    if (isImage) return "inline";
+    return "user";
+  }
+
+  return null;
+}
+
 function parseLeafPart(
   path: string[],
   tokens: string[],
@@ -127,10 +156,16 @@ function parseLeafPart(
   let contentId: string | null = null;
   if (!isNilToken(tokens[startIndex.i])) {
     const idToken = String(tokens[startIndex.i++]);
-    contentId = idToken.replace(/^<|>$/g, "").trim() || null;
+    contentId = idToken.replace(/^<(.+)>$/, "$1").trim() || null;
+  } else {
+    startIndex.i++;
   }
-  if (!isNilToken(tokens[startIndex.i])) startIndex.i++; // description
-  const encoding = isNilToken(tokens[startIndex.i]) ? "" : String(tokens[startIndex.i++]).toLowerCase();
+  startIndex.i++; // description (NIL or value)
+  if (!isNilToken(tokens[startIndex.i])) {
+    startIndex.i++; // encoding
+  } else {
+    startIndex.i++;
+  }
   const sizeRaw = tokens[startIndex.i++];
   const sizeBytes = parseInt(String(sizeRaw ?? "0"), 10) || 0;
 
@@ -142,28 +177,22 @@ function parseLeafPart(
   let dispType: string | null = null;
   let dispFilename: string | null = null;
   // optional: md5, disposition, language, location
-  if (!isNilToken(tokens[startIndex.i]) && tokens[startIndex.i] !== "(" && tokens[startIndex.i] !== ")") {
-    startIndex.i++; // md5
+  if (tokens[startIndex.i] !== ")" && tokens[startIndex.i] !== "(") {
+    startIndex.i++; // md5 (NIL or value)
   }
-  if (tokens[startIndex.i] === "(" && tokens[startIndex.i + 1]?.toLowerCase() === "attachment") {
-    const disp = readDisposition(tokens, startIndex);
-    dispType = disp.type;
-    dispFilename = disp.filename;
-  } else if (tokens[startIndex.i] === "(") {
+  if (tokens[startIndex.i] === "(") {
     const disp = readDisposition(tokens, startIndex);
     dispType = disp.type;
     dispFilename = disp.filename;
   }
 
   const filename = dispFilename ?? params.name ?? params.filename ?? null;
-  const isAttachment = dispType === "attachment" ||
-    (type !== "text" && type !== "multipart" && type !== "message");
-  if (!isAttachment && !filename) return null;
-  if (type === "multipart" || type === "message") return null;
+  const kind = classifyAttachmentKind(type, dispType, filename);
+  if (kind === null) return null;
 
   const section = path.length > 0 ? path.join(".") : "1";
   const contentType = `${type}/${subtype || "octet-stream"}`;
-  return { section, filename, contentType, sizeBytes: sizeBytes || 0, contentId };
+  return { section, filename, contentType, sizeBytes: sizeBytes || 0, contentId, kind };
 }
 
 function skipRemainderOfCurrentList(tokens: string[], startIndex: { i: number }) {
@@ -210,4 +239,8 @@ export function parseAttachmentPartSections(metaRaw: string): AttachmentPartSect
   const tokens = tokenizeBodyStructure(bodyStructure);
   const idx = { i: 0 };
   return parsePart([], tokens, idx);
+}
+
+export function countUserAttachments(metaRaw: string): number {
+  return parseAttachmentPartSections(metaRaw).filter((p) => p.kind === "user").length;
 }

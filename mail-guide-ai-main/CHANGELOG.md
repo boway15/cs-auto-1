@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.7.0] - 2026-07-14
+
+### Fixes
+
+- **入站附件数量与 Gmail 对齐**：BODYSTRUCTURE 解析区分 user / inline，列表与标记仅统计用户附件，避免内嵌图虚报。
+- **大邮件门闸收紧到 RFC822.SIZE**：去掉占位 `count≥3` 大门闸；小附件交互/后台补拉真正走 IMAP 分 part / 整封拉取。
+- **附件补拉错误透传**：`repair_full` 与 `run-email-attachment-repair-tasks` 回传明确失败原因，避免空转重试。
+- **自动同步内联体积上限**：增量 auto 默认 `1.5MB` → `3MB`，降低本可内联落库却误入队的比例。
+
+### Functions
+
+- `sync-mailbox`、`run-email-attachment-repair-tasks`、`_shared/imap-bodystructure`
+
+### Database
+
+- 无新增 migration（`MIGRATIONS=()`）
+
 ## [1.3.0] - 2026-05-27
 
 ### Features
