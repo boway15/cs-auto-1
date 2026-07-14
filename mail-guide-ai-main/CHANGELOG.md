@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.7.1] - 2026-07-14
+
+### Changed
+
+- **取消 pg_cron 定时自动生成草稿**：卸载 `auto-draft-every-30min`；人工 `generate-draft` / 工作台不受影响。
+- **vault/cron 脚本同步**：`apply-vault-and-cron.sh` / `Apply-VaultAndCron.ps1` 不再注册该任务，发版时 `RUN_APPLY_VAULT_AND_CRON=true`，避免再次挂回。
+
+### Database
+
+- `20260714120000_unschedule_auto_draft_cron.sql`
+
 ## [1.7.0] - 2026-07-14
 
 ### Fixes

@@ -3,10 +3,10 @@
 .SYNOPSIS
   Self-hosted Supabase: update vault.service_role_key and pg_cron to call the in-stack Kong Functions URL.
   Registers business cron jobs for self-hosted Kong (no *.supabase.co):
-  sync-mailbox, schedule-draft-generation, run-compensation-tasks, retry-risk-intercept-compensation,
+  sync-mailbox, run-compensation-tasks, retry-risk-intercept-compensation,
   run-email-body-repair-tasks, run-email-attachment-repair-tasks, run-email-fetch-tasks,
   run-sla-mailbox-sync, run-mailbox-history-backfill.
-  compensating-alerts is removed and replaced by first/final ops alerts.
+  auto-draft (schedule-draft-generation) and compensating-alerts are unscheduled (not re-registered).
 
 .PARAMETER SelfhostRoot
   supabase-selfhost directory, defaults to <cs-main>/supabase-selfhost
@@ -76,7 +76,6 @@ if ([string]::IsNullOrWhiteSpace($serviceRoleKey)) {
 
 $base = $KongInternalUrl.TrimEnd("/")
 $uSync = Sql-EscapeLiteral ($base + "/functions/v1/sync-mailbox")
-$uDraft = Sql-EscapeLiteral ($base + "/functions/v1/schedule-draft-generation")
 $uComp = Sql-EscapeLiteral ($base + "/functions/v1/run-compensation-tasks")
 $uRiskRetry = Sql-EscapeLiteral ($base + "/functions/v1/retry-risk-intercept-compensation")
 $uBodyRepair = Sql-EscapeLiteral ($base + "/functions/v1/run-email-body-repair-tasks")
@@ -138,8 +137,9 @@ function Add-CronBlock {
 
 $lines.Add("SELECT cron.unschedule('compensating-alerts-every-30min') WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'compensating-alerts-every-30min');")
 $lines.Add("")
+$lines.Add("SELECT cron.unschedule('auto-draft-every-30min') WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'auto-draft-every-30min');")
+$lines.Add("")
 Add-CronBlock -Out $lines -JobName "auto-sync-mailbox-every-5min" -Schedule "*/4 * * * *" -UrlEscaped $uSync
-Add-CronBlock -Out $lines -JobName "auto-draft-every-30min" -Schedule "2-59/4 * * * *" -UrlEscaped $uDraft
 Add-CronBlock -Out $lines -JobName "run-compensation-tasks-every-30min" -Schedule "*/20 * * * *" -UrlEscaped $uComp
 $lines.Add("SELECT cron.unschedule('retry-risk-intercept-hourly-at-10') WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'retry-risk-intercept-hourly-at-10');")
 $lines.Add("")
