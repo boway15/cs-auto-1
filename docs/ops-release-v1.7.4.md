@@ -4,7 +4,7 @@
 
 **发版类型**：v1.7.3 → **v1.7.4**  
 **代码分支**：GitLab `main`  
-**提交号**：`4f52f3f0385378159b546640ee022bbe8f15819a`（文档 tip：`abf9944`）  
+**提交号**：`4f52f3f0385378159b546640ee022bbe8f15819a`（文档 tip：`de188b4`）  
 **建议顺序**：同步代码 → 后端脚本（Functions）→ **强制修改 `.env.functions` 并重建 functions** → 启动 Docker 附件 Worker → 前端（跳过）→ 验收
 
 ---
