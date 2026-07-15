@@ -65,3 +65,4 @@
 - [backend-release-automation.md](./backend-release-automation.md)
 - [ops-post-deploy-checklist.md](./ops-post-deploy-checklist.md)
 - [ops-handbook-selfhosted-supabase-centos.md](./ops-handbook-selfhosted-supabase-centos.md)
+- [ops-pitfalls-attachment-worker.md](./ops-pitfalls-attachment-worker.md) — 附件 Worker / `fetch failed` 现网踩坑（与技能同步）
