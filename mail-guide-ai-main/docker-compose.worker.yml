@@ -1,3 +1,12 @@
+# Worker 独立 compose：默认按「与现网自建 Supabase 同机」配置。
+# - SUPABASE_URL 指向 compose 服务名/容器可达的 Kong（勿用 127.0.0.1，容器内会指到自身）
+# - 加入外部网络 supabase_default（与 supabase-kong 同网）
+# 本机 Docker Desktop 联调：改 SUPABASE_URL 为 http://host.docker.internal:8000，
+#   并将下方 supabase_net.name 改为本机 supabase 栈的实际网络名（或临时去掉 supabase_net）。
+#
+# 发版目录若在 /data/temp/mail-guide-ai-main，需保证能读到 env：
+#   ln -sfn /data/service/supabase-selfhost /data/temp/supabase-selfhost
+
 services:
   email-body-repair-worker:
     image: denoland/deno:alpine
@@ -16,8 +25,8 @@ services:
       - ../supabase-selfhost/.env
       - ../supabase-selfhost/.env.functions
     environment:
-      # Docker Desktop 从独立 compose 栈访问本机 Kong。
-      SUPABASE_URL: http://host.docker.internal:8000
+      # 覆盖 .env 中的 127.0.0.1，走 Docker 网络访问 Kong
+      SUPABASE_URL: http://supabase-kong:8000
       MAIL_TLS_CA_CERT_PATH: /app/supabase/functions/certs/mail-ca.pem
       EMAIL_BODY_REPAIR_WORKER_BATCH: "1"
       EMAIL_BODY_REPAIR_WORKER_INTERVAL_MS: "30000"
@@ -28,6 +37,9 @@ services:
       EMAIL_BODY_REPAIR_IMAP_SELECT_TIMEOUT_MS: "20000"
       EMAIL_BODY_REPAIR_IMAP_SEARCH_TIMEOUT_MS: "20000"
       EMAIL_BODY_REPAIR_IMAP_FETCH_TEXT_TIMEOUT_MS: "30000"
+    networks:
+      - default
+      - supabase_net
     restart: unless-stopped
 
   # 附件补拉：进程内 IMAP，默认每轮 2 个 part，绕开 Edge CPU/墙钟硬杀
@@ -48,7 +60,7 @@ services:
       - ../supabase-selfhost/.env
       - ../supabase-selfhost/.env.functions
     environment:
-      SUPABASE_URL: http://host.docker.internal:8000
+      SUPABASE_URL: http://supabase-kong:8000
       MAIL_TLS_CA_CERT_PATH: /app/supabase/functions/certs/mail-ca.pem
       EMAIL_ATTACHMENT_REPAIR_WORKER_BATCH: "1"
       EMAIL_ATTACHMENT_REPAIR_WORKER_INTERVAL_MS: "20000"
@@ -60,4 +72,12 @@ services:
       EMAIL_ATTACHMENT_REPAIR_IMAP_SELECT_TIMEOUT_MS: "20000"
       EMAIL_ATTACHMENT_REPAIR_IMAP_SEARCH_TIMEOUT_MS: "25000"
       EMAIL_ATTACHMENT_REPAIR_IMAP_FETCH_PART_TIMEOUT_MS: "90000"
+    networks:
+      - default
+      - supabase_net
     restart: unless-stopped
+
+networks:
+  supabase_net:
+    external: true
+    name: supabase_default

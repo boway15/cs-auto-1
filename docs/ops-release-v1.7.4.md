@@ -27,7 +27,7 @@
 | 材料 | 用途 |
 |------|------|
 | 无新增密钥 / secret | 本版不新增鉴权类密钥；仅改 Edge 资源限额与批次（见第 3 步建议值） |
-| 现网 Kong 可达地址 | 启 Docker Worker 时配置 `SUPABASE_URL`（勿用本机 `host.docker.internal` 默认值） |
+| 无另配 Kong URL | Worker 的 `SUPABASE_URL` / 网络已写在 `docker-compose.worker.yml`（`http://supabase-kong:8000` + `supabase_default`） |
 
 **发版清单** `mail-guide-ai-main/deploy/backend-release.env` **已在 Git**，Jenkins rsync `deploy/` 后自动下发，运维**无需**向研发另要该文件。
 
@@ -162,22 +162,24 @@ docker compose ps functions
 **操作**：
 
 ```bash
+# env_file 相对路径 ../supabase-selfhost → 发版目录旁需能读到现网 .env（一次性软链即可）
+ln -sfn /data/service/supabase-selfhost /data/temp/supabase-selfhost
+
 cd /data/temp/mail-guide-ai-main
-# 若代码亦在 /data/service/cs-main/mail-guide-ai-main，用实际路径
-
-# 现网：SUPABASE_URL 必须指向现网 Kong（按实际网络调整，勿用本机默认值）
-export SUPABASE_URL=http://kong:8000
-
-docker compose -f docker-compose.worker.yml up -d email-attachment-repair-worker
+# 勿再用 /tmp/*-override.yml；URL 与网络已在 docker-compose.worker.yml 内：
+#   SUPABASE_URL=http://supabase-kong:8000 ，外部网络 supabase_default
+docker compose -f docker-compose.worker.yml up -d --force-recreate email-attachment-repair-worker
 docker compose -f docker-compose.worker.yml ps email-attachment-repair-worker
+docker exec mail-guide-email-attachment-repair-worker printenv SUPABASE_URL
 docker compose -f docker-compose.worker.yml logs --tail 80 email-attachment-repair-worker
 ```
 
 **说明**：
 
-- `docker-compose.worker.yml` 默认 `SUPABASE_URL=http://host.docker.internal:8000` 仅适合本机联调  
-- 现网须覆盖为可达 Kong；密钥通常来自 compose 的 `env_file`（`../supabase-selfhost/.env` 与 `.env.functions`），路径不对时请运维按现网目录改 `env_file` 或导出变量  
-- Worker 日志出现 `[att-worker] started` 即为正常  
+- 期望 `printenv` 为 `http://supabase-kong:8000`（**不能**是 `127.0.0.1`）
+- 若 `docker network ls` 中网络名不是 `supabase_default`，改 `docker-compose.worker.yml` 底部 `networks.supabase_net.name` 后 recreate
+- Worker 日志出现 `[att-worker] started` 且无持续 `fetch failed` 即为正常  
+
 
 ---
 
@@ -261,7 +263,7 @@ bash "$REPO_ROOT/mail-guide-ai-main/scripts/linux/post-deploy-verify.sh"
 | 1 | 代码到位 | rsync `scripts/`、`supabase/`、`deploy/`、`docker-compose.worker.yml` |
 | 2 | 后端上线 | `apply-backend-release.sh`（Functions only，`MIGRATIONS=()`） |
 | 3 | 环境变量（**必改**） | 写入 5 个 Edge/批次变量到 `.env.functions`，**强制 recreate functions** |
-| 4 | Worker / 前端 | 启 `email-attachment-repair-worker`（`SUPABASE_URL`→现网 Kong）；**跳过前端** |
+| 4 | Worker / 前端 | 软链 `.env` 后 `docker compose -f docker-compose.worker.yml up -d`（配置已在 yml）；**跳过前端** |
 | 5 | 确认 OK | compose / env 抽查 / Worker 日志 / 问题邮件 SQL + 工作台 |
 
 ---
