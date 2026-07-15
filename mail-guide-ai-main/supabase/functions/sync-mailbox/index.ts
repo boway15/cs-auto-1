@@ -28,7 +28,11 @@ import {
   recordBodyRepairEvent,
   finalizePostBodyRepair,
 } from "../_shared/email-body-repair-queue.ts";
-import { enqueueAttachmentRepairTask } from "../_shared/email-attachment-repair-queue.ts";
+import {
+  enqueueAttachmentRepairTask,
+  nextAttachmentPartialResumeIso,
+} from "../_shared/email-attachment-repair-queue.ts";
+import { repairEmailAttachmentsById } from "../_shared/imap-attachment-repair.ts";
 import { enqueueEmailFetchTask } from "../_shared/email-fetch-queue.ts";
 import {
   isDegradableSyncError,
@@ -1444,37 +1448,50 @@ async function repairEmailByIdFull(
 
   if (!isBodyEmpty(row.body_text, row.body_html)) {
     if (needsAtt && row.has_attachment) {
-      let client: ImapClient | null = null;
       try {
-        client = await connectImapClient(mb, { connectTimeoutMs: 4_000, attempts: 1 });
-        const attStatus = await repairAttachmentsForRecord(
-          client,
-          admin,
-          mb,
-          row as EmailAttachmentRepairRow,
-          maxBytesNoAttach,
-          maxBytesWithAttach,
-          { skipPlaceholderGate: true },
-        );
-        if (attStatus === "repaired") {
+        // 与 Docker Worker 共用：每轮默认只拉 1 个 part，降低 Edge CPU 硬杀概率
+        const partsPer = parseEnvPositiveInt("MAIL_SYNC_ATTACHMENT_PARTS_PER_INVOKE", 1);
+        const attStatus = await repairEmailAttachmentsById(admin, emailId, {
+          maxPartsPerInvoke: partsPer,
+        });
+        if (attStatus.status === "repaired" || attStatus.status === "skip_already_has") {
           return {
             ...emptyResult(mb.email_address, { repaired: 1, fetched: 1, total: 1 }),
             post_processed: false,
           };
         }
-        if (attStatus === "queued_large") {
+        if (attStatus.status === "partial") {
+          await enqueueAttachmentRepairTask(
+            admin,
+            emailId,
+            `repair_full_partial_remaining_${attStatus.remainingParts}`,
+            "interactive",
+            { nextRunAt: nextAttachmentPartialResumeIso() },
+          );
+          return {
+            ...emptyResult(mb.email_address, {
+              repaired: 0,
+              queued: true,
+              queue_reason: "attachment_partial_resume",
+              fetched: attStatus.storedCount,
+            }),
+            post_processed: false,
+          };
+        }
+        if (attStatus.status === "queued_large") {
           return {
             ...emptyResult(mb.email_address, {
               repaired: 0,
               queued: true,
               queue_reason: "rfc822_size_exceeds_batch_limit",
+              error: attStatus.error,
             }),
             post_processed: false,
           };
         }
-        const errMsg = attStatus === "skip_no_uid"
+        const errMsg = attStatus.status === "skip_no_uid"
           ? "无法在邮箱中定位该邮件（Message-ID 未命中）"
-          : "附件补拉未完成，仍缺少可下载的二进制内容";
+          : (attStatus.error || "附件补拉未完成，仍缺少可下载的二进制内容");
         return {
           ...emptyResult(mb.email_address, { repaired: 0, error: errMsg }),
           post_processed: false,
@@ -1486,8 +1503,6 @@ async function repairEmailByIdFull(
           ...emptyResult(mb.email_address, { repaired: 0, error: msg }),
           post_processed: false,
         };
-      } finally {
-        if (client) await client.logout();
       }
     }
     const post = await finalizePostBodyRepair(admin, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, emailId);

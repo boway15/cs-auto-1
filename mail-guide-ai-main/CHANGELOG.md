@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.7.4] - 2026-07-15
+
+### Fixes
+
+- **附件补拉出 Edge 套娃**：`run-email-attachment-repair-tasks` 进程内调用共享 IMAP 补拉，不再 HTTP 调 `sync-mailbox`。
+- **分 part 续传**：每轮默认 1～2 个 part，剩余任务 `next_run_at` 约 45s 后续跑；Edge CPU 取消类失败拉长退避（30min 起）。
+- **Docker 附件 Worker**：`email-attachment-repair-worker`（`docker-compose.worker.yml`），长超时进程内 IMAP。
+- **发版脚本**：CentOS 7 Bash 空 `MIGRATIONS=()` 不再 unbound。
+
+### Functions / Scripts
+
+- `_shared/imap-attachment-repair.ts`、`run-email-attachment-repair-tasks`、`sync-mailbox`（repair_full）
+- `scripts/workers/email-attachment-repair-worker.ts`、`scripts/linux/selfhosted/apply-backend-release.sh`
+
+### Database
+
+- 无新增 migration（`MIGRATIONS=()`）
+
 ## [1.7.3] - 2026-07-15
 
 ### Fixes

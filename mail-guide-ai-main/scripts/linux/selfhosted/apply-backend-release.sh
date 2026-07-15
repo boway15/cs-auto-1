@@ -84,7 +84,8 @@ else
   echo "==> No migrations listed"
 fi
 
-for migration in "${MIGRATIONS[@]}"; do
+# CentOS 7 Bash 4.2 + set -u：空数组 "${MIGRATIONS[@]}" 会报 unbound variable
+for migration in ${MIGRATIONS[@]+"${MIGRATIONS[@]}"}; do
   if [[ ! "$migration" =~ ^[0-9]{14}_[A-Za-z0-9_.-]+\.sql$ ]]; then
     echo "Invalid migration filename: $migration" >&2
     exit 1

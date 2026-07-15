@@ -10,7 +10,12 @@ export type EnqueueAttachmentRepairResult = {
   terminal?: boolean;
 };
 
-const BACKOFF_MINUTES = [5, 15, 30, 60, 120];
+/** 普通失败退避（分钟） */
+const BACKOFF_MINUTES = [10, 30, 60, 120, 240];
+/** Edge/CPU 取消类：更长退避，避免打爆现网 */
+const CANCEL_BACKOFF_MINUTES = [30, 60, 120, 240, 360];
+/** 分 part 续传：尽快下一轮 */
+const PARTIAL_RESUME_SECONDS = 45;
 
 /** emails.attachments 是否已有可下载的 storage_path（防假 resolved） */
 export function attachmentsJsonHasValidStoragePath(attachments: unknown): boolean {
@@ -63,7 +68,6 @@ export async function recoverStaleAttachmentRepairTasks(
     if (!upErr) recovered++;
   }
 
-  // 无 locked_at 的 running（异常中断）一并回收
   const { data: unlocked, error: unlockedErr } = await admin
     .from("email_attachment_repair_tasks")
     .select("id")
@@ -97,6 +101,7 @@ export async function enqueueAttachmentRepairTask(
   emailId: string,
   reason: string,
   priority: AttachmentRepairTaskPriority = "background",
+  opts?: { nextRunAt?: string },
 ): Promise<EnqueueAttachmentRepairResult> {
   const { data: email } = await admin
     .from("emails")
@@ -105,6 +110,7 @@ export async function enqueueAttachmentRepairTask(
     .maybeSingle();
   if (!email) return { enqueued: false, terminal: true };
 
+  const nextRunAt = opts?.nextRunAt ?? new Date().toISOString();
   const { data: existing } = await admin
     .from("email_attachment_repair_tasks")
     .select("id, status")
@@ -112,6 +118,14 @@ export async function enqueueAttachmentRepairTask(
     .maybeSingle();
 
   if (existing && (existing.status === "pending" || existing.status === "running")) {
+    // 续传/插队：允许把 next_run_at 提前
+    if (opts?.nextRunAt && existing.status === "pending") {
+      await admin.from("email_attachment_repair_tasks").update({
+        next_run_at: nextRunAt,
+        last_error: reason.slice(0, 500),
+        priority,
+      }).eq("id", existing.id);
+    }
     return { enqueued: true, taskId: String(existing.id), terminal: false };
   }
 
@@ -120,7 +134,7 @@ export async function enqueueAttachmentRepairTask(
     status: "pending" as AttachmentRepairTaskStatus,
     priority,
     last_error: reason.slice(0, 500),
-    next_run_at: new Date().toISOString(),
+    next_run_at: nextRunAt,
     attempt_count: 0,
     locked_at: null,
     locked_by: null,
@@ -146,19 +160,27 @@ export function classifyAttachmentRepairFailure(
 ): { terminal: boolean; lastError: string } {
   const terminal = attemptCount >= maxAttempts;
   const errText = error.slice(0, 500);
-  if (isWorkerCancelledError(errText)) {
+  if (isWorkerCancelledError(errText) || /CPU time (soft|hard) limit|early termination/i.test(errText)) {
     return {
       terminal,
       lastError: terminal
-        ? "超大附件补拉多次超时（WorkerRequestCancelled）"
-        : "超大附件补拉超时，已安排后台重试",
+        ? "附件补拉多次触发 Edge CPU/墙钟限制，已停止自动重试（请用 Docker Worker 或稍后重试）"
+        : "附件补拉触发 Edge 资源限制，已拉长退避后重试",
     };
   }
   return { terminal, lastError: errText };
 }
 
-export function nextAttachmentRepairBackoffIso(attemptCount: number): string {
-  const idx = Math.min(Math.max(attemptCount, 1), BACKOFF_MINUTES.length) - 1;
-  const minutes = BACKOFF_MINUTES[idx];
+export function nextAttachmentRepairBackoffIso(attemptCount: number, errorText = ""): string {
+  const cancelled = isWorkerCancelledError(errorText) ||
+    /CPU time (soft|hard) limit|early termination|超大附件补拉超时/i.test(errorText);
+  const table = cancelled ? CANCEL_BACKOFF_MINUTES : BACKOFF_MINUTES;
+  const idx = Math.min(Math.max(attemptCount, 1), table.length) - 1;
+  const minutes = table[idx];
   return new Date(Date.now() + minutes * 60 * 1000).toISOString();
+}
+
+/** 分 part 续传：短间隔再次到期 */
+export function nextAttachmentPartialResumeIso(): string {
+  return new Date(Date.now() + PARTIAL_RESUME_SECONDS * 1000).toISOString();
 }
