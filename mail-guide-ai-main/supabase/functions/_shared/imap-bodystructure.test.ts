@@ -16,6 +16,7 @@ Deno.test("parseAttachmentPartSections finds attachment parts", () => {
   assertEquals(pdf?.section, "2");
   assertEquals(pdf?.filename, "report.pdf");
   assertEquals(pdf?.kind, "user");
+  assertEquals(pdf?.encoding, "base64");
 });
 
 Deno.test("countUserAttachments ignores inline images, counts attachment disposition", () => {

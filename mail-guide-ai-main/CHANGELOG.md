@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.7.3] - 2026-07-15
+
+### Fixes
+
+- **附件补拉避免 Edge 整封回退超时**：`repairAttachmentsForRecord` 在已解析出 BODYSTRUCTURE part 时不再 `fetchFullBody`；优先按 encoding 直接解码单 part，降低 `WorkerRequestCancelled`。
+- **禁止假 resolved**：附件 worker 仅在库内 `attachments` 含有效 `storage_path` 时标成功；回收超时 `running` 僵死锁。
+
+### Functions
+
+- `sync-mailbox`、`run-email-attachment-repair-tasks`、`_shared/mime-parse`、`_shared/imap-bodystructure`、`_shared/email-attachment-repair-queue`
+
+### Database
+
+- 无新增 migration（`MIGRATIONS=()`）
+
 ## [1.7.2] - 2026-07-14
 
 ### Features

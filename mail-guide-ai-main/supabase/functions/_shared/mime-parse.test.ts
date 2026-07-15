@@ -1,5 +1,11 @@
 import { assert, assertEquals, assertStringIncludes } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { decodeBytesWithCharset, hasReadableEmailBody, isMimeHeadersOnlyBody, parseFullMime } from "./mime-parse.ts";
+import {
+  decodeBytesWithCharset,
+  decodeImapPartPayload,
+  hasReadableEmailBody,
+  isMimeHeadersOnlyBody,
+  parseFullMime,
+} from "./mime-parse.ts";
 
 Deno.test("decodeBytesWithCharset decodes gb2312 body", () => {
   const bytes = new Uint8Array([0xd6, 0xd0, 0xce, 0xc4, 0xb2, 0xe2, 0xca, 0xd4]);
@@ -211,4 +217,15 @@ Deno.test("parseFullMime rejects MIME headers only fragment", () => {
 
   assertEquals(parsed.bodyText, "");
   assertEquals(parsed.bodyHtml, null);
+});
+
+Deno.test("decodeImapPartPayload decodes BASE64 body without MIME headers", () => {
+  const payload = btoa("hello-att");
+  const bytes = decodeImapPartPayload(`${payload}\r\n`, "BASE64");
+  assert(bytes != null);
+  assertEquals(new TextDecoder().decode(bytes!), "hello-att");
+});
+
+Deno.test("decodeImapPartPayload returns null for empty", () => {
+  assertEquals(decodeImapPartPayload("   ", "base64"), null);
 });

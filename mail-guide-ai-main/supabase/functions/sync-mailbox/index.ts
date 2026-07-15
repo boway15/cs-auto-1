@@ -10,6 +10,7 @@ import {
   extractTextFromMime,
   hasReadableEmailBody,
   parseFullMime,
+  decodeImapPartPayload,
   type MimeAttachmentPart,
 } from "../_shared/mime-parse.ts";
 import { connectMailImapTls, isTransientTlsConnectError } from "../_shared/mail-tls-ca.ts";
@@ -1697,6 +1698,12 @@ async function repairAttachmentsForRecord(
     ...partSections.filter((s) => s.kind === "inline"),
   ];
   let mimeParts: MimeAttachmentPart[] = [];
+  /** BODYSTRUCTURE 已列出附件 section 时禁止整封回退，避免 Edge WorkerRequestCancelled */
+  const hadPartSections = ordered.length > 0;
+  const fullFallbackMaxBytes = parseEnvPositiveInt(
+    "MAIL_SYNC_ATTACHMENT_FULL_FALLBACK_MAX_BYTES",
+    3_000_000,
+  );
 
   if (ordered.length > 0) {
     for (const sec of ordered) {
@@ -1712,19 +1719,34 @@ async function repairAttachmentsForRecord(
           imapFullBodyReadTimeoutMs(true, sec.sizeBytes || rfc822Size),
         );
         if (!rawPart?.trim()) continue;
-        const parsedPart = parseFullMime(rawPart, { attachmentsOnly: true, forceAttachment: true });
-        for (const p of parsedPart.attachments) {
-          if (p.bytes.length === 0) continue;
-          const contentId = p.contentId ?? sec.contentId ?? null;
-          if (!sec.filename) {
-            mimeParts.push({ ...p, contentId });
-            continue;
-          }
+
+        let gotPart = false;
+        const directBytes = decodeImapPartPayload(rawPart, sec.encoding);
+        if (directBytes && directBytes.length > 0) {
           mimeParts.push({
-            ...p,
-            contentId,
-            filename: p.filename && p.filename !== "attachment" ? p.filename : sec.filename,
+            filename: sec.filename && sec.filename.trim() ? sec.filename : "attachment",
+            contentType: sec.contentType || "application/octet-stream",
+            bytes: directBytes,
+            contentId: sec.contentId ?? null,
           });
+          gotPart = true;
+        }
+
+        if (!gotPart) {
+          const parsedPart = parseFullMime(rawPart, { attachmentsOnly: true, forceAttachment: true });
+          for (const p of parsedPart.attachments) {
+            if (p.bytes.length === 0) continue;
+            const contentId = p.contentId ?? sec.contentId ?? null;
+            if (!sec.filename) {
+              mimeParts.push({ ...p, contentId });
+              continue;
+            }
+            mimeParts.push({
+              ...p,
+              contentId,
+              filename: p.filename && p.filename !== "attachment" ? p.filename : sec.filename,
+            });
+          }
         }
       } catch (partErr) {
         console.warn("[repair-att] part fetch failed", sec.section, partErr);
@@ -1735,6 +1757,30 @@ async function repairAttachmentsForRecord(
   mimeParts = mimeParts.filter((p) => p.bytes.length > 0);
 
   if (mimeParts.length === 0) {
+    if (hadPartSections) {
+      await admin.from("emails").update({
+        attachments: [{
+          count: attachInfo.count,
+          note: "已解析 BODYSTRUCTURE 附件节，但分 part 拉取/解码失败；为避免 Edge 超时未再拉整封，请重试或检查 IMAP。",
+          error: "part_fetch_or_decode_failed_no_fullbody_fallback",
+        }] as unknown,
+        has_attachment: true,
+      }).eq("id", row.id);
+      return "still_missing";
+    }
+
+    if (rfc822Size <= 0 || rfc822Size > fullFallbackMaxBytes) {
+      await admin.from("emails").update({
+        attachments: [{
+          count: attachInfo.count,
+          note: "无法解析附件 MIME 节，且整封体积超过分 part 失败后的安全回退上限，未拉取整封。",
+          error: "no_part_sections_fullbody_fallback_skipped",
+        }] as unknown,
+        has_attachment: true,
+      }).eq("id", row.id);
+      return "still_missing";
+    }
+
     const bodyResult = await client.fetchFullBody(
       uid,
       rfc822Size,

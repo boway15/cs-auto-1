@@ -505,6 +505,77 @@ function joinBase64Payload(body: string): string {
   return flat;
 }
 
+/**
+ * Decode IMAP BODY.PEEK[section] payload using BODYSTRUCTURE encoding.
+ * Prefer this over parseFullMime when the FETCH body has no MIME headers.
+ */
+export function decodeImapPartPayload(
+  raw: string,
+  encoding: string | null | undefined,
+): Uint8Array | null {
+  const trimmed = String(raw ?? "");
+  if (!trimmed.trim()) return null;
+  const enc = String(encoding ?? "").trim().toLowerCase().replace(/^"+|"+$/g, "");
+
+  const fromBase64 = (payload: string): Uint8Array | null => {
+    try {
+      const b = joinBase64Payload(payload);
+      if (!b) return null;
+      const bin = atob(b);
+      if (!bin.length) return null;
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    } catch {
+      return null;
+    }
+  };
+
+  try {
+    if (enc === "base64" || enc === "b") {
+      return fromBase64(trimmed);
+    }
+    if (enc === "quoted-printable" || enc === "qp") {
+      const buf: number[] = [];
+      for (let i = 0; i < trimmed.length; i++) {
+        if (trimmed[i] === "=") {
+          if (i + 2 < trimmed.length) {
+            if (trimmed[i + 1] === "\r" && trimmed[i + 2] === "\n") {
+              i += 2;
+              continue;
+            }
+            if (trimmed[i + 1] === "\n") {
+              i += 1;
+              continue;
+            }
+            const hex = trimmed.substring(i + 1, i + 3);
+            if (/^[0-9A-Fa-f]{2}$/.test(hex)) {
+              buf.push(parseInt(hex, 16));
+              i += 2;
+              continue;
+            }
+          }
+        } else if (trimmed[i] !== "\r") {
+          buf.push(trimmed.charCodeAt(i) & 0xff);
+        }
+      }
+      return buf.length > 0 ? new Uint8Array(buf) : null;
+    }
+
+    if (!enc && looksLikeBase64Payload(trimmed)) {
+      const decoded = fromBase64(trimmed);
+      if (decoded) return decoded;
+    }
+
+    // 7bit / 8bit / binary / unknown: octet stream from string code units
+    const out = new Uint8Array(trimmed.length);
+    for (let i = 0; i < trimmed.length; i++) out[i] = trimmed.charCodeAt(i) & 0xff;
+    return out.length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
 function decodeBodyToBytes(headers: string, body: string): Uint8Array {
   const charset = normalizeMimeCharset(headers.match(/charset=(["']?)([^"';\s]+)\1/i)?.[2]);
   const cte = getContentTransferEncoding(headers);

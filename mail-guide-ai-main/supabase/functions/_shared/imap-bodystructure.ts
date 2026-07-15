@@ -11,6 +11,8 @@ export type AttachmentPartSection = {
   sizeBytes: number;
   contentId: string | null;
   kind: AttachmentPartKind;
+  /** BODYSTRUCTURE Content-Transfer-Encoding（如 BASE64），用于单 part 直接解码 */
+  encoding: string | null;
 };
 
 export function extractBodyStructure(raw: string): string | null {
@@ -161,8 +163,9 @@ function parseLeafPart(
     startIndex.i++;
   }
   startIndex.i++; // description (NIL or value)
+  let encoding: string | null = null;
   if (!isNilToken(tokens[startIndex.i])) {
-    startIndex.i++; // encoding
+    encoding = String(tokens[startIndex.i++]).toLowerCase();
   } else {
     startIndex.i++;
   }
@@ -192,7 +195,15 @@ function parseLeafPart(
 
   const section = path.length > 0 ? path.join(".") : "1";
   const contentType = `${type}/${subtype || "octet-stream"}`;
-  return { section, filename, contentType, sizeBytes: sizeBytes || 0, contentId, kind };
+  return {
+    section,
+    filename,
+    contentType,
+    sizeBytes: sizeBytes || 0,
+    contentId,
+    kind,
+    encoding,
+  };
 }
 
 function skipRemainderOfCurrentList(tokens: string[], startIndex: { i: number }) {

@@ -1,7 +1,9 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import {
+  attachmentsJsonHasValidStoragePath,
   classifyAttachmentRepairFailure,
   nextAttachmentRepairBackoffIso,
+  recoverStaleAttachmentRepairTasks,
 } from "../_shared/email-attachment-repair-queue.ts";
 
 const corsHeaders = {
@@ -20,6 +22,7 @@ function parseEnvPositiveInt(name: string, fallback: number): number {
 }
 
 const BATCH_LIMIT = parseEnvPositiveInt("MAIL_ATTACHMENT_REPAIR_BATCH_LIMIT", 1);
+const STALE_MINUTES = parseEnvPositiveInt("MAIL_ATTACHMENT_REPAIR_STALE_LOCK_MINUTES", 20);
 const WORKER_ID = `att-repair-${crypto.randomUUID().slice(0, 8)}`;
 
 function isAuthorizedServiceToken(token: string): boolean {
@@ -27,6 +30,44 @@ function isAuthorizedServiceToken(token: string): boolean {
   if (token === SERVICE_KEY) return true;
   if (CRON_KEY && token === CRON_KEY) return true;
   return false;
+}
+
+async function markRetryOrFailed(
+  admin: ReturnType<typeof createClient>,
+  locked: { id: string; attempt_count: number | null; max_attempts: number | null },
+  failureText: string,
+  results: Record<string, unknown>[],
+) {
+  const maxAttempts = locked.max_attempts ?? 6;
+  const attempts = locked.attempt_count ?? 1;
+  const classification = classifyAttachmentRepairFailure(failureText, attempts, maxAttempts);
+  if (classification.terminal) {
+    await admin.from("email_attachment_repair_tasks").update({
+      status: "failed",
+      last_error: classification.lastError,
+      locked_at: null,
+      locked_by: null,
+    }).eq("id", locked.id);
+    results.push({
+      task_id: locked.id,
+      status: "failed",
+      error: classification.lastError,
+      terminal: true,
+    });
+  } else {
+    await admin.from("email_attachment_repair_tasks").update({
+      status: "pending",
+      last_error: classification.lastError,
+      next_run_at: nextAttachmentRepairBackoffIso(attempts),
+      locked_at: null,
+      locked_by: null,
+    }).eq("id", locked.id);
+    results.push({
+      task_id: locked.id,
+      status: "retry",
+      error: classification.lastError,
+    });
+  }
 }
 
 Deno.serve(async (req) => {
@@ -43,6 +84,8 @@ Deno.serve(async (req) => {
 
     const admin = createClient(SUPABASE_URL, SERVICE_KEY);
     const nowIso = new Date().toISOString();
+
+    const staleRecovered = await recoverStaleAttachmentRepairTasks(admin, STALE_MINUTES);
 
     const { data: tasks, error: pickErr } = await admin
       .from("email_attachment_repair_tasks")
@@ -78,20 +121,7 @@ Deno.serve(async (req) => {
         .select("attachments")
         .eq("id", locked.email_id)
         .maybeSingle();
-      const hasValidStoragePath = Array.isArray(emailRow?.attachments) &&
-        emailRow.attachments.some((a: unknown) => {
-          if (!a || typeof a !== "object") return false;
-          const o = a as Record<string, unknown>;
-          const path = typeof o.storage_path === "string" ? o.storage_path.trim() : "";
-          if (!path) return false;
-          const size = o.size;
-          if (typeof size === "number" && size <= 0) return false;
-          const fn = String(o.filename ?? "").trim().toLowerCase();
-          const ct = String(o.contentType ?? "").split(";")[0].trim().toLowerCase();
-          if (/^attachment-\d+\./i.test(fn) && ct === "application/octet-stream") return false;
-          return true;
-        });
-      if (hasValidStoragePath) {
+      if (attachmentsJsonHasValidStoragePath(emailRow?.attachments)) {
         await admin.from("email_attachment_repair_tasks").update({
           status: "resolved",
           repaired_at: new Date().toISOString(),
@@ -123,7 +153,15 @@ Deno.serve(async (req) => {
         const body = await resp.json().catch(() => ({}));
         const row = Array.isArray(body?.results) ? body.results[0] : null;
         const repaired = Number(row?.repaired ?? 0);
-        if (repaired > 0) {
+
+        const { data: afterRow } = await admin
+          .from("emails")
+          .select("attachments")
+          .eq("id", locked.email_id)
+          .maybeSingle();
+        const hasStorage = attachmentsJsonHasValidStoragePath(afterRow?.attachments);
+
+        if (repaired > 0 && hasStorage) {
           await admin.from("email_attachment_repair_tasks").update({
             status: "resolved",
             repaired_at: new Date().toISOString(),
@@ -132,64 +170,31 @@ Deno.serve(async (req) => {
             locked_by: null,
           }).eq("id", locked.id);
           results.push({ task_id: locked.id, status: "resolved", repaired });
+        } else if (repaired > 0 && !hasStorage) {
+          await markRetryOrFailed(
+            admin,
+            locked,
+            "repaired_claimed_but_no_storage_path",
+            results,
+          );
         } else {
-          const maxAttempts = locked.max_attempts ?? 6;
-          const attempts = locked.attempt_count ?? 1;
           const failureText =
             (typeof row?.error === "string" && row.error) ||
             (typeof row?.queue_reason === "string" && row.queue_reason) ||
             "附件补拉未完成";
-          const classification = classifyAttachmentRepairFailure(
-            failureText,
-            attempts,
-            maxAttempts,
-          );
-          if (classification.terminal) {
-            await admin.from("email_attachment_repair_tasks").update({
-              status: "failed",
-              last_error: classification.lastError,
-              locked_at: null,
-              locked_by: null,
-            }).eq("id", locked.id);
-            results.push({ task_id: locked.id, status: "failed", error: classification.lastError, terminal: true });
-          } else {
-            await admin.from("email_attachment_repair_tasks").update({
-              status: "pending",
-              last_error: classification.lastError,
-              next_run_at: nextAttachmentRepairBackoffIso(attempts),
-              locked_at: null,
-              locked_by: null,
-            }).eq("id", locked.id);
-            results.push({ task_id: locked.id, status: "retry", error: classification.lastError });
-          }
+          await markRetryOrFailed(admin, locked, failureText, results);
         }
       } catch (e) {
-        const maxAttempts = locked.max_attempts ?? 6;
-        const attempts = locked.attempt_count ?? 1;
         const errText = e instanceof Error ? e.message : String(e);
-        const classification = classifyAttachmentRepairFailure(errText, attempts, maxAttempts);
-        if (classification.terminal) {
-          await admin.from("email_attachment_repair_tasks").update({
-            status: "failed",
-            last_error: classification.lastError,
-            locked_at: null,
-            locked_by: null,
-          }).eq("id", locked.id);
-          results.push({ task_id: locked.id, status: "failed", error: classification.lastError, terminal: true });
-        } else {
-          await admin.from("email_attachment_repair_tasks").update({
-            status: "pending",
-            last_error: classification.lastError,
-            next_run_at: nextAttachmentRepairBackoffIso(attempts),
-            locked_at: null,
-            locked_by: null,
-          }).eq("id", locked.id);
-          results.push({ task_id: locked.id, status: "retry", error: classification.lastError });
-        }
+        await markRetryOrFailed(admin, locked, errText, results);
       }
     }
 
-    return new Response(JSON.stringify({ processed: results.length, results }), {
+    return new Response(JSON.stringify({
+      processed: results.length,
+      stale_recovered: staleRecovered,
+      results,
+    }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (error) {
