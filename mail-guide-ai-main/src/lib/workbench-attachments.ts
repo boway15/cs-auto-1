@@ -1,6 +1,7 @@
 /** 工作台附件展示：占位 vs 可下载、显示名补扩展名 */
 
 import { isOutlookEmptyHtmlShell } from "@/lib/email-body";
+import { bodyHasCidImageReferences } from "@/lib/email-enriched-text";
 
 const MIME_DISPLAY_EXT: Record<string, string> = {
   "image/jpeg": ".jpg",
@@ -18,6 +19,27 @@ export function isPlaceholderAttachment(item: Record<string, unknown>): boolean 
   if (typeof item.storage_path === "string" && item.storage_path.trim()) return false;
   if (typeof item.url === "string" && item.url.trim()) return false;
   return Boolean(item.note || item.count);
+}
+
+/** 打开邮件详情时是否应自动触发附件/内联图补拉 */
+export function shouldAutoRepairAttachments(email: {
+  attachments?: Record<string, unknown>[] | null;
+  body_html?: string | null;
+  body_text?: string | null;
+}): boolean {
+  const list = Array.isArray(email.attachments) ? email.attachments : [];
+  if (list.some((item) => isPlaceholderAttachment(item))) return true;
+
+  const hasCid =
+    bodyHasCidImageReferences(email.body_html) || bodyHasCidImageReferences(email.body_text);
+  if (!hasCid) return false;
+
+  if (list.length === 0) return true;
+  return !list.some((item) => {
+    if (typeof item.storage_path === "string" && item.storage_path.trim()) return true;
+    if (typeof item.url === "string" && item.url.trim()) return true;
+    return false;
+  });
 }
 
 /** 占位 JSON 里 BODYSTRUCTURE 统计的附件数量（历史轻量同步未拉二进制） */

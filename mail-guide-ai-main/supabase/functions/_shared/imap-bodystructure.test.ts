@@ -1,5 +1,10 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { countUserAttachments, parseAttachmentPartSections } from "./imap-bodystructure.ts";
+import {
+  countInlineAttachments,
+  countUserAttachments,
+  detectAttachmentsFromMeta,
+  parseAttachmentPartSections,
+} from "./imap-bodystructure.ts";
 
 Deno.test("parseAttachmentPartSections finds attachment parts", () => {
   const raw = [
@@ -67,4 +72,36 @@ Deno.test("inline non-image with filename counts as user attachment", () => {
   const pdf = parts.find((p) => p.contentType.includes("pdf"));
   assertEquals(pdf?.kind, "user");
   assertEquals(pdf?.filename, "inline.pdf");
+});
+
+/** iPhone / multipart/related：仅 INLINE 图，无 MIXED、无 disposition=attachment */
+Deno.test("detectAttachmentsFromMeta marks iPhone RELATED inline photos as hasAttachment", () => {
+  const raw = [
+    `* 1 FETCH (BODYSTRUCTURE (`,
+    `("TEXT" "HTML" ("CHARSET" "UTF-8") NIL NIL "7BIT" 800 20 NIL NIL NIL NIL)`,
+    `("IMAGE" "JPEG" ("NAME" "image0.jpeg") "<image0.jpeg>" NIL "BASE64" 250000 NIL ("INLINE" ("FILENAME" "image0.jpeg")) NIL NIL)`,
+    `("IMAGE" "JPEG" ("NAME" "image12.jpeg") "<image12.jpeg>" NIL "BASE64" 300000 NIL ("INLINE" ("FILENAME" "image12.jpeg")) NIL NIL)`,
+    ` "RELATED" ("BOUNDARY" "Apple-Mail-rel") NIL NIL) RFC822.SIZE 900000)`,
+  ].join("");
+
+  assertEquals(countUserAttachments(raw), 0);
+  assertEquals(countInlineAttachments(raw), 2);
+
+  const det = detectAttachmentsFromMeta(raw);
+  assertEquals(det.hasAttachment, true);
+  assertEquals(det.count, 0);
+  assertEquals(det.inlineCount, 2);
+});
+
+Deno.test("detectAttachmentsFromMeta still reports user attachment count for MIXED+ATTACHMENT", () => {
+  const raw = [
+    `* 1 FETCH (BODYSTRUCTURE (`,
+    `("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 20 1)`,
+    `("APPLICATION" "PDF" ("NAME" "a.pdf") NIL NIL "BASE64" 4096 NIL ("ATTACHMENT" ("FILENAME" "a.pdf")) NIL NIL)`,
+    ` "MIXED" ("BOUNDARY" "b") NIL NIL) RFC822.SIZE 5000)`,
+  ].join("");
+  const det = detectAttachmentsFromMeta(raw);
+  assertEquals(det.hasAttachment, true);
+  assertEquals(det.count, 1);
+  assertEquals(det.inlineCount, 0);
 });

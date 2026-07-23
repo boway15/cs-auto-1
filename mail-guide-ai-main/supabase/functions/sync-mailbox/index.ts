@@ -39,10 +39,14 @@ import {
   degradableSyncMessage,
 } from "../_shared/email-sync-degrade.ts";
 import {
-  countUserAttachments,
-  extractBodyStructure,
+  detectAttachmentsFromMeta,
   parseAttachmentPartSections,
 } from "../_shared/imap-bodystructure.ts";
+import {
+  attachmentsJsonNeedsBinarySync,
+  emailNeedsMediaBinarySync,
+  type EmailMediaPresenceRow,
+} from "../_shared/email-attachment-presence.ts";
 import {
   buildMessageIdSearchCandidates,
   messageIdMatchesHeader,
@@ -572,7 +576,7 @@ class ImapClient {
   async fetchMetadata(uid: number): Promise<string> {
     const tag = `A${++this.tagCounter}`;
     this.buffer = "";
-    await this.write(`${tag} UID FETCH ${uid} (BODY.PEEK[HEADER.FIELDS (MESSAGE-ID FROM TO SUBJECT DATE)] RFC822.SIZE BODYSTRUCTURE)\r\n`);
+    await this.write(`${tag} UID FETCH ${uid} (BODY.PEEK[HEADER.FIELDS (MESSAGE-ID FROM TO SUBJECT DATE REPLY-TO)] RFC822.SIZE BODYSTRUCTURE)\r\n`);
     const doneRe = new RegExp(`^${tag} (OK|NO|BAD)[^\\r\\n]*\\r?\\n`, "m");
     return await this.readUntil(doneRe);
   }
@@ -772,35 +776,6 @@ function attachmentJsonLength(value: unknown): number {
   return Array.isArray(value) ? value.length : 0;
 }
 
-function isInvalidStoredAttachmentMeta(item: Record<string, unknown>): boolean {
-  const ct = String(item.contentType ?? "").split(";")[0].trim().toLowerCase();
-  if (ct.startsWith("multipart/") || ct.startsWith("message/")) return true;
-  const size = item.size;
-  if (typeof size === "number" && size <= 0) return true;
-  const fn = String(item.filename ?? "").trim().toLowerCase();
-  if (/^attachment-\d+\./i.test(fn) && ct === "application/octet-stream") return true;
-  if (/^attachment-\d+$/.test(fn) && !/\.[a-z0-9]{2,8}$/i.test(fn)) {
-    if (ct.startsWith("multipart/") || ct.startsWith("message/") || ct === "application/octet-stream") {
-      return true;
-    }
-  }
-  return false;
-}
-
-/** emails.attachments 是否仅有占位说明、尚无有效 storage_path 可下载 */
-function attachmentsJsonNeedsBinarySync(value: unknown): boolean {
-  if (!Array.isArray(value) || value.length === 0) return true;
-  const hasValid = value.some((item) => {
-    if (!item || typeof item !== "object") return false;
-    const o = item as Record<string, unknown>;
-    if (isInvalidStoredAttachmentMeta(o)) return false;
-    if (typeof o.storage_path === "string" && o.storage_path.trim()) return true;
-    if (typeof o.url === "string" && o.url.trim()) return true;
-    return false;
-  });
-  return !hasValid;
-}
-
 /** 2026-07-14：大邮件判定仅依赖 RFC822.SIZE，不再用占位 count≥3 门闸 */
 function placeholderSuggestsLargeMail(_attachments: unknown): boolean {
   return false;
@@ -897,28 +872,12 @@ async function persistEmailAttachments(
 }
 
 /**
- * 从 FETCH 元数据（含 BODYSTRUCTURE）判断是否有附件。
- * 注意：不能用「从 BODYSTRUCTURE( 到末尾 ))」这种正则——嵌套括号与同一 FETCH 里还有 RFC822.SIZE 等字段时会匹配失败，
- * 若匹配失败就返回 false，会导致误判为无附件、整封体积上限变小、只拉 BODY[TEXT]，attachments 永远为空。
+ * 从 FETCH 元数据（含 BODYSTRUCTURE）判断是否有附件/内联媒体。
+ * 实现见 `_shared/imap-bodystructure.ts`：inline 图也视为需拉取，避免 cid 破图。
  */
 function detectAttachments(metaRaw: string): { hasAttachment: boolean; count: number } {
-  const raw = metaRaw;
-  let hasAttachment = false;
-
-  if (/"attachment"/i.test(raw)) hasAttachment = true;
-  if (/BODYSTRUCTURE/i.test(raw) && /\bMIXED\b/i.test(raw)) hasAttachment = true;
-  if (/FILENAME\s*=/i.test(raw) || /\bNAME\s*=\s*"/i.test(raw)) hasAttachment = true;
-
-  const structureOk = extractBodyStructure(raw) != null;
-  const userCount = countUserAttachments(raw);
-  if (userCount > 0) hasAttachment = true;
-
-  // BODYSTRUCTURE 解析成功时信任用户附件数（可为 0，避免内嵌图虚报 count）；仅解析失败才启发式回退
-  const count = structureOk
-    ? userCount
-    : (hasAttachment ? 1 : 0);
-
-  return { hasAttachment, count };
+  const det = detectAttachmentsFromMeta(metaRaw);
+  return { hasAttachment: det.hasAttachment, count: det.count };
 }
 
 /** 拉取整封 RFC822 时 readUntil 等待 tagged OK 的超时：大体积+慢链路需要更长 */
@@ -1259,7 +1218,12 @@ async function repairEmailById(
   const overBudget = () => Date.now() - startedAt >= REPAIR_SINGLE_TIME_BUDGET_MS;
 
   if (!isBodyEmpty(row.body_text, row.body_html)) {
-    if (row.has_attachment && attachmentsJsonNeedsBinarySync(row.attachments)) {
+    if (emailNeedsMediaBinarySync(row)) {
+      // 历史误标 has_attachment=false 的 cid 内联图也要能补拉
+      if (row.has_attachment !== true) {
+        await admin.from("emails").update({ has_attachment: true }).eq("id", emailId);
+        row.has_attachment = true;
+      }
       const prequeue = await enqueueAttachmentRepairTask(
         admin,
         emailId,
@@ -1444,10 +1408,14 @@ async function repairEmailByIdFull(
     DEFAULT_FULL_BODY_WITH_ATTACH_MAX_BYTES,
   );
 
-  const needsAtt = attachmentsJsonNeedsBinarySync(row.attachments);
+  const needsAtt = emailNeedsMediaBinarySync(row);
 
   if (!isBodyEmpty(row.body_text, row.body_html)) {
-    if (needsAtt && row.has_attachment) {
+    if (needsAtt) {
+      if (row.has_attachment !== true) {
+        await admin.from("emails").update({ has_attachment: true }).eq("id", emailId);
+        row.has_attachment = true;
+      }
       try {
         // 与 Docker Worker 共用：每轮默认只拉 1 个 part，降低 Edge CPU 硬杀概率
         const partsPer = parseEnvPositiveInt("MAIL_SYNC_ATTACHMENT_PARTS_PER_INVOKE", 1);
@@ -1842,6 +1810,22 @@ async function repairAttachmentsForRecord(
       attachments: attJson as unknown,
       has_attachment: attJson.length > 0 || attachInfo.hasAttachment,
     }).eq("id", row.id);
+    if (attJson.length > 0) {
+      const { data: meRow } = await admin
+        .from("emails")
+        .select("missing_elements")
+        .eq("id", row.id)
+        .maybeSingle();
+      const prev = Array.isArray(meRow?.missing_elements)
+        ? (meRow!.missing_elements as unknown[])
+        : [];
+      const next = prev.filter((x) => x !== "attachment" && x !== "image");
+      if (next.length !== prev.length) {
+        const patch: Record<string, unknown> = { missing_elements: next };
+        if (next.length === 0) patch.is_info_complete = true;
+        await admin.from("emails").update(patch).eq("id", row.id);
+      }
+    }
     return "repaired";
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -1863,18 +1847,34 @@ async function countPlaceholderAttachmentEmails(
 ): Promise<number> {
   const sinceDate = new Date();
   sinceDate.setDate(sinceDate.getDate() - 30);
-  const { data, error } = await admin
-    .from("emails")
-    .select("attachments")
-    .eq("mailbox_id", mailboxId)
-    .eq("has_attachment", true)
-    .gte("received_at", sinceDate.toISOString())
-    .limit(500);
-  if (error) {
-    console.warn("[repair-att] count failed:", error.message);
-    return 0;
+  const sinceIso = sinceDate.toISOString();
+  const [flagged, cidBroken] = await Promise.all([
+    admin
+      .from("emails")
+      .select("id, has_attachment, attachments, body_html, body_text")
+      .eq("mailbox_id", mailboxId)
+      .eq("has_attachment", true)
+      .gte("received_at", sinceIso)
+      .limit(500),
+    admin
+      .from("emails")
+      .select("id, has_attachment, attachments, body_html, body_text")
+      .eq("mailbox_id", mailboxId)
+      .or("body_html.ilike.%cid:%,body_text.ilike.%cid:%")
+      .gte("received_at", sinceIso)
+      .limit(200),
+  ]);
+  if (flagged.error) {
+    console.warn("[repair-att] count failed:", flagged.error.message);
   }
-  return (data ?? []).filter((row) => attachmentsJsonNeedsBinarySync(row.attachments)).length;
+  if (cidBroken.error) {
+    console.warn("[repair-att] cid count failed:", cidBroken.error.message);
+  }
+  const byId = new Map<string, EmailMediaPresenceRow & { id: string }>();
+  for (const row of [...(flagged.data ?? []), ...(cidBroken.data ?? [])]) {
+    byId.set(String(row.id), row as EmailMediaPresenceRow & { id: string });
+  }
+  return [...byId.values()].filter((row) => emailNeedsMediaBinarySync(row)).length;
 }
 
 /** 小批量为占位附件邮件补拉 MIME 附件 */
@@ -1896,19 +1896,37 @@ async function repairMissingAttachments(mb: any, admin: ReturnType<typeof create
     client = await connectImapClient(mb);
     const sinceDate = new Date();
     sinceDate.setDate(sinceDate.getDate() - 30);
-    const { data: candidates, error: qErr } = await admin
-      .from("emails")
-      .select("id, message_id, has_attachment, received_at, attachments")
-      .eq("mailbox_id", mb.id)
-      .eq("has_attachment", true)
-      .gte("received_at", sinceDate.toISOString())
-      .order("received_at", { ascending: false })
-      .limit(REPAIR_ATTACH_SCAN_LIMIT);
-    if (qErr) throw qErr;
+    const sinceIso = sinceDate.toISOString();
+    const [flagged, cidBroken] = await Promise.all([
+      admin
+        .from("emails")
+        .select("id, message_id, has_attachment, received_at, attachments, body_html, body_text")
+        .eq("mailbox_id", mb.id)
+        .eq("has_attachment", true)
+        .gte("received_at", sinceIso)
+        .order("received_at", { ascending: false })
+        .limit(REPAIR_ATTACH_SCAN_LIMIT),
+      admin
+        .from("emails")
+        .select("id, message_id, has_attachment, received_at, attachments, body_html, body_text")
+        .eq("mailbox_id", mb.id)
+        .or("body_html.ilike.%cid:%,body_text.ilike.%cid:%")
+        .gte("received_at", sinceIso)
+        .order("received_at", { ascending: false })
+        .limit(REPAIR_ATTACH_SCAN_LIMIT),
+    ]);
+    if (flagged.error) throw flagged.error;
+    if (cidBroken.error) {
+      console.warn("[repair-att] cid scan failed:", cidBroken.error.message);
+    }
 
-    const toRepair = (candidates ?? []).filter((row) =>
-      attachmentsJsonNeedsBinarySync(row.attachments)
-    ).slice(0, REPAIR_ATTACH_BATCH);
+    const byId = new Map<string, Record<string, unknown>>();
+    for (const row of [...(flagged.data ?? []), ...(cidBroken.data ?? [])]) {
+      byId.set(String(row.id), row as Record<string, unknown>);
+    }
+    const toRepair = [...byId.values()]
+      .filter((row) => emailNeedsMediaBinarySync(row as EmailMediaPresenceRow))
+      .slice(0, REPAIR_ATTACH_BATCH);
     result.total = toRepair.length;
     result.fetched = toRepair.length;
 
@@ -1927,6 +1945,10 @@ async function repairMissingAttachments(mb: any, admin: ReturnType<typeof create
         break;
       }
       try {
+        if (row.has_attachment !== true) {
+          await admin.from("emails").update({ has_attachment: true }).eq("id", row.id);
+          row.has_attachment = true;
+        }
         const status = await repairAttachmentsForRecord(
           client,
           admin,
@@ -2531,6 +2553,7 @@ async function syncOne(mb: any, admin: any, opts: SyncOptions = {}): Promise<Syn
 
         const fromAddr = parseAddress(headerValue(meta.raw, "From"));
         const toAddr = parseAddress(headerValue(meta.raw, "To"));
+        const replyToAddr = parseAddress(headerValue(meta.raw, "Reply-To"));
         const subject = decodeRfc2047(headerValue(meta.raw, "Subject"));
         // 业务时间与 SLA / 草稿窗口一致：使用 MIME Date 头；缺失则回退为同步入库时刻
         const messageDateHeader = headerValue(meta.raw, "Date");
@@ -2602,6 +2625,7 @@ async function syncOne(mb: any, admin: any, opts: SyncOptions = {}): Promise<Syn
           message_id: sanitizePostgresText(meta.messageId) ?? meta.messageId,
           from_email: sanitizePostgresText(fromAddr.address ?? "unknown@unknown") ?? "unknown@unknown",
           from_name: sanitizePostgresText(decodeRfc2047(fromAddr.name)),
+          reply_to_email: sanitizePostgresText(replyToAddr.address),
           to_email: sanitizePostgresText(toAddr.address ?? mb.email_address) ?? mb.email_address,
           subject: sanitizePostgresText(subject),
           body_text: sanitizePostgresText(bodyText) ?? "",

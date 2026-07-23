@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, type Dispatch, type SetStateAction } from "react";
 import { Button } from "@/components/ui/button";
 import { Paperclip, X } from "lucide-react";
 import { toast } from "sonner";
@@ -17,7 +17,7 @@ export type ReplyAttachmentBarProps = {
   userId: string;
   sessionId: string;
   items: OutboundAttachmentDraft[];
-  onChange: (items: OutboundAttachmentDraft[]) => void;
+  onChange: Dispatch<SetStateAction<OutboundAttachmentDraft[]>>;
   /** toolbar：仅「添加附件」按钮；list：仅文件列表；full：全部 */
   layout?: "full" | "toolbar" | "list";
 };
@@ -46,10 +46,10 @@ export default function ReplyAttachmentBar({
     }
 
     let currentTotal = items.reduce((sum, item) => sum + item.file.size, 0);
-    const next = [...items];
+    const pending: OutboundAttachmentDraft[] = [];
 
     for (const file of files) {
-      if (next.length >= OUTBOUND_MAX_FILES) {
+      if (items.length + pending.length >= OUTBOUND_MAX_FILES) {
         toast.error(`最多只能添加 ${OUTBOUND_MAX_FILES} 个附件`);
         break;
       }
@@ -59,32 +59,38 @@ export default function ReplyAttachmentBar({
         continue;
       }
 
-      const draft: OutboundAttachmentDraft = {
+      pending.push({
         id: crypto.randomUUID(),
         file,
         uploading: true,
-      };
-      next.push(draft);
-      onChange([...next]);
+      });
       currentTotal += file.size;
-
-      try {
-        const { storagePath } = await uploadOutboundAttachment(userId, sessionId, file);
-        onChange(
-          next.map((item) =>
-            item.id === draft.id ? { ...item, uploading: false, storagePath } : item,
-          ),
-        );
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        onChange(
-          next.map((item) =>
-            item.id === draft.id ? { ...item, uploading: false, error: message } : item,
-          ),
-        );
-        toast.error(`上传失败：${file.name}`, { description: message });
-      }
     }
+
+    if (pending.length === 0) return;
+
+    onChange((prev) => [...prev, ...pending]);
+
+    await Promise.all(
+      pending.map(async (draft) => {
+        try {
+          const { storagePath } = await uploadOutboundAttachment(userId, sessionId, draft.file);
+          onChange((prev) =>
+            prev.map((item) =>
+              item.id === draft.id ? { ...item, uploading: false, storagePath } : item,
+            ),
+          );
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          onChange((prev) =>
+            prev.map((item) =>
+              item.id === draft.id ? { ...item, uploading: false, error: message } : item,
+            ),
+          );
+          toast.error(`上传失败：${draft.file.name}`, { description: message });
+        }
+      }),
+    );
   }
 
   function removeItem(id: string) {

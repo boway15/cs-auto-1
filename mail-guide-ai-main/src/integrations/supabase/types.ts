@@ -221,6 +221,7 @@ export type Database = {
           priority: string
           processing_status: string
           received_at: string
+          reply_to_email: string | null
           risk_level: string
           status: string
           subject: string | null
@@ -255,6 +256,7 @@ export type Database = {
           priority?: string
           processing_status?: string
           received_at?: string
+          reply_to_email?: string | null
           risk_level?: string
           status?: string
           subject?: string | null
@@ -289,6 +291,7 @@ export type Database = {
           priority?: string
           processing_status?: string
           received_at?: string
+          reply_to_email?: string | null
           risk_level?: string
           status?: string
           subject?: string | null

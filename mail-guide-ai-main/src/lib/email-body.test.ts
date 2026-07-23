@@ -37,9 +37,33 @@ describe("isEmailBodyEmpty", () => {
     const plain = "您好，请提供订单号";
     const payload = btoa(unescape(encodeURIComponent(plain)));
     expect(isUndecodedBase64Body(payload)).toBe(true);
-    expect(isEmailBodyEmpty({ body_text: payload, body_html: null })).toBe(false);
+    expect(isEmailBodyEmpty({ body_text: payload, body_html: null })).toBe(true);
     expect(needsEmailBodyRepair({ body_text: payload, body_html: null })).toBe(true);
     expect(hasReadableEmailBodyForDisplay(payload, null)).toBe(false);
+  });
+
+  it("截断 MIME 头（charset 续行）视为需补拉、不可展示", () => {
+    const truncated = [
+      "charset=us-ascii",
+      "Content-Transfer-Encoding: 7bit",
+    ].join("\n");
+    expect(isMimeHeadersOnlyBody(truncated)).toBe(true);
+    expect(isEmailBodyEmpty({ body_text: truncated, body_html: null })).toBe(true);
+    expect(needsEmailBodyRepair({ body_text: truncated, body_html: null })).toBe(true);
+    expect(hasReadableEmailBodyForDisplay(truncated, null)).toBe(false);
+    expect(normalizeEmailBodyForDisplay(truncated, null).text).toBe("");
+    expect(pickRenderableEmailBody(truncated, null)).toEqual({ text: "", html: null });
+  });
+
+  it("折行 MIME 头（Content-Type + 缩进 charset）视为需补拉、不可展示", () => {
+    // 真实入库形态：BODY[TEXT] 截断后保留折行头，无实质正文
+    const folded = "Content-Type: text/plain;\r\n\tcharset=us-ascii\r\nContent-Transfer-Encoding: 7bit";
+    expect(isMimeHeadersOnlyBody(folded)).toBe(true);
+    expect(isEmailBodyEmpty({ body_text: folded, body_html: null })).toBe(true);
+    expect(needsEmailBodyRepair({ body_text: folded, body_html: null })).toBe(true);
+    expect(hasReadableEmailBodyForDisplay(folded, null)).toBe(false);
+    expect(normalizeEmailBodyForDisplay(folded, null).text).toBe("");
+    expect(pickRenderableEmailBody(folded, null)).toEqual({ text: "", html: null });
   });
 
   it("仅 MIME 头视为需补拉、不可展示", () => {

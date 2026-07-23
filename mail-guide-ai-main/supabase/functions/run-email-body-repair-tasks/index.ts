@@ -10,6 +10,7 @@ import {
   terminalUidNotFoundMessage,
 } from "../_shared/imap-message-id.ts";
 import { repairEmailBodyTextOnly } from "../_shared/imap-text-body-repair.ts";
+import { hasReadableEmailBody } from "../_shared/mime-parse.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -88,7 +89,8 @@ Deno.serve(async (req) => {
         .eq("id", locked.email_id)
         .maybeSingle();
 
-      const hasBody = Boolean(String(emailRow?.body_text ?? "").trim() || String(emailRow?.body_html ?? "").trim());
+      // 不可把 MIME 头碎片 / 未解码 base64 当成「已有正文」而跳过补拉
+      const hasBody = hasReadableEmailBody(emailRow?.body_text, emailRow?.body_html);
       if (hasBody) {
         const { data: taskMeta } = await admin
           .from("email_body_repair_tasks")

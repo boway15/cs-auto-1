@@ -41,6 +41,33 @@ const CHARSET_ALIASES: Record<string, string> = {
 const MIME_PART_HEADER_LINE_RE =
   /^(content-type|content-transfer-encoding|content-disposition|content-id|content-description|mime-version)\s*:/i;
 
+/** MIME 头折行续行或截断后的参数行（BODY[TEXT] 常丢失 Content-Type: 前缀） */
+const MIME_PARAM_LINE_RE =
+  /^(charset|boundary|name|filename|format|type|protocol|micalg|report-type|access-type)\s*=/i;
+
+const MIME_MEDIA_TYPE_LINE_RE =
+  /^(?:multipart|text|image|application|message|audio|video)\/[\w.+-]+(?:\s*;[\s\S]*)?$/i;
+
+function isMimeMetadataLine(line: string): boolean {
+  const t = line.trim();
+  if (!t) return false;
+  if (MIME_PART_HEADER_LINE_RE.test(t)) return true;
+  if (MIME_PARAM_LINE_RE.test(t)) return true;
+  if (MIME_MEDIA_TYPE_LINE_RE.test(t)) return true;
+  return false;
+}
+
+function hasStrongMimeMetadataSignal(lines: string[]): boolean {
+  return lines.some((line) => {
+    const t = line.trim();
+    if (MIME_PART_HEADER_LINE_RE.test(t)) return true;
+    if (/^charset\s*=/i.test(t)) return true;
+    if (/^boundary\s*=/i.test(t)) return true;
+    if (MIME_MEDIA_TYPE_LINE_RE.test(t)) return true;
+    return false;
+  });
+}
+
 /** Normalize declared MIME charset to a label TextDecoder accepts. */
 export function normalizeMimeCharset(charset: string | null | undefined): string {
   const raw = String(charset ?? "utf-8").trim().toLowerCase().replace(/['"]/g, "");
@@ -101,14 +128,14 @@ function unfoldHeaders(block: string): string {
   return block.replace(/\r?\n[\t ]+/g, " ");
 }
 
-/** BODY[TEXT] 等片段偶发无空行分隔，整段 MIME 头被误当正文入库 */
+/** BODY[TEXT] 等片段偶发无空行分隔，整段 MIME 头（含截断/折行）被误当正文入库 */
 export function isMimeHeadersOnlyBody(text: string | null | undefined): boolean {
   const s = String(text ?? "").trim();
   if (!s || s.length > 2000) return false;
   const lines = s.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (lines.length === 0 || lines.length > 12) return false;
-  if (!MIME_PART_HEADER_LINE_RE.test(lines[0])) return false;
-  return lines.every((line) => MIME_PART_HEADER_LINE_RE.test(line));
+  if (!lines.every(isMimeMetadataLine)) return false;
+  return hasStrongMimeMetadataSignal(lines);
 }
 
 function splitHeadersBodyLoose(part: string): { headers: string; body: string } | null {

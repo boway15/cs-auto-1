@@ -255,3 +255,45 @@ export function parseAttachmentPartSections(metaRaw: string): AttachmentPartSect
 export function countUserAttachments(metaRaw: string): number {
   return parseAttachmentPartSections(metaRaw).filter((p) => p.kind === "user").length;
 }
+
+export function countInlineAttachments(metaRaw: string): number {
+  return parseAttachmentPartSections(metaRaw).filter((p) => p.kind === "inline").length;
+}
+
+/**
+ * 从 FETCH 元数据（含 BODYSTRUCTURE）判断是否需要按「有媒体」拉取整封/附件。
+ * - hasAttachment：user 附件或 inline 图（含 iPhone multipart/related）均为 true，避免只拉 BODY[TEXT] 导致 cid 破图
+ * - count：仍只计 user 附件数（对齐 Gmail「用户附件」口径）
+ */
+export function detectAttachmentsFromMeta(metaRaw: string): {
+  hasAttachment: boolean;
+  count: number;
+  inlineCount: number;
+} {
+  const raw = metaRaw;
+  let hasAttachment = false;
+
+  if (/"attachment"/i.test(raw)) hasAttachment = true;
+  if (/BODYSTRUCTURE/i.test(raw) && /\bMIXED\b/i.test(raw)) hasAttachment = true;
+  // IMAP BODYSTRUCTURE 常见 ("NAME" "file.jpeg")，不是 NAME="..."
+  if (
+    /FILENAME\s*=/i.test(raw) ||
+    /\bNAME\s*=\s*"/i.test(raw) ||
+    /\(\s*"NAME"\s+"/i.test(raw)
+  ) {
+    hasAttachment = true;
+  }
+  // iPhone / Apple Mail：RELATED + IMAGE，常无 MIXED、无 disposition=attachment
+  if (/BODYSTRUCTURE/i.test(raw) && /\bRELATED\b/i.test(raw) && /\bIMAGE\b/i.test(raw)) {
+    hasAttachment = true;
+  }
+
+  const structureOk = extractBodyStructure(raw) != null;
+  const parts = structureOk ? parseAttachmentPartSections(raw) : [];
+  const userCount = parts.filter((p) => p.kind === "user").length;
+  const inlineCount = parts.filter((p) => p.kind === "inline").length;
+  if (userCount > 0 || inlineCount > 0) hasAttachment = true;
+
+  const count = structureOk ? userCount : (hasAttachment ? 1 : 0);
+  return { hasAttachment, count, inlineCount };
+}

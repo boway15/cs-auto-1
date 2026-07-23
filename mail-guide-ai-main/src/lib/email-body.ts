@@ -5,7 +5,7 @@ export function isEmailBodyEmpty(email: {
   body_text?: string | null;
   body_html?: string | null;
 }): boolean {
-  return !String(email.body_text ?? "").trim() && !String(email.body_html ?? "").trim();
+  return !hasReadableEmailBodyForDisplay(email.body_text, email.body_html);
 }
 
 /** 正文需补拉：库内为空，或未解码的 base64 脏数据，或仅 MIME 头 */
@@ -85,14 +85,41 @@ export function isUndecodedBase64Body(text: string | null | undefined): boolean 
 const MIME_PART_HEADER_LINE_RE =
   /^(content-type|content-transfer-encoding|content-disposition|content-id|content-description|mime-version)\s*:/i;
 
-/** 与 Edge mime-parse 同步：仅 MIME 头、无实质正文 */
+/** 与 Edge mime-parse 同步：MIME 头折行续行或截断后的参数行 */
+const MIME_PARAM_LINE_RE =
+  /^(charset|boundary|name|filename|format|type|protocol|micalg|report-type|access-type)\s*=/i;
+
+const MIME_MEDIA_TYPE_LINE_RE =
+  /^(?:multipart|text|image|application|message|audio|video)\/[\w.+-]+(?:\s*;[\s\S]*)?$/i;
+
+function isMimeMetadataLine(line: string): boolean {
+  const t = line.trim();
+  if (!t) return false;
+  if (MIME_PART_HEADER_LINE_RE.test(t)) return true;
+  if (MIME_PARAM_LINE_RE.test(t)) return true;
+  if (MIME_MEDIA_TYPE_LINE_RE.test(t)) return true;
+  return false;
+}
+
+function hasStrongMimeMetadataSignal(lines: string[]): boolean {
+  return lines.some((line) => {
+    const t = line.trim();
+    if (MIME_PART_HEADER_LINE_RE.test(t)) return true;
+    if (/^charset\s*=/i.test(t)) return true;
+    if (/^boundary\s*=/i.test(t)) return true;
+    if (MIME_MEDIA_TYPE_LINE_RE.test(t)) return true;
+    return false;
+  });
+}
+
+/** 与 Edge mime-parse 同步：仅 MIME 头/元数据、无实质正文 */
 export function isMimeHeadersOnlyBody(text: string | null | undefined): boolean {
   const s = String(text ?? "").trim();
   if (!s || s.length > 2000) return false;
   const lines = s.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (lines.length === 0 || lines.length > 12) return false;
-  if (!MIME_PART_HEADER_LINE_RE.test(lines[0])) return false;
-  return lines.every((line) => MIME_PART_HEADER_LINE_RE.test(line));
+  if (!lines.every(isMimeMetadataLine)) return false;
+  return hasStrongMimeMetadataSignal(lines);
 }
 
 export function hasReadableEmailBodyForDisplay(
@@ -461,12 +488,18 @@ export function plainTextEmailToDisplayHtml(formatted: string): string {
 /**
  * 选择应在正文区渲染的内容：避免 body_html 为 Word 空壳时盖住 body_text。
  */
+function readableStoredBodyText(raw: string | null | undefined): string {
+  const t = String(raw ?? "").trim();
+  if (!t || isMimeHeadersOnlyBody(t) || isUndecodedBase64Body(t)) return "";
+  return t;
+}
+
 export function pickRenderableEmailBody(
   bodyText: string | null | undefined,
   bodyHtml: string | null | undefined,
 ): { text: string; html: string | null } {
   const n = normalizeEmailBodyForDisplay(bodyText, bodyHtml);
-  const rawTextFallback = (bodyText ?? "").trim() || n.text.trim();
+  const rawTextFallback = readableStoredBodyText(bodyText) || n.text.trim();
   const textFallback =
     stripCssPollutionFromEmailText(rawTextFallback).trim() ||
     stripCssPollutionFromEmailText(n.text).trim();

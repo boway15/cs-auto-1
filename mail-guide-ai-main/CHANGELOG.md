@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.8.0] - 2026-07-23
+
+### Features
+
+- **Reply-To**：入库 `emails.reply_to_email`；自动回复 / 工作台回信优先 Reply-To，并支持确认提示。
+- **内联图补拉**：iPhone / `multipart/related` 的 `cid` 内联图视为需拉取媒体，修复工作台破图与误报「无附件」。
+
+### Fixes
+
+- BODYSTRUCTURE 启发式识别 `("NAME" "…")` / `RELATED+IMAGE`；正文含 `cid` 且本地无图时进入附件补拉扫描。
+- 正文补拉完成后若仍缺内联图二进制，自动入队附件补拉；补拉成功后清理 `missing_elements` 中的 `attachment`/`image`。
+- 工作台打开含 `cid` 破图邮件时自动触发补拉。
+
+### Functions / Frontend
+
+- `sync-mailbox`、`process-email`、`run-email-fetch-tasks`、`run-email-body-repair-tasks`
+- `_shared/imap-bodystructure`、`_shared/email-attachment-presence`、`_shared/email-body-repair-queue`、`_shared/mime-parse`、`_shared/mail-reply-subject`
+- 工作台：`Workbench`、`workbench-attachments`、`reply-to-confirm`、`email-body` 等
+
+### Database
+
+- `20260716160000_emails_reply_to_email.sql`
+
 ## [1.7.4] - 2026-07-15
 
 ### Fixes

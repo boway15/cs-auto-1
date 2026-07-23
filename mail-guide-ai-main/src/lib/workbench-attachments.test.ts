@@ -4,6 +4,7 @@ import {
   isLikelyInlineImageAttachment,
   isPlaceholderAttachment,
   partitionWorkbenchAttachments,
+  shouldAutoRepairAttachments,
 } from "./workbench-attachments";
 
 describe("workbench-attachments", () => {
@@ -48,5 +49,29 @@ describe("workbench-attachments", () => {
     const pdf = { filename: "invoice.pdf", contentType: "application/pdf", storage_path: "x/a.pdf" };
     const { fileAttachments } = partitionWorkbenchAttachments([pdf], { body_text: "hi" });
     expect(fileAttachments).toHaveLength(1);
+  });
+
+  it("正文含 cid 且附件为空时应自动补拉", () => {
+    expect(
+      shouldAutoRepairAttachments({
+        attachments: [],
+        body_html: '<img src="cid:image0.jpeg" alt="image0.jpeg">',
+        body_text: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("已有可下载附件时不因 cid 重复补拉", () => {
+    expect(
+      shouldAutoRepairAttachments({
+        attachments: [{
+          filename: "image0.jpeg",
+          contentType: "image/jpeg",
+          storage_path: "mb/e/0.jpeg",
+        }],
+        body_html: '<img src="cid:image0.jpeg">',
+        body_text: null,
+      }),
+    ).toBe(false);
   });
 });

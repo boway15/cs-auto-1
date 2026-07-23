@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildQuickReplyContextFromEmail,
   groupQuickReplyTemplates,
   renderQuickReplyTemplate,
   type QuickReplyTemplateContext,
@@ -29,6 +30,27 @@ describe("renderQuickReplyTemplate", () => {
   it("from_name 为空时回退 from_email", () => {
     const out = renderQuickReplyTemplate("{{from_name}}", { ...ctx, from_name: "" });
     expect(out).toBe("alice@example.com");
+  });
+});
+
+describe("buildQuickReplyContextFromEmail", () => {
+  it("优先使用 reply_to_email 作为回复目标", () => {
+    const out = buildQuickReplyContextFromEmail({
+      from_name: "Shopify",
+      from_email: "mailer@shopify.com",
+      reply_to_email: "customer@example.com",
+      subject: "",
+    });
+    expect(out.reply_to_email).toBe("customer@example.com");
+    expect(out.subject).toBe("customer@example.com");
+  });
+
+  it("无 reply_to_email 时回退 from_email", () => {
+    const out = buildQuickReplyContextFromEmail({
+      from_email: "alice@example.com",
+      subject: "Help",
+    });
+    expect(out.reply_to_email).toBe("alice@example.com");
   });
 });
 

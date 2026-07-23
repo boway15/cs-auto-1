@@ -116,6 +116,40 @@ Deno.test("resolveAutoReplyRecipient prefers explicit replyToEmail", () => {
 
 
 
+Deno.test("resolveAutoReplyRecipient prefers stored reply_to_email over from_email", () => {
+
+  assertEquals(
+
+    resolveAutoReplyRecipient({
+
+      from_email: "mailer@shopify.com",
+
+      reply_to_email: "customer@example.com",
+
+    }),
+
+    "customer@example.com",
+
+  );
+
+});
+
+
+
+Deno.test("resolveAutoReplyRecipient falls back to from_email when reply_to_email empty", () => {
+
+  assertEquals(
+
+    resolveAutoReplyRecipient({ from_email: "alice@example.com", reply_to_email: null }),
+
+    "alice@example.com",
+
+  );
+
+});
+
+
+
 Deno.test("formatReplySubject adds Re prefix once", () => {
 
   assertEquals(formatReplySubject("Need help"), "Re: Need help");

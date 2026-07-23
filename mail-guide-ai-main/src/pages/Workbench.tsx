@@ -99,6 +99,7 @@ import {
   type WorkbenchListFilters,
   type WorkbenchListStatusFilter,
 } from "@/lib/workbench-email-list";
+import { clampListPageAfterLoad } from "@/lib/list-pagination";
 import {
   clearWorkbenchListScrollTop,
   defaultWorkbenchViewState,
@@ -117,6 +118,7 @@ import {
   isPlaceholderAttachment,
   placeholderAttachmentCount,
   partitionWorkbenchAttachments,
+  shouldAutoRepairAttachments,
 } from "@/lib/workbench-attachments";
 import QuickReplyPicker from "@/components/QuickReplyPicker";
 import ReplyAttachmentBar from "@/components/ReplyAttachmentBar";
@@ -169,6 +171,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { needsReplyToConfirm } from "@/lib/reply-to-confirm";
 import {
   Select,
   SelectContent,
@@ -189,14 +192,6 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 function readEmailIdFromUrl(): string | null {
   const id = new URLSearchParams(window.location.search).get(WORKBENCH_EMAIL_ID_PARAM);
   return id && UUID_RE.test(id) ? id : null;
-}
-
-/** 用于邮箱筛选：兼容 `Name <a@b.com>` 与纯地址 */
-function normalizeEmailAddress(s: string | null | undefined): string {
-  const t = String(s ?? "").trim().toLowerCase();
-  if (!t) return "";
-  const angle = t.match(/<([^>]+@[^>]+)>/);
-  return (angle ? angle[1] : t).trim();
 }
 
 export default function Workbench() {
@@ -328,6 +323,7 @@ export default function Workbench() {
       }
     | null
   >(null);
+  const [replyToConfirmOpen, setReplyToConfirmOpen] = useState(false);
 
   const [orderRefreshId, setOrderRefreshId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -819,17 +815,22 @@ export default function Workbench() {
   }, [selected?.id, refreshSelectedEmail]);
 
   useEffect(() => {
-    if (!selected?.id || !Array.isArray(selected.attachments) || selected.attachments.length === 0) return;
-    const hasPlaceholder = (selected.attachments as Record<string, unknown>[]).some((item) =>
-      isPlaceholderAttachment(item),
-    );
-    if (!hasPlaceholder) return;
+    if (!selected?.id) return;
+    if (
+      !shouldAutoRepairAttachments({
+        attachments: selected.attachments as Record<string, unknown>[] | undefined,
+        body_html: selected.body_html,
+        body_text: selected.body_text,
+      })
+    ) {
+      return;
+    }
     void repairSelectedEmailAttachments({
       emailId: selected.id,
       silent: true,
       autoTriggered: true,
     });
-  }, [selected?.id, selected?.attachments, repairSelectedEmailAttachments]);
+  }, [selected?.id, selected?.attachments, selected?.body_html, selected?.body_text, repairSelectedEmailAttachments]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -1033,7 +1034,8 @@ export default function Workbench() {
       pendingListScrollRestoreRef.current = null;
       pendingListScrollAnchorRef.current = null;
       setEmails([]);
-      setListTotal(0);
+      // 仅筛选变更时清零总数；翻页时保留 total，避免 listPageCount 暂为 1 触发页码钳制回首页
+      if (filtersChanged) setListTotal(0);
       setSelectedEmailDetail(null);
       setConversationEmails([]);
       setSendLogs([]);
@@ -1671,6 +1673,23 @@ export default function Workbench() {
     }
   }
 
+  function requestSendReply() {
+    if (!selectedId || !replyContent.trim()) return;
+    if (replyAttachments.some((a) => a.uploading)) {
+      toast.error("请等待附件上传完成");
+      return;
+    }
+    if (replyAttachments.some((a) => a.error)) {
+      toast.error("请移除上传失败的附件后再发送");
+      return;
+    }
+    if (selected && needsReplyToConfirm(selected)) {
+      setReplyToConfirmOpen(true);
+      return;
+    }
+    void sendReply();
+  }
+
   async function sendReply() {
     if (!selectedId || !replyContent.trim()) return;
     if (replyAttachments.some((a) => a.uploading)) {
@@ -1681,6 +1700,7 @@ export default function Workbench() {
       toast.error("请移除上传失败的附件后再发送");
       return;
     }
+    setReplyToConfirmOpen(false);
     const readyAttachments = replyAttachments.filter((a) => a.storagePath);
     setSending(true);
     try {
@@ -1957,10 +1977,9 @@ export default function Workbench() {
   const listPageSafe = Math.min(listPage, listPageCount - 1);
 
   useEffect(() => {
-    if (listPage > 0 && listPage >= listPageCount) {
-      setListPage(Math.max(0, listPageCount - 1));
-    }
-  }, [listPage, listPageCount]);
+    const next = clampListPageAfterLoad(listPage, listPageCount, listLoading);
+    if (next !== listPage) setListPage(next);
+  }, [listPage, listPageCount, listLoading]);
 
   return (
     <div className="h-screen flex">
@@ -2232,6 +2251,18 @@ export default function Workbench() {
                     <span className="text-muted-foreground">收件人：</span>
                     <span className="font-medium">{selected.to_email || "—"}</span>
                   </div>
+                  {String(selected.reply_to_email ?? "").trim() ? (
+                    <>
+                      <Separator orientation="vertical" className="h-4" />
+                      <div>
+                        <span className="text-muted-foreground">Reply-To：</span>
+                        <span className="font-medium">{String(selected.reply_to_email).trim()}</span>
+                        {needsReplyToConfirm(selected) ? (
+                          <span className="ml-1 text-amber-700 dark:text-amber-400">（回复将发至此地址）</span>
+                        ) : null}
+                      </div>
+                    </>
+                  ) : null}
                   <Separator orientation="vertical" className="h-4" />
                   <span className="text-muted-foreground">
                     {new Date(selected.received_at).toLocaleString("zh-CN")}
@@ -2992,7 +3023,7 @@ export default function Workbench() {
                   />
                   <Button
                     type="button"
-                    onClick={sendReply}
+                    onClick={requestSendReply}
                     disabled={!canOperate || !replyContent.trim() || sending}
                     size="sm"
                     className="absolute bottom-3 right-3 shadow-sm"
@@ -3007,7 +3038,6 @@ export default function Workbench() {
                     context={buildQuickReplyContextFromEmail(
                       selected ?? {},
                       String(orders[0]?.order_no ?? "").trim() || emailProvidedOrderNo,
-                      selected?.from_email ?? "",
                     )}
                     businessIntent={selected?.business_intent}
                     onInsert={({ body, subject, templateId, mode }) => {
@@ -3159,6 +3189,37 @@ export default function Workbench() {
               onClick={() => void executeHoldSubmit()}
             >
               {holdSubmitting ? "处理中…" : "确定拦截"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={replyToConfirmOpen} onOpenChange={setReplyToConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>回复地址与发件人不一致</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p>原邮件发件地址与 Reply-To 不同，请确认要回复到的邮箱（防误回平台代发地址）。</p>
+                <p>
+                  <span className="text-muted-foreground">原邮件发送地址：</span>
+                  <span className="font-medium text-foreground">
+                    {String(selected?.from_email ?? "").trim() || "—"}
+                  </span>
+                </p>
+                <p>
+                  <span className="text-muted-foreground">将回复到：</span>
+                  <span className="font-medium text-foreground">
+                    {String(selected?.reply_to_email ?? "").trim() || "—"}
+                  </span>
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={sending}>取消</AlertDialogCancel>
+            <Button type="button" disabled={sending} onClick={() => void sendReply()}>
+              {sending ? "发送中…" : "继续回复"}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>

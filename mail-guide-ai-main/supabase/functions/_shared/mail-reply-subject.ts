@@ -8,17 +8,25 @@ function isPlaceholderSubject(subject: string): boolean {
 
 
 
-/** 自动回复实际收件人（与 sendMail 的 to 一致，通常为来信 from_email）。 */
+/** 自动回复实际收件人（与 sendMail 的 to 一致；优先 Reply-To，否则 from_email）。 */
 
 export function resolveAutoReplyRecipient(
 
-  email: { from_email?: string | null },
+  email: { from_email?: string | null; reply_to_email?: string | null },
 
   replyToEmail?: string | null,
 
 ): string {
 
-  return String(replyToEmail ?? email.from_email ?? "").trim();
+  const explicit = String(replyToEmail ?? "").trim();
+
+  if (explicit) return explicit;
+
+  const stored = String(email.reply_to_email ?? "").trim();
+
+  if (stored) return stored;
+
+  return String(email.from_email ?? "").trim();
 
 }
 

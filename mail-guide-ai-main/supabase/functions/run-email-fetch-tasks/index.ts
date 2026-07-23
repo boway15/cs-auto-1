@@ -2,6 +2,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { nextFetchBackoffIso } from "../_shared/email-fetch-queue.ts";
 import { enqueueAttachmentRepairTask } from "../_shared/email-attachment-repair-queue.ts";
 import { hasReadableEmailBody } from "../_shared/mime-parse.ts";
+import { emailNeedsMediaBinarySync } from "../_shared/email-attachment-presence.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -27,15 +28,6 @@ function isAuthorizedServiceToken(token: string): boolean {
   if (token === SERVICE_KEY) return true;
   if (CRON_KEY && token === CRON_KEY) return true;
   return false;
-}
-
-function attachmentsNeedSync(value: unknown): boolean {
-  if (!Array.isArray(value) || value.length === 0) return true;
-  return !value.some((item) => {
-    if (!item || typeof item !== "object") return false;
-    const o = item as Record<string, unknown>;
-    return typeof o.storage_path === "string" && o.storage_path.trim().length > 0;
-  });
 }
 
 Deno.serve(async (req) => {
@@ -91,8 +83,7 @@ Deno.serve(async (req) => {
         .maybeSingle();
 
       const hasBody = hasReadableEmailBody(emailRow?.body_text, emailRow?.body_html);
-      const needsAtt = Boolean(emailRow?.has_attachment) &&
-        attachmentsNeedSync(emailRow?.attachments);
+      const needsAtt = emailRow ? emailNeedsMediaBinarySync(emailRow) : false;
 
       if (hasBody && !needsAtt) {
         await admin.from("email_fetch_tasks").update({
@@ -132,8 +123,7 @@ Deno.serve(async (req) => {
           .eq("id", emailId)
           .maybeSingle();
         const bodyOk = hasReadableEmailBody(afterRow?.body_text, afterRow?.body_html);
-        const stillNeedAtt = Boolean(afterRow?.has_attachment) &&
-          attachmentsNeedSync(afterRow?.attachments);
+        const stillNeedAtt = afterRow ? emailNeedsMediaBinarySync(afterRow) : false;
 
         if (stillNeedAtt) {
           await enqueueAttachmentRepairTask(

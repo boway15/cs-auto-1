@@ -1,5 +1,10 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 import { isUidNotFoundRepairError, terminalUidNotFoundMessage } from "./imap-message-id.ts";
+import {
+  bodyHasCidImageReferences,
+  emailNeedsMediaBinarySync,
+} from "./email-attachment-presence.ts";
+import { enqueueAttachmentRepairTask } from "./email-attachment-repair-queue.ts";
 
 export type BodyRepairTaskPriority = "interactive" | "background";
 export type BodyRepairTaskStatus = "pending" | "running" | "resolved" | "failed" | "skipped";
@@ -194,6 +199,26 @@ export async function finalizePostBodyRepair(
     .maybeSingle();
   if (existing?.post_processed_at) {
     return { ok: true };
+  }
+
+  // 正文补拉后若含 cid 内联图且本地无二进制，入队附件补拉（避免永久破图）
+  const { data: emailRow } = await admin
+    .from("emails")
+    .select("has_attachment, attachments, body_html, body_text")
+    .eq("id", emailId)
+    .maybeSingle();
+  if (emailRow && emailNeedsMediaBinarySync(emailRow)) {
+    if (emailRow.has_attachment !== true) {
+      await admin.from("emails").update({ has_attachment: true }).eq("id", emailId);
+    }
+    await enqueueAttachmentRepairTask(
+      admin,
+      emailId,
+      bodyHasCidImageReferences(emailRow.body_html) || bodyHasCidImageReferences(emailRow.body_text)
+        ? "post_body_repair_cid_media"
+        : "post_body_repair_media",
+      "background",
+    );
   }
 
   const post = await triggerPostRepairProcessing(supabaseUrl, serviceKey, emailId);

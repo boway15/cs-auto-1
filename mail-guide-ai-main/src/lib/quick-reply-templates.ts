@@ -44,18 +44,22 @@ export function buildQuickReplyContextFromEmail(
   email: {
     from_name?: string | null;
     from_email?: string | null;
+    reply_to_email?: string | null;
     subject?: string | null;
     missing_elements?: string[] | null;
   },
   orderNo = "",
-  replyToEmail = "",
+  replyToEmailOverride = "",
 ): QuickReplyTemplateContext {
   const fromEmail = email.from_email ?? "";
+  const replyToEmail = replyToEmailOverride.trim()
+    || (email.reply_to_email ?? "").trim()
+    || fromEmail;
   return {
     from_name: (email.from_name ?? "").trim(),
     from_email: fromEmail,
-    subject: email.subject?.trim() || fromEmail,
-    reply_to_email: replyToEmail || fromEmail,
+    subject: email.subject?.trim() || replyToEmail,
+    reply_to_email: replyToEmail,
     order_no: orderNo,
     missing_elements: (email.missing_elements ?? []).join(", "),
   };

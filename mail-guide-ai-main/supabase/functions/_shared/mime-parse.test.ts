@@ -194,6 +194,45 @@ Deno.test("hasReadableEmailBody treats MIME headers only as missing", () => {
   assertEquals(hasReadableEmailBody(headersOnly, null), false);
 });
 
+Deno.test("hasReadableEmailBody treats truncated MIME header fragment as missing", () => {
+  const truncated = [
+    "charset=us-ascii",
+    "Content-Transfer-Encoding: 7bit",
+  ].join("\r\n");
+  assertEquals(isMimeHeadersOnlyBody(truncated), true);
+  assertEquals(hasReadableEmailBody(truncated, null), false);
+});
+
+Deno.test("hasReadableEmailBody treats folded MIME headers as missing", () => {
+  const folded =
+    "Content-Type: text/plain;\r\n\tcharset=us-ascii\r\nContent-Transfer-Encoding: 7bit";
+  assertEquals(isMimeHeadersOnlyBody(folded), true);
+  assertEquals(hasReadableEmailBody(folded, null), false);
+  const parsed = parseFullMime(folded);
+  assertEquals(parsed.bodyText, "");
+  assertEquals(parsed.bodyHtml, null);
+});
+
+Deno.test("isMimeHeadersOnlyBody rejects real content mixed with metadata", () => {
+  const mixed = [
+    "Content-Type: text/plain; charset=UTF-8",
+    "Hello, my dresser arrived damaged.",
+  ].join("\r\n");
+  assertEquals(isMimeHeadersOnlyBody(mixed), false);
+});
+
+Deno.test("parseFullMime rejects truncated MIME header fragment", () => {
+  const raw = [
+    "charset=us-ascii",
+    "Content-Transfer-Encoding: 7bit",
+  ].join("\r\n");
+
+  const parsed = parseFullMime(raw);
+
+  assertEquals(parsed.bodyText, "");
+  assertEquals(parsed.bodyHtml, null);
+});
+
 Deno.test("parseFullMime decodes text part without blank line after headers (iCloud BODY[TEXT])", () => {
   const raw = [
     "Content-Type: text/plain; charset=UTF-8",

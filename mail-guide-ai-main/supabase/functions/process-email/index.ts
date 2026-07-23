@@ -35,6 +35,7 @@ import {
   getAnalysisText,
   getLatestBodyText,
 } from "../_shared/email-quote-strip.ts";
+import { emailHasAttachmentEvidence } from "../_shared/email-attachment-presence.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -275,12 +276,15 @@ function isNonActionBusinessIntent(bi: BusinessIntent): boolean {
 }
 
 /** R1/R2：写库前归一化 missing_elements 与 is_info_complete（非 R1/R2 意图不改） */
-function applyR1R2Completeness(analysis: Analysis, email: { has_attachment?: boolean | null }): void {
+function applyR1R2Completeness(analysis: Analysis, email: {
+  has_attachment?: boolean | null;
+  attachments?: unknown;
+}): void {
   const bi = analysis.business_intent;
   if (!isAutomationEligibleIntent(bi)) return;
 
   const hasOrder = String(analysis.order_no ?? "").trim().length > 0;
-  const hasAtt = !!email.has_attachment;
+  const hasAtt = emailHasAttachmentEvidence(email);
 
   if (isR2BusinessIntent(bi)) {
     analysis.is_info_complete = hasOrder && hasAtt;
@@ -612,13 +616,13 @@ function analyzeLocally(email: any): Analysis {
 
   if (isR2BusinessIntent(business_intent)) {
     if (!orderNo) missing.add("order_no");
-    if (!email.has_attachment) missing.add("attachment");
+    if (!emailHasAttachmentEvidence(email)) missing.add("attachment");
   } else if (isR1BusinessIntent(business_intent)) {
     if (!orderNo) missing.add("order_no");
   } else if (!isNonActionBusinessIntent(business_intent) && business_intent !== "other") {
     const needsImage = /broken|damage|wrong item|defect|损坏|破损|错发|瑕疵/.test(textLower);
     if (isAfterSale && !orderNo) missing.add("order_no");
-    if (needsImage && !email.has_attachment) missing.add("image");
+    if (needsImage && !emailHasAttachmentEvidence(email)) missing.add("image");
   }
 
   const hasChinese = /[\u4e00-\u9fa5]/.test(analysisText);
@@ -1270,7 +1274,7 @@ async function processEmail(emailId: string, options?: ProcessEmailOptions) {
   const isR1 = isR1BusinessIntent(analysis.business_intent);
   const isR2 = isR2BusinessIntent(analysis.business_intent);
   const hasOrder = providedOrderNo.length > 0;
-  const hasAtt = !!email.has_attachment;
+  const hasAtt = emailHasAttachmentEvidence(email);
   const needOrder = ((isR1 && !linkedOrders.length) || isR2) && !hasOrder;
   const needAtt = isR2 && !hasAtt;
   const baseMissingInfoEligible = !skipAutoAssociation &&
