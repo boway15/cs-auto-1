@@ -42,6 +42,20 @@ function decodeRfc2047(s: string | null): string | null {
   });
   return text || s;
 }
+
+/** 列表/详情发件人展示：空字符串 from_name 也回退到邮箱 */
+function displayFromLabel(fromName: string | null | undefined, fromEmail: string | null | undefined): string {
+  return decodeRfc2047(fromName ?? null)?.trim() || String(fromEmail ?? "").trim() || "—";
+}
+
+/** 工作台列表发件人：以 from_email 为稳定身份，名称仅辅助展示 */
+function listSenderLabel(fromName: string | null | undefined, fromEmail: string | null | undefined): string {
+  const email = String(fromEmail ?? "").trim();
+  const name = decodeRfc2047(fromName ?? null)?.trim() || "";
+  if (name && email && name.toLowerCase() !== email.toLowerCase()) return `${name} <${email}>`;
+  return email || name || "—";
+}
+
 import { supabase } from "@/lib/supabase";
 import { fetchAccessibleMailboxes } from "@/lib/accessible-mailboxes";
 import { invokeGetOrderByEmail } from "@/lib/invoke-get-order-by-email";
@@ -185,6 +199,54 @@ import { useAuth } from "@/hooks/useAuth";
 type Email = any;
 type Order = any;
 type Draft = any;
+
+/**
+ * loadDetail 拉 select(*) 后只回写列表需要的状态字段。
+ * 发件人身份字段始终保留列表查询结果，避免整行 merge / 竞态把多行显示成同一发件人。
+ */
+const LIST_ROW_DETAIL_PATCH_KEYS = [
+  "status",
+  "processing_status",
+  "is_read",
+  "association_status",
+  "ai_summary",
+  "ai_analyzed_at",
+  "business_intent",
+  "category",
+  "priority",
+  "risk_level",
+  "sla_bucket",
+  "missing_elements",
+  "attachments",
+  "body_text",
+  "body_html",
+  "subject",
+] as const;
+
+const LIST_ROW_IDENTITY_KEYS = [
+  "id",
+  "message_id",
+  "mailbox_id",
+  "from_email",
+  "from_name",
+  "to_email",
+  "reply_to_email",
+  "received_at",
+] as const;
+
+function patchListRowFromDetail(row: Email, fullRow: Email): Email {
+  const next: Email = { ...row };
+  for (const key of LIST_ROW_DETAIL_PATCH_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(fullRow, key)) {
+      (next as Record<string, unknown>)[key] = (fullRow as Record<string, unknown>)[key];
+    }
+  }
+  for (const key of LIST_ROW_IDENTITY_KEYS) {
+    (next as Record<string, unknown>)[key] = (row as Record<string, unknown>)[key];
+  }
+  return next;
+}
+
 const ATTACHMENT_REPAIR_COOLDOWN_MS = 6 * 60 * 1000;
 const WORKBENCH_EMAIL_ID_PARAM = "email";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -559,7 +621,7 @@ export default function Workbench() {
     } else if (fullRow) {
       setSelectedEmailDetail(fullRow as Email);
       setEmails((prev) =>
-        prev.map((row) => (row.id === emailId ? { ...row, ...(fullRow as Email) } : row)),
+        prev.map((row) => (row.id === emailId ? patchListRowFromDetail(row, fullRow as Email) : row)),
       );
       if (!options?.skipBodyRepair && needsEmailBodyRepair(fullRow as Email)) {
         setBodyRepairUiStatus("idle");
@@ -2005,15 +2067,27 @@ export default function Workbench() {
               {syncing ? "同步中" : "同步"}
             </Button>
           </div>
-          <Select value={mailboxSelectValue} onValueChange={setMailboxFilter}>
+          <Select
+            // 邮箱列表异步到位后再挂载，避免 Radix Select 在 options 为空时缓存错误标签
+            key={`mb-${mailboxes.map((m) => m.id).join(",") || "empty"}`}
+            value={mailboxSelectValue}
+            onValueChange={setMailboxFilter}
+          >
             <SelectTrigger className="h-8 text-xs">
               <MailIcon className="w-3.5 h-3.5 mr-1 text-muted-foreground" />
-              <SelectValue />
+              <SelectValue placeholder="选择邮箱">
+                {mailboxSelectValue === "all"
+                  ? `全部邮箱（${mailboxes.length}）`
+                  : (() => {
+                      const m = mailboxes.find((x) => x.id === mailboxSelectValue);
+                      return m ? m.display_name || m.email_address : mailboxSelectValue;
+                    })()}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">全部邮箱（{mailboxes.length}）</SelectItem>
               {mailboxes.map((m) => (
-                <SelectItem key={m.id} value={m.id}>
+                <SelectItem key={m.id} value={m.id} textValue={m.display_name || m.email_address}>
                   {m.display_name || m.email_address}
                 </SelectItem>
               ))}
@@ -2154,7 +2228,12 @@ export default function Workbench() {
                 >
                   <span className={`absolute left-0 top-0 bottom-0 w-1 ${statusBar}`} />
                   <div className="flex items-start justify-between gap-2 mb-1 min-w-0">
-                    <div className="text-sm truncate flex-1 min-w-0">{decodeRfc2047(email.from_name) ?? email.from_email}</div>
+                    <div
+                      className="text-sm truncate flex-1 min-w-0"
+                      title={String(email.from_email ?? "").trim() || undefined}
+                    >
+                      {listSenderLabel(email.from_name, email.from_email)}
+                    </div>
                     <div className="shrink-0">
                       <StatusBadge status={email.status} processingStatus={email.processing_status} />
                     </div>
@@ -2243,7 +2322,7 @@ export default function Workbench() {
                 <div className="flex items-center gap-3 text-sm flex-wrap">
                   <div>
                     <span className="text-muted-foreground">发件人：</span>
-                    <span className="font-medium">{decodeRfc2047(selected.from_name) ?? selected.from_email}</span>
+                    <span className="font-medium">{displayFromLabel(selected.from_name, selected.from_email)}</span>
                     <span className="text-muted-foreground"> &lt;{selected.from_email}&gt;</span>
                   </div>
                   <Separator orientation="vertical" className="h-4" />

@@ -1104,7 +1104,7 @@ async function repairOneEmailRecord(
     bodyHtml = parsed.bodyHtml;
     mimeAttachmentParts = parsed.mimeAttachmentParts;
   }
-  if (isBodyEmpty(bodyText, bodyHtml)) {
+  if (!bodyText.trim() && !(bodyHtml ?? "").trim()) {
     console.log("[repair] still empty after fetch uid:", uid, "email_id:", row.id);
     return "still_empty";
   }
@@ -1114,7 +1114,10 @@ async function repairOneEmailRecord(
     .select("body_text, body_html")
     .eq("id", row.id)
     .maybeSingle();
-  if (!stillEmpty || !isBodyEmpty(stillEmpty.body_text, stillEmpty.body_html)) return "skip_not_empty";
+  // 仅当库内已有「实质正文」时跳过；纯手机签名允许被完整 MIME 覆盖
+  if (!stillEmpty || hasReadableEmailBody(stillEmpty.body_text, stillEmpty.body_html)) {
+    return "skip_not_empty";
+  }
 
   const updatePayload: Record<string, unknown> = {
     body_text: sanitizePostgresText(bodyText) ?? "",

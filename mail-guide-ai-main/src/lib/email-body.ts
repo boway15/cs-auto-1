@@ -122,14 +122,37 @@ export function isMimeHeadersOnlyBody(text: string | null | undefined): boolean 
   return hasStrongMimeMetadataSignal(lines);
 }
 
+/** 仅手机默认签名（无实质客户正文）。与 Edge mime-parse 对齐。 */
+export function isMobileSignatureOnlyText(text: string | null | undefined): boolean {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!t || t.length > 80) return false;
+  return /^(sent from my (iphone|ipad|ipod)|sent from mail for windows|get outlook for (ios|android)|envoy[eé] de mon iphone|von meinem iphone gesendet|iphoneから送信)\.?$/i.test(
+    t,
+  );
+}
+
 export function hasReadableEmailBodyForDisplay(
   bodyText: string | null | undefined,
   bodyHtml: string | null | undefined,
 ): boolean {
   const text = String(bodyText ?? "").trim();
   const html = String(bodyHtml ?? "").trim();
-  if (html && !isUndecodedBase64Body(html) && !isMimeHeadersOnlyBody(html)) return true;
-  if (text && !isUndecodedBase64Body(text) && !isMimeHeadersOnlyBody(text)) return true;
+  if (
+    html &&
+    !isUndecodedBase64Body(html) &&
+    !isMimeHeadersOnlyBody(html) &&
+    !isMobileSignatureOnlyText(htmlBodyVisibleText(html))
+  ) {
+    return true;
+  }
+  if (
+    text &&
+    !isUndecodedBase64Body(text) &&
+    !isMimeHeadersOnlyBody(text) &&
+    !isMobileSignatureOnlyText(text)
+  ) {
+    return true;
+  }
   return false;
 }
 

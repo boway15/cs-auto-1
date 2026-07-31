@@ -258,6 +258,73 @@ Deno.test("parseFullMime rejects MIME headers only fragment", () => {
   assertEquals(parsed.bodyHtml, null);
 });
 
+Deno.test("parseFullMime prefers substantial plain over trailing iPhone signature part", () => {
+  const full = [
+    "Hello,",
+    "",
+    "We placed (2) separate orders on 7/19/2026. Please review and respond:",
+    "Order name: Jesse Harris",
+    "Address: 302 W 5th Minneapolis KS 67467",
+  ].join("\r\n");
+  const raw = [
+    'Content-Type: multipart/mixed; boundary="Apple-Mail-1"',
+    "",
+    "--Apple-Mail-1",
+    "Content-Type: text/plain; charset=us-ascii",
+    "Content-Transfer-Encoding: 7bit",
+    "",
+    full,
+    "--Apple-Mail-1",
+    "Content-Type: text/plain; charset=us-ascii",
+    "Content-Transfer-Encoding: 7bit",
+    "",
+    "Sent from my iPhone",
+    "--Apple-Mail-1",
+    "Content-Type: image/png; name=\"image0.png\"",
+    "Content-Disposition: inline; filename=image0.png",
+    "Content-Transfer-Encoding: 7bit",
+    "",
+    "fake-png-bytes",
+    "--Apple-Mail-1--",
+  ].join("\r\n");
+
+  const parsed = parseFullMime(raw);
+  assertStringIncludes(parsed.bodyText, "We placed (2) separate orders");
+  assertStringIncludes(parsed.bodyText, "Jesse Harris");
+  assertEquals(parsed.bodyText.trim() === "Sent from my iPhone", false);
+});
+
+Deno.test("parseFullMime keeps single-part body that ends with iPhone signature", () => {
+  const raw = [
+    'Content-Type: multipart/mixed; boundary="Apple-Mail-2"',
+    "",
+    "--Apple-Mail-2",
+    "Content-Type: text/plain; charset=us-ascii",
+    "",
+    "Hello,\r\n\r\nPlease check our second order.\r\nSent from my iPhone",
+    "--Apple-Mail-2",
+    "Content-Type: image/png; name=\"image0.png\"",
+    "Content-Disposition: inline; filename=image0.png",
+    "Content-Transfer-Encoding: 7bit",
+    "",
+    "fake-png-bytes",
+    "--Apple-Mail-2--",
+  ].join("\r\n");
+
+  const parsed = parseFullMime(raw);
+  assertStringIncludes(parsed.bodyText, "Please check our second order");
+  assertStringIncludes(parsed.bodyText, "Sent from my iPhone");
+});
+
+Deno.test("hasReadableEmailBody treats mobile signature only as missing", () => {
+  assertEquals(hasReadableEmailBody("Sent from my iPhone", null), false);
+  assertEquals(hasReadableEmailBody("  Sent from my iPhone  ", null), false);
+  assertEquals(
+    hasReadableEmailBody("Hello,\n\nPlease check order.\nSent from my iPhone", null),
+    true,
+  );
+});
+
 Deno.test("decodeImapPartPayload decodes BASE64 body without MIME headers", () => {
   const payload = btoa("hello-att");
   const bytes = decodeImapPartPayload(`${payload}\r\n`, "BASE64");
@@ -267,4 +334,138 @@ Deno.test("decodeImapPartPayload decodes BASE64 body without MIME headers", () =
 
 Deno.test("decodeImapPartPayload returns null for empty", () => {
   assertEquals(decodeImapPartPayload("   ", "base64"), null);
+});
+
+Deno.test("parseFullMime prefers Gmail reply plain over longer quote-only sibling part", () => {
+  const replyPlain = [
+    "Hello,",
+    "",
+    "There's a default with the night stand dresser it won't fully go inside",
+    "",
+    "On Jul 7, 2026, at 3:25 PM, HAUOMS <store+71211516146@t.shopifyemail.com> wrote:",
+    "> ORDER HAUOMS2887",
+    "> Your order is on the way",
+  ].join("\r\n");
+  const embeddedOriginal = [
+    "ORDER HAUOMS2887",
+    "",
+    "Your order is on the way to you. Here are the tracking numbers:",
+    "FedEx tracking number: 874029148526",
+    "FedEx tracking number: 874029149853",
+    "Items in this shipment:",
+    "Modern 5 Drawer Fabric Dresser Night Stand x 2",
+    "x".repeat(800),
+  ].join("\r\n");
+
+  const raw = [
+    'Content-Type: multipart/mixed; boundary="mix1"',
+    "",
+    "--mix1",
+    'Content-Type: multipart/alternative; boundary="alt1"',
+    "",
+    "--alt1",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    replyPlain,
+    "--alt1",
+    "Content-Type: text/html; charset=utf-8",
+    "",
+    '<div dir="ltr">Hello,<div>There\'s a default with the night stand dresser it won\'t fully go inside</div></div>',
+    "--alt1--",
+    "--mix1",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    embeddedOriginal,
+    "--mix1",
+    "Content-Type: image/jpeg; name=\"photo.jpg\"",
+    "Content-Disposition: attachment; filename=photo.jpg",
+    "",
+    "fake-jpeg",
+    "--mix1--",
+  ].join("\r\n");
+
+  const parsed = parseFullMime(raw);
+  assertStringIncludes(parsed.bodyText, "Hello");
+  assertStringIncludes(parsed.bodyText, "night stand dresser");
+  assertEquals(parsed.bodyText.includes("874029148526") && !parsed.bodyText.includes("Hello"), false);
+});
+
+Deno.test("parseFullMime skips message/rfc822 embedded original in mixed", () => {
+  const replyPlain = [
+    "Hello,",
+    "",
+    "There's a default with the night stand dresser it won't fully go inside",
+    "",
+    "2026年7月7日下午3:25, HAUOMS <store+71211516146@t.shopifyemail.com>写道：",
+    "> ORDER HAUOMS2887",
+  ].join("\r\n");
+  const embeddedOriginal = [
+    "ORDER HAUOMS2887",
+    "FedEx tracking number: 874029148526",
+    "y".repeat(900),
+  ].join("\r\n");
+  const rfc822 = [
+    "From: HAUOMS <store+71211516146@t.shopifyemail.com>",
+    "Subject: Shipping update for order hauoms2887",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    embeddedOriginal,
+  ].join("\r\n");
+
+  const raw = [
+    'Content-Type: multipart/mixed; boundary="mix2"',
+    "",
+    "--mix2",
+    'Content-Type: multipart/alternative; boundary="alt2"',
+    "",
+    "--alt2",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    replyPlain,
+    "--alt2",
+    "Content-Type: text/html; charset=utf-8",
+    "",
+    "<p>Hello,</p><p>There's a default with the night stand dresser it won't fully go inside</p>",
+    "--alt2--",
+    "--mix2",
+    "Content-Type: message/rfc822",
+    "",
+    rfc822,
+    "--mix2--",
+  ].join("\r\n");
+
+  const parsed = parseFullMime(raw);
+  assertStringIncludes(parsed.bodyText, "night stand dresser");
+  assertStringIncludes(parsed.bodyText, "Hello");
+});
+
+Deno.test("parseFullMime prefers plain with new reply when html is quote-only Shopify template", () => {
+  const replyPlain = [
+    "Hello,",
+    "",
+    "There's a default with the night stand dresser it won't fully go inside",
+    "",
+    "On Jul 7, 2026, at 3:25 PM, HAUOMS wrote:",
+    "> ORDER HAUOMS2887",
+  ].join("\r\n");
+  const shopifyHtml =
+    "<html><body><h1>HAUOMS</h1><p>ORDER HAUOMS2887</p><p>FedEx tracking number: 874029148526</p></body></html>";
+
+  const raw = [
+    'Content-Type: multipart/alternative; boundary="alt3"',
+    "",
+    "--alt3",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    replyPlain,
+    "--alt3",
+    "Content-Type: text/html; charset=utf-8",
+    "",
+    shopifyHtml,
+    "--alt3--",
+  ].join("\r\n");
+
+  const parsed = parseFullMime(raw);
+  assertStringIncludes(parsed.bodyText, "night stand dresser");
+  assertEquals(parsed.bodyHtml, null);
 });

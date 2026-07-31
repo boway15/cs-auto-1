@@ -476,8 +476,22 @@ export function hasReadableEmailBody(
 ): boolean {
   const text = String(bodyText ?? "").trim();
   const html = String(bodyHtml ?? "").trim();
-  if (html && !isUndecodedBase64Body(html) && !isMimeHeadersOnlyBody(html)) return true;
-  if (text && !isUndecodedBase64Body(text) && !isMimeHeadersOnlyBody(text)) return true;
+  if (
+    html &&
+    !isUndecodedBase64Body(html) &&
+    !isMimeHeadersOnlyBody(html) &&
+    !isMobileSignatureOnlyText(htmlToText(html))
+  ) {
+    return true;
+  }
+  if (
+    text &&
+    !isUndecodedBase64Body(text) &&
+    !isMimeHeadersOnlyBody(text) &&
+    !isMobileSignatureOnlyText(text)
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -735,15 +749,161 @@ function safeFilename(name: string | null, contentType: string, index: number): 
   return cleaned || `attachment-${index + 1}`;
 }
 
+/** 仅手机默认签名（无实质正文）。iPhone 常把签名拆成 multipart/mixed 末段 text/plain。 */
+export function isMobileSignatureOnlyText(text: string | null | undefined): boolean {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!t || t.length > 80) return false;
+  return /^(sent from my (iphone|ipad|ipod)|sent from mail for windows|get outlook for (ios|android)|envoy[eé] de mon iphone|von meinem iphone gesendet|iphoneから送信)\.?$/i.test(
+    t,
+  );
+}
+
+/** 纯文本引用区起始（Gmail 英/中、Outlook From:；含 IMAP 压扁无换行） */
+const PLAIN_QUOTE_START_RES: RegExp[] = [
+  /\n\nOn\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),[\s\S]{8,220}?wrote:\s*/i,
+  /\nOn\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),[\s\S]{8,220}?wrote:\s*/i,
+  /On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),[\s\S]{8,220}?wrote:\s*/i,
+  /On\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},[\s\S]{8,220}?wrote:\s*/i,
+  /\n\nFrom\s*[：:]/i,
+  /\nFrom\s*[：:]/i,
+  /\n\n\d{4}年[\s\S]{4,120}?写道[：:]/,
+  /\n\d{4}年[\s\S]{4,120}?写道[：:]/,
+  /\d{4}年[\s\S]{4,120}?写道[：:]/,
+];
+
+function findPlainQuoteStartIndex(text: string): number {
+  let earliest = -1;
+  for (const re of PLAIN_QUOTE_START_RES) {
+    const m = re.exec(text);
+    if (!m || m.index < 0) continue;
+    if (earliest < 0 || m.index < earliest) earliest = m.index;
+  }
+  return earliest;
+}
+
+/** 引用标记前的客户最新正文（供 MIME 选段评分） */
+export function extractTopBeforeQuote(text: string): string {
+  const t = String(text ?? "").trim();
+  if (!t) return "";
+  const idx = findPlainQuoteStartIndex(t);
+  if (idx <= 0) return t;
+  return t.slice(0, idx).trim();
+}
+
+function hasPlainQuoteMarker(text: string): boolean {
+  return findPlainQuoteStartIndex(text) >= 0;
+}
+
+function hasSubstantialTopBeforeQuote(text: string): boolean {
+  return extractTopBeforeQuote(text).trim().length >= 8;
+}
+
+function isQuoteOnlyPlainBody(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t || !hasPlainQuoteMarker(t)) return false;
+  return !hasSubstantialTopBeforeQuote(t);
+}
+
+function extractTopBeforeQuoteFromHtml(html: string): string {
+  const h = String(html ?? "").trim();
+  if (!h) return "";
+  const quoteIdx = h.search(/class=["'][^"']*gmail_quote/i);
+  const topHtml = quoteIdx > 0 ? h.slice(0, quoteIdx) : h;
+  return htmlToText(topHtml).trim();
+}
+
+function plainTopNotRepresentedInHtml(plainTop: string, html: string): boolean {
+  const p = plainTop.trim();
+  if (p.length < 8) return false;
+  const htmlVis = extractTopBeforeQuoteFromHtml(html).toLowerCase();
+  const words = p
+    .replace(/\s+/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 3)
+    .slice(0, 8);
+  if (words.length < 2) return false;
+  const matched = words.filter((w) => htmlVis.includes(w.toLowerCase())).length;
+  return matched < Math.ceil(words.length * 0.5);
+}
+
+function scoreBodyCandidate(text: string): number {
+  const t = text.trim();
+  if (!t) return -1;
+  if (isMobileSignatureOnlyText(t)) return 1;
+  const topLen = extractTopBeforeQuote(t).length;
+  if (topLen >= 8 && hasPlainQuoteMarker(t)) {
+    return 1_000_000 + topLen;
+  }
+  if (topLen >= 8) {
+    return 500_000 + topLen;
+  }
+  if (isQuoteOnlyPlainBody(t)) {
+    return 50 + t.length;
+  }
+  return 100 + t.length;
+}
+
+/** 多段 text 时优先实质正文；避免 .pop() 只拿到末尾「Sent from my iPhone」。 */
+function pickBestBodyPart(parts: string[]): string {
+  let best = "";
+  let bestScore = -1;
+  for (const part of parts) {
+    const t = String(part ?? "").trim();
+    if (!t) continue;
+    const score = scoreBodyCandidate(t);
+    if (score > bestScore) {
+      bestScore = score;
+      best = t;
+    }
+  }
+  return best;
+}
+
 function pickBestAlternative(plainParts: string[], htmlParts: string[]): { bodyText: string; bodyHtml: string | null } {
-  const plain = plainParts.filter((p) => p.trim()).pop()?.trim() ?? "";
-  const html = htmlParts.filter((p) => p.trim()).pop()?.trim() ?? null;
+  const plain = pickBestBodyPart(plainParts);
+  const html = pickBestBodyPart(htmlParts) || null;
   let bodyText = plain;
   if (html) {
     const stripped = htmlToText(html);
     if (!bodyText && stripped) bodyText = stripped;
+    // HTML 仅签名、plain 有实质内容时保留 plain
+    if (bodyText && isMobileSignatureOnlyText(stripped) && !isMobileSignatureOnlyText(bodyText)) {
+      return { bodyText, bodyHtml: null };
+    }
+    // plain 含引用前新回复、html 未体现该片段（如 Shopify 模板）时回退 plain
+    const plainTop = extractTopBeforeQuote(bodyText).trim();
+    if (plainTop.length >= 8 && plainTopNotRepresentedInHtml(plainTop, html)) {
+      return { bodyText, bodyHtml: null };
+    }
   }
   return { bodyText, bodyHtml: html || null };
+}
+
+function isMessageRfc822Part(headers: string): boolean {
+  const { main, full } = getMainMediaType(headers);
+  return main === "message" && /rfc822|global|external-body/i.test(full);
+}
+
+function isMultipartAlternativePart(headers: string): boolean {
+  const { main, subtype } = getMainMediaType(headers);
+  return main === "multipart" && subtype === "alternative";
+}
+
+function pickBestFromMixedSubparts(
+  altPlain: string[],
+  altHtml: string[],
+  fallbackPlain: string[],
+  fallbackHtml: string[],
+): { bodyText: string; bodyHtml: string | null } {
+  const altBest = pickBestAlternative(altPlain, altHtml);
+  if (altBest.bodyText || altBest.bodyHtml) {
+    if (!isQuoteOnlyPlainBody(altBest.bodyText) || hasSubstantialTopBeforeQuote(altBest.bodyText)) {
+      return altBest;
+    }
+  }
+  const mergedPlain = [...altPlain, ...fallbackPlain];
+  const mergedHtml = [...altHtml, ...fallbackHtml];
+  return pickBestAlternative(mergedPlain, mergedHtml);
 }
 
 function inferAnonymousMultipartSubtype(subs: string[]): "alternative" | "mixed" {
@@ -840,17 +1000,21 @@ export function parseMimePart(part: string, options?: ParseMimePartOptions): Par
 
     if (subtype === "mixed" || subtype === "related") {
       if (subs.length === 0) return empty;
-      const plainParts: string[] = [];
-      const htmlParts: string[] = [];
+      const altPlain: string[] = [];
+      const altHtml: string[] = [];
+      const fallbackPlain: string[] = [];
+      const fallbackHtml: string[] = [];
       let allAtt: MimeAttachmentPart[] = [];
       for (const sub of subs) {
+        const { headers: subH, body: subB } = splitHeadersBody(sub.trim());
         const r = parseMimePart(sub, options);
-        if (!options?.attachmentsOnly) {
-          if (r.bodyText) plainParts.push(r.bodyText);
-          if (r.bodyHtml) htmlParts.push(r.bodyHtml);
+        if (!options?.attachmentsOnly && subH.trim() && !isMessageRfc822Part(subH)) {
+          const poolPlain = isMultipartAlternativePart(subH) ? altPlain : fallbackPlain;
+          const poolHtml = isMultipartAlternativePart(subH) ? altHtml : fallbackHtml;
+          if (r.bodyText) poolPlain.push(r.bodyText);
+          if (r.bodyHtml) poolHtml.push(r.bodyHtml);
         }
         allAtt = allAtt.concat(r.attachments);
-        const { headers: subH, body: subB } = splitHeadersBody(sub.trim());
         if (!subH.trim()) continue;
         const subMeta = getMainMediaType(subH);
         if (subMeta.main === "image" || subMeta.main === "application") {
@@ -869,7 +1033,7 @@ export function parseMimePart(part: string, options?: ParseMimePartOptions): Par
       if (options?.attachmentsOnly) {
         return { bodyText: "", bodyHtml: null, attachments: dedupeAttachmentParts(allAtt) };
       }
-      const best = pickBestAlternative(plainParts, htmlParts);
+      const best = pickBestFromMixedSubparts(altPlain, altHtml, fallbackPlain, fallbackHtml);
       const dedupedAtt = dedupeAttachmentParts(allAtt);
       return {
         bodyText: best.bodyText,
@@ -948,6 +1112,9 @@ export function parseMimePart(part: string, options?: ParseMimePartOptions): Par
 
   // multipart/message 不应作为二进制附件落库（Outlook 常见误解析为 attachment-1）
   if (main === "multipart" || main === "message") {
+    if (main === "message" && /rfc822|global|external-body/i.test(full)) {
+      return parseMimePart(body.trimStart(), options);
+    }
     const nested = parseMimePart(`${headers}\r\n\r\n${body}`, options);
     if (nested.bodyText.trim() || nested.bodyHtml || nested.attachments.length > 0) {
       return nested;

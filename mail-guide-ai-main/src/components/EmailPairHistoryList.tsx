@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/StatusBadge";
 import { EmailBody } from "@/components/EmailBody";
@@ -62,6 +62,11 @@ export function EmailPairHistoryList({
   });
   const inboundCount = items.filter((i) => i.kind === "inbound").length;
   const outboundCount = items.filter((i) => i.kind === "outbound").length;
+
+  // 切换邮件或重拉发送日志时关闭详情，避免沿用上一条的 from_email 等字段
+  useEffect(() => {
+    setDetailLog(null);
+  }, [currentEmail?.id, sendLogs]);
 
   if (loading) {
     return <div className="text-xs text-muted-foreground">往来记录加载中...</div>;
@@ -140,7 +145,7 @@ export function EmailPairHistoryList({
             <button
               key={item.id}
               type="button"
-              onClick={() => setDetailLog(log)}
+              onClick={() => setDetailLog({ ...log })}
               className={cn(
                 "w-full text-left rounded border p-3 transition-colors hover:bg-accent/60",
                 ok ? "bg-primary/[0.03] border-primary/20" : "bg-destructive/5 border-destructive/30",
@@ -173,6 +178,11 @@ export function EmailPairHistoryList({
                   <div className="text-sm font-medium truncate">
                     {log.subject || "(无主题)"}
                   </div>
+                  {log.from_email ? (
+                    <div className="text-[10px] text-muted-foreground mt-0.5 truncate" title={log.from_email}>
+                      发件：{log.from_email}
+                    </div>
+                  ) : null}
                   <div className="text-xs text-muted-foreground mt-1 line-clamp-2 whitespace-pre-wrap">
                     {previewText(log.content)}
                   </div>
@@ -250,8 +260,8 @@ export function EmailPairHistoryList({
               ) : null}
               {detailLog.error_message ? (
                 <div>
-                  <div className="text-destructive mb-1">错误信息</div>
-                  <div className="p-2 bg-destructive/10 border border-destructive/30 rounded text-xs text-destructive">
+                  <div className="text-muted-foreground mb-1">错误</div>
+                  <div className="p-2 bg-destructive/10 text-destructive rounded text-xs break-words">
                     {detailLog.error_message}
                   </div>
                 </div>

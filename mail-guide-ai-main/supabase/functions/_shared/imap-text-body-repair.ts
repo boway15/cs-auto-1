@@ -458,7 +458,7 @@ export async function repairEmailBodyTextOnly(
       bodyHtml = parsed.bodyHtml;
     }
 
-    if (isBodyEmpty(bodyText, bodyHtml)) {
+    if (!bodyText.trim() && !(bodyHtml ?? "").trim()) {
       return { status: "still_empty", error: "IMAP 已拉取 TEXT 但未解析出正文" };
     }
 

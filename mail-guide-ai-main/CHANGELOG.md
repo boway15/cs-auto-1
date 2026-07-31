@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.9.0] - 2026-07-31
+
+### Fixes
+
+- **Gmail 回复正文丢失**：MIME 选段改为引用感知评分，优先含客户新回复的 `text/plain`/`text/html`，不再因 Shopify 等引用原文更长而覆盖真实回复。
+- **multipart/mixed**：优先 `multipart/alternative` 主段；`message/rfc822` 嵌入原文不参与正文候选；修复 rfc822 解析递归。
+- **plain/html 不一致**：plain 含引用前新回复而 html 仅为 Shopify 模板时回退 plain，避免展示错正文。
+- **手机签名误判**：「Sent from my iPhone」等不再视为完整正文；正文补拉可覆盖仅签名入库数据。
+- **工作台发件人**：列表以 `from_email` 为稳定身份；详情加载不再覆盖列表发件人字段；邮箱筛选 Select 异步选项修复。
+- **往来记录**：切换邮件时重置发信详情；出站日志展示发件人邮箱。
+
+### Functions / Frontend
+
+- `_shared/mime-parse`、`sync-mailbox`、`imap-text-body-repair`
+- `email-body`、`Workbench`、`EmailPairHistoryList`
+
+### Database
+
+- 无新增 migration（`MIGRATIONS=()`）
+
 ## [1.8.0] - 2026-07-23
 
 ### Features

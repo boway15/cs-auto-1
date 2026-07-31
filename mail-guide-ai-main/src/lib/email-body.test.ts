@@ -76,6 +76,17 @@ describe("isEmailBodyEmpty", () => {
     expect(hasReadableEmailBodyForDisplay(headersOnly, null)).toBe(false);
     expect(normalizeEmailBodyForDisplay(headersOnly, null).text).toBe("");
   });
+
+  it("仅手机签名视为需补拉（避免误当成完整正文跳过修复）", () => {
+    expect(needsEmailBodyRepair({ body_text: "Sent from my iPhone", body_html: null })).toBe(true);
+    expect(hasReadableEmailBodyForDisplay("Sent from my iPhone", null)).toBe(false);
+    expect(
+      needsEmailBodyRepair({
+        body_text: "Hello,\n\nPlease check order.\nSent from my iPhone",
+        body_html: null,
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("normalizeEmailBodyForDisplay", () => {
