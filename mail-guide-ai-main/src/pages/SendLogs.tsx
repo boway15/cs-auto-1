@@ -11,10 +11,17 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { RefreshCw, Search, Eye, CheckCircle2, XCircle, Download } from "lucide-react";
+import { RefreshCw, Search, Eye, CheckCircle2, XCircle, Download, Paperclip, FileWarning } from "lucide-react";
 import { cstDayEndIso, cstDayStartIso, formatDateTimeCST } from "@/lib/format-datetime";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
+import {
+  isOutboundImageAttachment,
+  parseSendLogOutboundAttachments,
+  signSendLogOutboundAttachmentUrls,
+  type SendLogOutboundAttachment,
+  type SignedOutboundAttachmentUrls,
+} from "@/lib/outbound-attachments";
 
 type Log = {
   id: string;
@@ -119,6 +126,115 @@ function applySendLogFilters<T extends { eq: (...args: unknown[]) => T; gte: (..
   return q;
 }
 
+const EXPORT_BATCH_SIZE = 1000;
+
+function filterSendLogsBySearch(logs: Log[], searchDebounced: string): Log[] {
+  const q = searchDebounced.toLowerCase();
+  if (!q) return logs;
+  return logs.filter((l) => {
+    const tc = templateCodeFromLog(l)?.toLowerCase() ?? "";
+    const op = l.operator_label?.toLowerCase() ?? "";
+    return (
+      l.order_no?.toLowerCase().includes(q) ||
+      tc.includes(q) ||
+      op.includes(q) ||
+      l.to_email?.toLowerCase().includes(q) ||
+      l.from_email?.toLowerCase().includes(q) ||
+      l.subject?.toLowerCase().includes(q) ||
+      l.send_no?.toLowerCase().includes(q)
+    );
+  });
+}
+
+async function enrichSendLogRows(
+  data: Array<Record<string, unknown>>,
+): Promise<Log[]> {
+  const rows = data.map((log) => {
+    const meta = (log.metadata ?? null) as Record<string, unknown> | null;
+    return {
+      ...log,
+      metadata: meta,
+      order_no: orderNoFromLog({ ...log, metadata: meta } as Log),
+    } as Log;
+  });
+
+  const orderIdsNeedingLookup = Array.from(
+    new Set(
+      rows
+        .filter((log) => log.order_id && !log.order_no)
+        .map((log) => log.order_id as string),
+    ),
+  );
+  let orderNoById = new Map<string, string>();
+  if (orderIdsNeedingLookup.length > 0) {
+    const { data: orders, error: ordersError } = await supabase
+      .from("orders")
+      .select("id, order_no")
+      .in("id", orderIdsNeedingLookup);
+    if (ordersError) {
+      console.warn("Failed to load send log orders", ordersError);
+    } else {
+      orderNoById = new Map((orders ?? []).map((order) => [order.id, order.order_no]));
+    }
+  }
+
+  const enriched = rows.map((log) => ({
+    ...log,
+    order_no: log.order_no ?? (log.order_id ? orderNoById.get(log.order_id) ?? null : null),
+  }));
+
+  const sentByIds = Array.from(
+    new Set(
+      enriched
+        .filter((log) => log.send_type === "manual" && log.sent_by)
+        .map((log) => log.sent_by as string),
+    ),
+  );
+  let profileNames = new Map<string, string | null>();
+  if (sentByIds.length > 0) {
+    const { data: profiles, error: profilesError } = await supabase
+      .from("profiles")
+      .select("user_id, display_name")
+      .in("user_id", sentByIds);
+    if (profilesError) {
+      console.warn("Failed to load send log operators", profilesError);
+    } else {
+      profileNames = new Map(
+        (profiles ?? []).map((p) => [p.user_id, p.display_name]),
+      );
+    }
+  }
+
+  return enriched.map((log) => ({
+    ...log,
+    operator_label: operatorLabelFromLog(log, profileNames),
+  }));
+}
+
+async function fetchAllFilteredSendLogs(filters: SendLogFilters): Promise<Log[]> {
+  const allRows: Array<Record<string, unknown>> = [];
+  let page = 0;
+
+  while (true) {
+    const { from, to } = listPageRange(page, EXPORT_BATCH_SIZE);
+    const { data, error } = await applySendLogFilters(
+      supabase.from("email_send_logs").select("*"),
+      filters,
+    )
+      .order("created_at", { ascending: false })
+      .range(from, to);
+
+    if (error) throw error;
+    if (!data?.length) break;
+
+    allRows.push(...data);
+    if (data.length < EXPORT_BATCH_SIZE) break;
+    page += 1;
+  }
+
+  return enrichSendLogRows(allRows);
+}
+
 export default function SendLogs() {
   const { hasMailboxAccess, grantsLoading } = useAuth();
   const [logs, setLogs] = useState<Log[]>([]);
@@ -133,8 +249,42 @@ export default function SendLogs() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [detail, setDetail] = useState<Log | null>(null);
+  const [detailAttachments, setDetailAttachments] = useState<SendLogOutboundAttachment[]>([]);
+  const [detailAttachmentUrls, setDetailAttachmentUrls] = useState<
+    Array<SignedOutboundAttachmentUrls | null>
+  >([]);
+  const [detailAttachmentsLoading, setDetailAttachmentsLoading] = useState(false);
   const [fromOptions, setFromOptions] = useState<string[]>([]);
   const [stats, setStats] = useState({ total: 0, sent: 0, failed: 0 });
+  const [exporting, setExporting] = useState(false);
+
+  useEffect(() => {
+    if (!detail) {
+      setDetailAttachments([]);
+      setDetailAttachmentUrls([]);
+      setDetailAttachmentsLoading(false);
+      return;
+    }
+    const atts = parseSendLogOutboundAttachments(detail.metadata);
+    setDetailAttachments(atts);
+    setDetailAttachmentUrls(atts.map(() => null));
+    if (!atts.length) {
+      setDetailAttachmentsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setDetailAttachmentsLoading(true);
+    void (async () => {
+      const signed = await Promise.all(atts.map((a) => signSendLogOutboundAttachmentUrls(a)));
+      if (!cancelled) {
+        setDetailAttachmentUrls(signed);
+        setDetailAttachmentsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [detail?.id, detail?.metadata]);
 
   useEffect(() => {
     const t = setTimeout(() => setSearchDebounced(search.trim()), 400);
@@ -201,85 +351,8 @@ export default function SendLogs() {
       if (error) throw error;
       setListTotal(count ?? 0);
 
-      const rows = (data ?? []).map((log) => {
-        const meta = (log.metadata ?? null) as Record<string, unknown> | null;
-        return {
-          ...log,
-          metadata: meta,
-          order_no: orderNoFromLog({ ...log, metadata: meta }),
-        };
-      });
-
-      const orderIdsNeedingLookup = Array.from(
-        new Set(
-          rows
-            .filter((log) => log.order_id && !log.order_no)
-            .map((log) => log.order_id as string),
-        ),
-      );
-      let orderNoById = new Map<string, string>();
-      if (orderIdsNeedingLookup.length > 0) {
-        const { data: orders, error: ordersError } = await supabase
-          .from("orders")
-          .select("id, order_no")
-          .in("id", orderIdsNeedingLookup);
-        if (ordersError) {
-          console.warn("Failed to load send log orders", ordersError);
-        } else {
-          orderNoById = new Map((orders ?? []).map((order) => [order.id, order.order_no]));
-        }
-      }
-
-      const enriched = rows.map((log) => ({
-        ...log,
-        order_no: log.order_no ?? (log.order_id ? orderNoById.get(log.order_id) ?? null : null),
-      }));
-
-      const sentByIds = Array.from(
-        new Set(
-          enriched
-            .filter((log) => log.send_type === "manual" && log.sent_by)
-            .map((log) => log.sent_by as string),
-        ),
-      );
-      let profileNames = new Map<string, string | null>();
-      if (sentByIds.length > 0) {
-        const { data: profiles, error: profilesError } = await supabase
-          .from("profiles")
-          .select("user_id, display_name")
-          .in("user_id", sentByIds);
-        if (profilesError) {
-          console.warn("Failed to load send log operators", profilesError);
-        } else {
-          profileNames = new Map(
-            (profiles ?? []).map((p) => [p.user_id, p.display_name]),
-          );
-        }
-      }
-
-      const withOperators = enriched.map((log) => ({
-        ...log,
-        operator_label: operatorLabelFromLog(log, profileNames),
-      }));
-
-      const q = searchDebounced.toLowerCase();
-      setLogs(
-        q
-          ? withOperators.filter((l) => {
-              const tc = templateCodeFromLog(l)?.toLowerCase() ?? "";
-              const op = l.operator_label?.toLowerCase() ?? "";
-              return (
-                l.order_no?.toLowerCase().includes(q) ||
-                tc.includes(q) ||
-                op.includes(q) ||
-                l.to_email?.toLowerCase().includes(q) ||
-                l.from_email?.toLowerCase().includes(q) ||
-                l.subject?.toLowerCase().includes(q) ||
-                l.send_no?.toLowerCase().includes(q)
-              );
-            })
-          : withOperators,
-      );
+      const withOperators = await enrichSendLogRows(data ?? []);
+      setLogs(filterSendLogsBySearch(withOperators, searchDebounced));
     } catch (error) {
       const message = typeof error === "object" && error && "message" in error
         ? String(error.message)
@@ -306,29 +379,62 @@ export default function SendLogs() {
     }
   }, [listPage, listPageCountVal]);
 
-  function exportCsv() {
-    const header = ["时间", "发送编号", "类型", "状态", "发件人", "人工账号", "收件人", "订单号", "主题", "SMTP响应", "错误"];
-    const rows = logs.map((l) => [
-      formatDateTimeCST(l.created_at),
-      l.send_no ?? l.id,
-      sendTypeMap[l.send_type]?.label ?? l.send_type,
-      l.status,
-      l.from_email ?? "",
-      l.operator_label ?? "",
-      l.to_email ?? "",
-      l.order_no ?? "",
-      l.subject ?? "",
-      l.smtp_response ?? "",
-      l.error_message ?? "",
-    ]);
-    const csv = [header, ...rows].map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
-    const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `send-logs-${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+  async function exportCsv() {
+    setExporting(true);
+    const toastId = toast.loading("正在导出发送日志…");
+    try {
+      const filters: SendLogFilters = {
+        statusFilter,
+        typeFilter,
+        fromFilter,
+        dateFrom,
+        dateTo,
+        searchDebounced,
+      };
+      const allLogs = filterSendLogsBySearch(
+        await fetchAllFilteredSendLogs(filters),
+        searchDebounced,
+      );
+      if (allLogs.length === 0) {
+        toast.dismiss(toastId);
+        toast.warning("当前筛选条件下没有可导出的记录");
+        return;
+      }
+
+      const header = ["时间", "发送编号", "类型", "状态", "发件人", "人工账号", "收件人", "订单号", "主题", "SMTP响应", "错误"];
+      const rows = allLogs.map((l) => [
+        formatDateTimeCST(l.created_at),
+        l.send_no ?? l.id,
+        sendTypeMap[l.send_type]?.label ?? l.send_type,
+        l.status,
+        l.from_email ?? "",
+        l.operator_label ?? "",
+        l.to_email ?? "",
+        l.order_no ?? "",
+        l.subject ?? "",
+        l.smtp_response ?? "",
+        l.error_message ?? "",
+      ]);
+      const csv = [header, ...rows].map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+      const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `send-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+      link.click();
+      URL.revokeObjectURL(url);
+      toast.dismiss(toastId);
+      toast.success(`已导出 ${allLogs.length} 条记录`);
+    } catch (error) {
+      const message = typeof error === "object" && error && "message" in error
+        ? String(error.message)
+        : "请稍后重试";
+      console.error("Failed to export send logs", error);
+      toast.dismiss(toastId);
+      toast.error(`导出失败：${message}`);
+    } finally {
+      setExporting(false);
+    }
   }
 
   return (
@@ -339,8 +445,9 @@ export default function SendLogs() {
           <p className="text-sm text-muted-foreground">本系统所有外发邮件记录</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={exportCsv}>
-            <Download className="w-4 h-4 mr-2" />导出 CSV
+          <Button variant="outline" size="sm" onClick={() => void exportCsv()} disabled={exporting || loading}>
+            <Download className={`w-4 h-4 mr-2 ${exporting ? "animate-pulse" : ""}`} />
+            {exporting ? "导出中…" : "导出 CSV"}
           </Button>
           <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
             <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} />刷新
@@ -507,6 +614,61 @@ export default function SendLogs() {
                   <ScrollArea className="h-48">
                     <div className="p-2 bg-muted/50 rounded whitespace-pre-wrap text-xs">{detail.content}</div>
                   </ScrollArea>
+                </div>
+              )}
+              {detailAttachments.length > 0 && (
+                <div>
+                  <div className="text-muted-foreground mb-1 flex items-center gap-1">
+                    <Paperclip className="h-3.5 w-3.5" />
+                    发出附件（{detailAttachments.length}）
+                  </div>
+                  {detailAttachmentsLoading && (
+                    <div className="text-xs text-muted-foreground mb-2">正在加载附件链接…</div>
+                  )}
+                  <div className="space-y-2">
+                    {detailAttachments.map((att, i) => {
+                      const urls = detailAttachmentUrls[i];
+                      const isImage = isOutboundImageAttachment(att);
+                      return (
+                        <div
+                          key={`${att.storage_path}-${i}`}
+                          className="rounded border border-border/60 bg-muted/30 p-2 text-xs space-y-2"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="font-medium truncate" title={att.filename}>
+                                {att.filename}
+                              </div>
+                              <div className="text-muted-foreground truncate">{att.content_type}</div>
+                            </div>
+                            {urls?.downloadUrl ? (
+                              <Button size="sm" variant="outline" className="h-7 shrink-0" asChild>
+                                <a href={urls.downloadUrl} target="_blank" rel="noreferrer">
+                                  <Download className="h-3.5 w-3.5 mr-1" />
+                                  下载
+                                </a>
+                              </Button>
+                            ) : null}
+                          </div>
+                          {isImage && urls?.previewUrl ? (
+                            <a href={urls.previewUrl} target="_blank" rel="noreferrer" className="block">
+                              <img
+                                src={urls.previewUrl}
+                                alt={att.filename}
+                                className="max-h-48 max-w-full rounded border border-border/50 object-contain bg-background"
+                              />
+                            </a>
+                          ) : null}
+                          {urls?.error ? (
+                            <div className="flex items-center gap-1 text-muted-foreground">
+                              <FileWarning className="h-3.5 w-3.5 shrink-0" />
+                              <span>无法预览：文件已清理或无权访问</span>
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
               {detail.error_message && (

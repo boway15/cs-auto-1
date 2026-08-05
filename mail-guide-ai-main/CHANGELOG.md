@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.10.0] - 2026-08-05
+
+### Features
+
+- **出站附件归档**：发送成功后将附件归档到 Storage `sent/{mailbox_id}/{send_log_id}/...`，并回写 `email_send_logs.metadata`；清理临时对象。
+- **发送日志预览**：SendLogs 详情支持对已归档附件的签名预览/下载（按邮箱权限隔离）。
+
+### Database
+
+- `20260804120000_outbound_attachments_sent_archive_rls.sql`：员工可读 `outbound-attachments` 桶下 `sent/{mailbox_id}/...` 归档路径。
+
+### Functions / Frontend
+
+- `send-reply`、`_shared/outbound-attachment`
+- `outbound-attachments`、`SendLogs`
+
+### Release note
+
+- 现网自 **v1.8.0** 起同批上线时，本版本号 **v1.10.0** 为 GitHub / `package.json` / Git 标签终点；中间已入库的 **v1.9.0**（Gmail 正文选段等）一并包含，不再单独打运维批次。
+
 ## [1.9.0] - 2026-07-31
 
 ### Fixes

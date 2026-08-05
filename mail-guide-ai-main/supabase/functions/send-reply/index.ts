@@ -5,7 +5,9 @@ import { appendMailboxSignature } from "../_shared/mail-signature.ts";
 import { buildReplySubject, resolveAutoReplyRecipient } from "../_shared/mail-reply-subject.ts";
 import { assertCanAccessEmail } from "../_shared/mailbox-access.ts";
 import {
+  archiveOutboundAttachments,
   loadOutboundAttachments,
+  removeOutboundTempAttachments,
   type OutboundAttachmentInput,
 } from "../_shared/outbound-attachment.ts";
 
@@ -137,15 +139,27 @@ Deno.serve(async (req) => {
       operator_display_name: profileRow?.display_name ?? null,
     };
 
-    const attachmentMetadata = attachments.length
-      ? {
-        attachments: attachments.map((a) => ({
-          filename: a.filename,
-          content_type: a.content_type,
-          storage_path: a.storage_path,
-        })),
-      }
-      : {};
+    let archivedAttachments: OutboundAttachmentInput[] = attachments.map((a) => ({
+      filename: a.filename,
+      content_type: a.content_type,
+      storage_path: a.storage_path,
+    }));
+
+    const buildMetadata = (atts: OutboundAttachmentInput[]) => ({
+      ...operatorMetadata,
+      ...(typeof quick_reply_template_id === "string" && quick_reply_template_id
+        ? { quick_reply_template_id }
+        : {}),
+      ...(atts.length
+        ? {
+          attachments: atts.map((a) => ({
+            filename: a.filename,
+            content_type: a.content_type,
+            storage_path: a.storage_path,
+          })),
+        }
+        : {}),
+    });
 
     // 写入发送日志（无论成功失败）
     const sendLogPayload = {
@@ -164,32 +178,42 @@ Deno.serve(async (req) => {
       sent_by: userData.user.id,
       retry_count: existingLog ? (existingLog.retry_count ?? 0) + 1 : 0,
       idempotency_key: sendKey,
-      metadata: {
-        ...operatorMetadata,
-        ...(typeof quick_reply_template_id === "string" && quick_reply_template_id
-          ? { quick_reply_template_id }
-          : {}),
-        ...attachmentMetadata,
-      },
+      metadata: buildMetadata(archivedAttachments),
     };
-    const { error: sendLogError } = existingLog
+    const { data: savedLog, error: sendLogError } = existingLog
       ? await admin.from("email_send_logs").update(sendLogPayload).eq("id", existingLog.id)
-      : await admin.from("email_send_logs").insert(sendLogPayload);
+        .select("id")
+        .single()
+      : await admin.from("email_send_logs").insert(sendLogPayload).select("id").single();
 
     if (sendLogError) {
       console.error("email_send_logs write failed:", sendLogError);
     }
 
+    const sendLogId = savedLog?.id ?? existingLog?.id ?? null;
+
     if (sendError) throw new Error(sendError);
 
-    if (attachments.length > 0) {
-      for (const a of attachments) {
-        try {
-          await admin.storage.from("outbound-attachments").remove([a.storage_path]);
-        } catch (e) {
-          console.warn("outbound attachment cleanup failed:", a.storage_path, e);
-        }
+    // 发送成功：归档到 sent/{mailbox_id}/{send_log_id}/，再清理临时上传
+    if (attachments.length > 0 && sendLogId) {
+      archivedAttachments = await archiveOutboundAttachments(
+        admin,
+        mb.id,
+        sendLogId,
+        archivedAttachments,
+      );
+      const { error: metaErr } = await admin
+        .from("email_send_logs")
+        .update({ metadata: buildMetadata(archivedAttachments) })
+        .eq("id", sendLogId);
+      if (metaErr) {
+        console.warn("email_send_logs attachment archive metadata update failed:", metaErr);
       }
+      // 仅删除已成功归档的临时文件；归档失败的保留原路径便于补救
+      const tempsToRemove = attachments.filter((_, i) =>
+        archivedAttachments[i]?.storage_path?.startsWith("sent/")
+      );
+      await removeOutboundTempAttachments(admin, tempsToRemove);
     }
 
     await admin

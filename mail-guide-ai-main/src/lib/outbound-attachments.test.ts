@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildOutboundStoragePath,
+  isOutboundImageAttachment,
+  parseSendLogOutboundAttachments,
   sanitizeOutboundFilename,
   sanitizeOutboundStorageKeySegment,
   validateOutboundFile,
@@ -51,5 +53,33 @@ describe("outbound-attachments", () => {
       0,
     );
     expect(r.ok).toBe(true);
+  });
+
+  it("parseSendLogOutboundAttachments 解析 metadata", () => {
+    expect(parseSendLogOutboundAttachments(null)).toEqual([]);
+    expect(
+      parseSendLogOutboundAttachments({
+        attachments: [
+          {
+            filename: "a.png",
+            content_type: "image/png",
+            storage_path: "sent/mb/log/a.png",
+          },
+          { filename: "", storage_path: "x" },
+        ],
+      }),
+    ).toEqual([
+      {
+        filename: "a.png",
+        content_type: "image/png",
+        storage_path: "sent/mb/log/a.png",
+      },
+    ]);
+  });
+
+  it("isOutboundImageAttachment 按 MIME 或扩展名判断", () => {
+    expect(isOutboundImageAttachment({ filename: "a.bin", content_type: "image/png" })).toBe(true);
+    expect(isOutboundImageAttachment({ filename: "a.JPG", content_type: "application/octet-stream" })).toBe(true);
+    expect(isOutboundImageAttachment({ filename: "a.pdf", content_type: "application/pdf" })).toBe(false);
   });
 });

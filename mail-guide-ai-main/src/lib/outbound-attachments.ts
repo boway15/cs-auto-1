@@ -111,3 +111,69 @@ export function formatOutboundFileSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+export type SendLogOutboundAttachment = {
+  filename: string;
+  content_type: string;
+  storage_path: string;
+};
+
+/** 从 email_send_logs.metadata 解析发出附件清单 */
+export function parseSendLogOutboundAttachments(
+  metadata: Record<string, unknown> | null | undefined,
+): SendLogOutboundAttachment[] {
+  if (!metadata || !Array.isArray(metadata.attachments)) return [];
+  const out: SendLogOutboundAttachment[] = [];
+  for (const item of metadata.attachments) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    const filename = typeof o.filename === "string" ? o.filename.trim() : "";
+    const storage_path = typeof o.storage_path === "string" ? o.storage_path.trim() : "";
+    if (!filename || !storage_path) continue;
+    const content_type =
+      typeof o.content_type === "string" && o.content_type.trim()
+        ? o.content_type.trim()
+        : "application/octet-stream";
+    out.push({ filename, content_type, storage_path });
+  }
+  return out;
+}
+
+export function isOutboundImageAttachment(att: Pick<SendLogOutboundAttachment, "filename" | "content_type">): boolean {
+  if (att.content_type.startsWith("image/")) return true;
+  const ext = extOf(att.filename);
+  return ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "gif";
+}
+
+export type SignedOutboundAttachmentUrls = {
+  previewUrl: string | null;
+  downloadUrl: string | null;
+  error: string | null;
+};
+
+/** 为发送日志详情生成预览/下载签名 URL（文件已清理时 error 非空） */
+export async function signSendLogOutboundAttachmentUrls(
+  att: SendLogOutboundAttachment,
+  expiresIn = 3600,
+): Promise<SignedOutboundAttachmentUrls> {
+  const previewResp = await supabase.storage
+    .from(OUTBOUND_BUCKET)
+    .createSignedUrl(att.storage_path, expiresIn);
+  if (previewResp.error || !previewResp.data?.signedUrl) {
+    return {
+      previewUrl: null,
+      downloadUrl: null,
+      error: previewResp.error?.message || "附件不可访问（可能已清理）",
+    };
+  }
+  const downloadResp = await supabase.storage
+    .from(OUTBOUND_BUCKET)
+    .createSignedUrl(att.storage_path, expiresIn, {
+      download: sanitizeOutboundFilename(att.filename),
+    });
+  return {
+    previewUrl: previewResp.data.signedUrl,
+    downloadUrl: downloadResp.data?.signedUrl ?? previewResp.data.signedUrl,
+    error: null,
+  };
+}
