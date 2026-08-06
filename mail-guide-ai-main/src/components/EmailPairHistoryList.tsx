@@ -4,6 +4,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { EmailBody } from "@/components/EmailBody";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { SendLogDetailAttachments } from "@/components/SendLogDetailAttachments";
 import {
   buildPairConversationTimeline,
   isSendLogSuccess,
@@ -204,7 +205,7 @@ export function EmailPairHistoryList({
       </div>
 
       <Dialog open={!!detailLog} onOpenChange={(open) => !open && setDetailLog(null)}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>发送详情</DialogTitle>
           </DialogHeader>
@@ -258,6 +259,7 @@ export function EmailPairHistoryList({
                   </ScrollArea>
                 </div>
               ) : null}
+              <SendLogDetailAttachments metadata={detailLog.metadata} />
               {detailLog.error_message ? (
                 <div>
                   <div className="text-muted-foreground mb-1">错误</div>

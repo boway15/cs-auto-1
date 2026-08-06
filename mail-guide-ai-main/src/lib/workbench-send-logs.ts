@@ -16,10 +16,11 @@ export type WorkbenchSendLog = {
   sent_by: string | null;
   send_no: string | null;
   smtp_response: string | null;
+  metadata?: Record<string, unknown> | null;
 };
 
 export const WORKBENCH_SEND_LOG_SELECT =
-  "id, email_id, status, send_type, subject, content, from_email, to_email, message_id, error_message, created_at, sent_by, send_no, smtp_response";
+  "id, email_id, status, send_type, subject, content, from_email, to_email, message_id, error_message, created_at, sent_by, send_no, smtp_response, metadata";
 
 const SEND_TYPE_LABEL: Record<string, string> = {
   manual: "手工回复",

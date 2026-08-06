@@ -11,17 +11,11 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { RefreshCw, Search, Eye, CheckCircle2, XCircle, Download, Paperclip, FileWarning } from "lucide-react";
+import { RefreshCw, Search, Eye, CheckCircle2, XCircle, Download } from "lucide-react";
 import { cstDayEndIso, cstDayStartIso, formatDateTimeCST } from "@/lib/format-datetime";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
-import {
-  isOutboundImageAttachment,
-  parseSendLogOutboundAttachments,
-  signSendLogOutboundAttachmentUrls,
-  type SendLogOutboundAttachment,
-  type SignedOutboundAttachmentUrls,
-} from "@/lib/outbound-attachments";
+import { SendLogDetailAttachments } from "@/components/SendLogDetailAttachments";
 
 type Log = {
   id: string;
@@ -249,42 +243,9 @@ export default function SendLogs() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [detail, setDetail] = useState<Log | null>(null);
-  const [detailAttachments, setDetailAttachments] = useState<SendLogOutboundAttachment[]>([]);
-  const [detailAttachmentUrls, setDetailAttachmentUrls] = useState<
-    Array<SignedOutboundAttachmentUrls | null>
-  >([]);
-  const [detailAttachmentsLoading, setDetailAttachmentsLoading] = useState(false);
   const [fromOptions, setFromOptions] = useState<string[]>([]);
   const [stats, setStats] = useState({ total: 0, sent: 0, failed: 0 });
   const [exporting, setExporting] = useState(false);
-
-  useEffect(() => {
-    if (!detail) {
-      setDetailAttachments([]);
-      setDetailAttachmentUrls([]);
-      setDetailAttachmentsLoading(false);
-      return;
-    }
-    const atts = parseSendLogOutboundAttachments(detail.metadata);
-    setDetailAttachments(atts);
-    setDetailAttachmentUrls(atts.map(() => null));
-    if (!atts.length) {
-      setDetailAttachmentsLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setDetailAttachmentsLoading(true);
-    void (async () => {
-      const signed = await Promise.all(atts.map((a) => signSendLogOutboundAttachmentUrls(a)));
-      if (!cancelled) {
-        setDetailAttachmentUrls(signed);
-        setDetailAttachmentsLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [detail?.id, detail?.metadata]);
 
   useEffect(() => {
     const t = setTimeout(() => setSearchDebounced(search.trim()), 400);
@@ -572,7 +533,7 @@ export default function SendLogs() {
       </Card>
 
       <Dialog open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>发送详情</DialogTitle>
           </DialogHeader>
@@ -616,61 +577,7 @@ export default function SendLogs() {
                   </ScrollArea>
                 </div>
               )}
-              {detailAttachments.length > 0 && (
-                <div>
-                  <div className="text-muted-foreground mb-1 flex items-center gap-1">
-                    <Paperclip className="h-3.5 w-3.5" />
-                    发出附件（{detailAttachments.length}）
-                  </div>
-                  {detailAttachmentsLoading && (
-                    <div className="text-xs text-muted-foreground mb-2">正在加载附件链接…</div>
-                  )}
-                  <div className="space-y-2">
-                    {detailAttachments.map((att, i) => {
-                      const urls = detailAttachmentUrls[i];
-                      const isImage = isOutboundImageAttachment(att);
-                      return (
-                        <div
-                          key={`${att.storage_path}-${i}`}
-                          className="rounded border border-border/60 bg-muted/30 p-2 text-xs space-y-2"
-                        >
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0">
-                              <div className="font-medium truncate" title={att.filename}>
-                                {att.filename}
-                              </div>
-                              <div className="text-muted-foreground truncate">{att.content_type}</div>
-                            </div>
-                            {urls?.downloadUrl ? (
-                              <Button size="sm" variant="outline" className="h-7 shrink-0" asChild>
-                                <a href={urls.downloadUrl} target="_blank" rel="noreferrer">
-                                  <Download className="h-3.5 w-3.5 mr-1" />
-                                  下载
-                                </a>
-                              </Button>
-                            ) : null}
-                          </div>
-                          {isImage && urls?.previewUrl ? (
-                            <a href={urls.previewUrl} target="_blank" rel="noreferrer" className="block">
-                              <img
-                                src={urls.previewUrl}
-                                alt={att.filename}
-                                className="max-h-48 max-w-full rounded border border-border/50 object-contain bg-background"
-                              />
-                            </a>
-                          ) : null}
-                          {urls?.error ? (
-                            <div className="flex items-center gap-1 text-muted-foreground">
-                              <FileWarning className="h-3.5 w-3.5 shrink-0" />
-                              <span>无法预览：文件已清理或无权访问</span>
-                            </div>
-                          ) : null}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
+              <SendLogDetailAttachments metadata={detail.metadata} />
               {detail.error_message && (
                 <div>
                   <div className="text-destructive mb-1">错误信息</div>

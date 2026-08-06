@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.10.1] - 2026-08-06
+
+### Fixes
+
+- **工作台发送详情**：同发件人往来「发送详情」展示出站附件预览/下载（查询补齐 `metadata`）。
+- **发送详情弹窗**：工作台与发送日志详情过高时可整体滚动（`max-h-[85vh]`）。
+
+### Frontend
+
+- 抽取共享组件 `SendLogDetailAttachments`；`SendLogs` / `EmailPairHistoryList` 共用。
+
+### Database / Functions
+
+- 无新增 migration；发版清单保留出站归档 RLS（跨版本累计，已执行则跳过）并同步 Functions。
+
 ## [1.10.0] - 2026-08-05
 
 ### Features
